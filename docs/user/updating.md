@@ -4,7 +4,7 @@
 
 The current build uses ad-hoc signing and **manual updates**. It does not download or install updates automatically, and **Check for Updates** may say that updates are unavailable. That does not mean a newer Meerkat build does not exist.
 
-Ask your prototype distributor for the next **Meerkat T3** build, its version, and checksum. Original T3 downloads, Homebrew packages, `t3 update`, and `npx t3` update a different product. They are not an update path for this app.
+Check [Meerkat T3 Releases](https://github.com/lukacf/meerkat-t3/releases) for a newer published Apple Silicon preview. Use the DMG or ZIP and SHA-256 checksum for the exact file and version you choose. You may need repository access to see a private preview. Original T3 downloads, Homebrew packages, `t3 update`, and `npx t3` update a different product. They are not an update path for this app.
 
 ## Replace the app safely
 

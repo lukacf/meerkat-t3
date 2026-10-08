@@ -8,8 +8,8 @@ You need a provider API account with a valid key and access to the model you sel
 
 ## Get and open the app
 
-1. Obtain the Meerkat T3 DMG or ZIP, its version, and its SHA-256 checksum from your prototype distributor. There is no public download page or configured update feed yet.
-2. Compare the downloaded file's checksum with the distributor's value. In Terminal, type `shasum -a 256 `, drag the DMG or ZIP into the window, and press Return. If the values differ, request a fresh download.
+1. Open [Meerkat T3 Releases](https://github.com/lukacf/meerkat-t3/releases) and choose a published Apple Silicon preview. Download its DMG or ZIP and the SHA-256 checksum for that exact file and version. You may need repository access to see a private preview.
+2. Compare the downloaded file's checksum with the value published for that release. In Terminal, type `shasum -a 256 `, drag the DMG or ZIP into the window, and press Return. If the values differ, request a fresh download.
 3. For a DMG, open it and copy the supplied Meerkat T3 app to Applications, then eject the disk image. For a ZIP, expand it and move the app to Applications. Keep the supplied app name and open that copy, not the one in the disk image or Downloads.
 4. Open it from Applications. This build uses ad-hoc signing, without Developer ID signing or Apple notarization. If macOS reports an unidentified developer or says Apple cannot check the app, follow the steps below.
 5. Check the version in **About Meerkat T3**, then follow [Your first task](getting-started.md). The in-app guide is available from the sidebar's **Help** button before connecting a model account.
