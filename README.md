@@ -4,9 +4,9 @@ Meerkat T3 is a desktop workspace for coding with Meerkat and MobKit. Start with
 
 ## Current availability
 
-This is a **Meerkat T3 preview for Apple Silicon Macs**. The Meerkat runtime is included. You do not need to install Meerkat, MobKit, Rust, or another coding-agent CLI to use the packaged app.
+This is an **invite-only private preview for Apple Silicon Macs**. The Meerkat runtime is included. You do not need to install Meerkat, MobKit, Rust, or another coding-agent CLI to use the packaged app.
 
-The canonical source is [lukacf/meerkat-t3](https://github.com/lukacf/meerkat-t3). Preview downloads, their version/checksums, and the external installation guide appear on this repository's [Releases](https://github.com/lukacf/meerkat-t3/releases) page when a release is published. Repository access may be required while the preview is private. Updates are manual; no automatic update feed is configured. This build uses ad-hoc signing without Developer ID signing or notarization. Follow the [installation instructions](docs/user/install.md), including the per-app macOS approval steps if prompted.
+The canonical source is the private [lukacf/meerkat-t3 repository](https://github.com/lukacf/meerkat-t3). Source and preview downloads are available only to invited collaborators. Sign in with an account granted repository access, then use its [Releases](https://github.com/lukacf/meerkat-t3/releases) page for previews, exact versions/checksums, and installation instructions shared by the maintainer. No public distribution is available. Updates are manual; no automatic update feed is configured. This build uses ad-hoc signing without Developer ID signing or notarization. Follow the [installation instructions](docs/user/install.md), including the per-app macOS approval steps if prompted.
 
 The original T3 website, package-manager packages, hosted web app, and mobile apps are separate products. They do not install this Meerkat prototype. Other operating systems and remote/mobile use are not part of the supported pilot.
 
