@@ -8,6 +8,8 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   getOnboardingProviderState,
+  getMeerkatOnboardingPresentation,
+  selectOnboardingProviderSetup,
   resolveOnboardingProviderInstallCommand,
   resolveOnboardingProviderLoginCommand,
   selectOnboardingProvidersByDriver,
@@ -79,6 +81,78 @@ describe("getOnboardingProviderState", () => {
 
   it("waits for a provider snapshot before offering an action", () => {
     expect(getOnboardingProviderState(undefined)).toBe("checking");
+  });
+  it("does not allow Continue from an unavailable provider with a stale ready status", () => {
+    expect(getOnboardingProviderState({ ...readyCodex, availability: "unavailable" })).toBe(
+      "attention",
+    );
+  });
+});
+
+describe("Meerkat onboarding", () => {
+  const meerkat: ServerProvider = {
+    ...readyCodex,
+    driver: ProviderDriverKind.make("meerkat"),
+    instanceId: ProviderInstanceId.make("meerkat"),
+  };
+
+  it("describes detected credentials without claiming that the model accepted them", () => {
+    const detected = getMeerkatOnboardingPresentation({
+      ...meerkat,
+      auth: { status: "authenticated" },
+    });
+    expect(detected.ready).toBe(true);
+    expect(detected.label).toBe("Credentials detected");
+    expect(detected.detail).toContain("first task will confirm model access");
+    expect(getMeerkatOnboardingPresentation(meerkat).label).toBe("Runtime ready");
+  });
+
+  it("shows an unauthenticated native instance instead of disabled donor setup", () => {
+    const signedOut: ServerProvider = {
+      ...meerkat,
+      status: "warning",
+      auth: { status: "unauthenticated" },
+      displayName: "Work Meerkat",
+    };
+    expect(selectOnboardingProviderSetup([signedOut, { ...readyCodex, enabled: false }])).toEqual({
+      meerkatProviders: [signedOut],
+      showCliProviders: false,
+    });
+    const presentation = getMeerkatOnboardingPresentation(signedOut);
+    expect(presentation.ready).toBe(false);
+    expect(presentation.label).toBe("Needs credentials");
+    expect(presentation.detail).toContain("Add an API key");
+  });
+
+  it.each([
+    ["missing runtime", { ...meerkat, installed: false }],
+    ["unavailable runtime", { ...meerkat, availability: "unavailable" as const }],
+    ["failed runtime", { ...meerkat, status: "error" as const }],
+  ])("keeps %s visible without claiming readiness", (_, provider) => {
+    expect(selectOnboardingProviderSetup([provider]).meerkatProviders).toEqual([provider]);
+    expect(getMeerkatOnboardingPresentation(provider).ready).toBe(false);
+  });
+
+  it("shows each enabled native instance alongside enabled donor setup", () => {
+    const second = { ...meerkat, instanceId: ProviderInstanceId.make("meerkat_work") };
+    expect(selectOnboardingProviderSetup([meerkat, second, readyCodex])).toEqual({
+      meerkatProviders: [meerkat, second],
+      showCliProviders: true,
+    });
+    expect(getMeerkatOnboardingPresentation(meerkat).ready).toBe(true);
+  });
+
+  it.each([
+    ["missing snapshots", undefined],
+    ["empty configuration", []],
+    ["disabled Meerkat", [{ ...meerkat, enabled: false }]],
+    ["disabled status", [{ ...meerkat, status: "disabled" as const }]],
+    ["another provider", [readyCodex]],
+  ])("retains donor setup for %s", (_, providers) => {
+    expect(selectOnboardingProviderSetup(providers)).toEqual({
+      meerkatProviders: [],
+      showCliProviders: true,
+    });
   });
 });
 

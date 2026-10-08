@@ -1,4 +1,4 @@
-import { ProviderDriverKind } from "@t3tools/contracts";
+import { ProviderDriverKind, type ServerProviderModel } from "@t3tools/contracts";
 import {
   AntigravityIcon,
   ClaudeAI,
@@ -19,6 +19,7 @@ export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>
 };
 
 export type ModelEsque = {
+  credentialState?: ServerProviderModel["credentialState"];
   slug: string;
   name: string;
   shortName?: string | undefined;

@@ -13,9 +13,11 @@ import {
 import { createModelSelection } from "@t3tools/shared/model";
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as ConfigProvider from "effect/ConfigProvider";
 import * as Duration from "effect/Duration";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
@@ -78,6 +80,80 @@ const recordProviderUsage = (provider: string, instanceId: string | null = provi
   });
 
 it.layer(NodeServices.layer)("server settings", (it) => {
+  it.effect("initializes packaged Meerkat only for a missing profile", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const settings = yield* service.getSettings;
+      assert.deepInclude(settings.providerInstances[ProviderInstanceId.make("meerkat")], {
+        driver: ProviderDriverKind.make("meerkat"),
+        enabled: true,
+      });
+      assert.equal(
+        (
+          settings.providerInstances[ProviderInstanceId.make("meerkat")]?.config as {
+            gatewayBinaryPath: string;
+          }
+        ).gatewayBinaryPath,
+        "meerkat-desktop-stdio",
+      );
+      assert.isFalse(settings.providerInstances[ProviderInstanceId.make("codex")]?.enabled);
+      const saved = yield* Schema.decodeEffect(Schema.fromJsonString(ServerSettings))(
+        yield* fs.readFileString(config.settingsPath),
+      );
+      assert.equal(saved.providerInstances[ProviderInstanceId.make("meerkat")]?.driver, "meerkat");
+    }).pipe(
+      Effect.provide(
+        makeServerSettingsLayer().pipe(
+          Layer.provideMerge(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({ env: { MEERKAT_RUNTIME_DIR: "/isolated/bundle" } }),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("packaged startup preserves existing provider configuration and recorded history", () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const content = yield* Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))({
+        providerInstances: {
+          meerkat: {
+            driver: "meerkat",
+            enabled: false,
+            config: { gatewayBinaryPath: "/custom/gateway", stateRoot: "/existing/native" },
+          },
+        },
+      });
+      yield* fs.writeFileString(config.settingsPath, content);
+      yield* recordProviderUsage("meerkat");
+      const settings = yield* service.getSettings;
+      assert.isFalse(settings.providerInstances[ProviderInstanceId.make("meerkat")]?.enabled);
+      assert.deepEqual(settings.providerInstances[ProviderInstanceId.make("meerkat")]?.config, {
+        gatewayBinaryPath: "/custom/gateway",
+        stateRoot: "/existing/native",
+      });
+      const sql = yield* SqlClient.SqlClient;
+      const records = yield* sql`SELECT thread_id FROM projection_thread_sessions`;
+      assert.equal(records.length, 1);
+    }).pipe(
+      Effect.provide(
+        makeServerSettingsLayer().pipe(
+          Layer.provideMerge(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({ env: { MEERKAT_RUNTIME_DIR: "/isolated/bundle" } }),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
   it.effect("preserves context when reading a provider environment secret fails", () => {
     const platformCause = PlatformError.systemError({
       _tag: "PermissionDenied",
@@ -739,6 +815,52 @@ it.layer(NodeServices.layer)("server settings", (it) => {
       assert.isFalse(settings.providers.opencode.enabled);
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
+
+  for (const { name, invalidField, expectedDiagnostic } of [
+    { name: "malformed JSON", invalidField: '"broken":', expectedDiagnostic: "Invalid value" },
+    {
+      name: "invalid settings schema",
+      invalidField: '"addProjectBaseDirectory":42',
+      expectedDiagnostic: "addProjectBaseDirectory",
+    },
+  ]) {
+    it.effect(`does not log inline credentials when loading ${name}`, () => {
+      const syntheticKey = "sk-test-settings-redaction-only";
+      const contents = `{"providerInstances":{"meerkat":{"driver":"meerkat","config":{},"environment":[{"name":"ANTHROPIC_API_KEY","value":"${syntheticKey}","sensitive":true}]}},${invalidField}}`;
+      const logs: string[] = [];
+      const logger = Logger.map(Logger.formatJson, (line) => {
+        logs.push(line);
+      });
+
+      return Effect.gen(function* () {
+        const serverConfig = yield* ServerConfig.ServerConfig;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+        yield* fileSystem.writeFileString(serverConfig.settingsPath, contents);
+        yield* recordProviderUsage("cursor");
+
+        const settings = yield* serverSettings.getSettings;
+
+        const warnings = logs.filter((line) =>
+          line.includes("failed to parse settings.json, using defaults"),
+        );
+        assert.lengthOf(warnings, 1);
+        const warning = warnings.join("\n");
+        assert.include(warning, expectedDiagnostic);
+        assert.notInclude(warning, '"cause":');
+        assert.notInclude(logs.join("\n"), syntheticKey);
+        assert.isTrue(settings.providers.cursor.enabled);
+        assert.equal(yield* fileSystem.readFileString(serverConfig.settingsPath), contents);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            makeServerSettingsLayer(),
+            Logger.layer([logger], { mergeWithExisting: false }),
+          ),
+        ),
+      );
+    });
+  }
 
   it.effect("restores providers from persisted runtime sessions", () =>
     Effect.gen(function* () {

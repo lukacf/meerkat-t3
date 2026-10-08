@@ -35,7 +35,7 @@ const invalidLinkMessage = {
   eyebrow: "Authorization request",
   title: "This connect link is incomplete",
   description:
-    "The link is missing its authorization request. Re-run `t3 connect` in your terminal and open the freshly printed URL.",
+    "The link is missing its authorization request. Get a fresh connection link from your compatible server's settings or its operator, then open that link. Remote installation is not included in the Meerkat pilot.",
 } as const;
 
 /**

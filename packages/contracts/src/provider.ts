@@ -16,6 +16,7 @@ import {
   ProviderApprovalDecision,
   ProviderApprovalPolicy,
   ProviderInteractionMode,
+  ProviderTurnHandlingMode,
   ProviderRequestKind,
   ProviderSandboxMode,
   ProviderUserInputAnswers,
@@ -74,6 +75,9 @@ export const ProviderSendTurnInput = Schema.Struct({
   input: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(PROVIDER_SEND_TURN_MAX_INPUT_CHARS)),
   ),
+  /** Original operator text before context projection. Native skill selection
+      must not interpret links inside attached terminal or review payloads. */
+  skillSelectionText: Schema.optional(Schema.String),
   attachments: Schema.optional(
     Schema.Array(ChatAttachment).check(
       Schema.makeFilter((attachments) => getProviderAttachmentLimitError(attachments) ?? true),
@@ -81,6 +85,8 @@ export const ProviderSendTurnInput = Schema.Struct({
   ),
   modelSelection: Schema.optional(ModelSelection),
   interactionMode: Schema.optional(ProviderInteractionMode),
+  handlingMode: Schema.optional(ProviderTurnHandlingMode),
+  steeringTurnId: Schema.optional(TurnId),
 });
 export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 

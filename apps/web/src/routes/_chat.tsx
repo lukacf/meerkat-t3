@@ -1,18 +1,26 @@
-import { Outlet, createFileRoute, redirect, useParams } from "@tanstack/react-router";
+import { ConversationWorkspace } from "../components/team/ConversationWorkspace";
+import { AgentWorkspaceHandoffBanner } from "../components/team/AgentWorkspaceHandoffBanner";
+import { useComposerDraftStore } from "../composerDraftStore";
+import { Outlet, createFileRoute, redirect, useParams, useLocation } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import { useEffect, useMemo } from "react";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
+import { EnvironmentId, ProjectId } from "@t3tools/contracts";
 
 import { isCommandPaletteOpen } from "../commandPaletteBus";
 import { ThreadRouteView } from "../components/ThreadRouteView";
 import { resolveThreadRouteTarget } from "../threadRoutes";
 import { useClientSettings, useLegacySidebarEnabled } from "../hooks/useSettings";
 import { openCommandPalette } from "../commandPaletteBus";
-import { useProjects } from "../state/entities";
+import { useProjects, useThreadShell } from "../state/entities";
 import { usePrimaryEnvironmentId } from "../state/environments";
 import { selectProjectGroupingSettings } from "../logicalProject";
 import { buildSidebarProjectSnapshots } from "../sidebarProjectGrouping";
 import { dispatchPreviewAction } from "../components/preview/previewActionBus";
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
+import { useProjectHomeDraft } from "../hooks/useProjectHomeDraft";
+import { SidebarInset } from "../components/ui/sidebar";
+import { Button } from "../components/ui/button";
 import { startNewThreadFromContext } from "../lib/chatThreadActions";
 import { isPreviewFocused } from "../lib/previewFocus";
 import { isTerminalFocused } from "../lib/terminalFocus";
@@ -191,16 +199,86 @@ function ChatRouteGlobalShortcuts() {
 }
 
 function ChatRouteLayout() {
+  const selectedMember = useLocation({
+    select: (location) => new URLSearchParams(location.searchStr).get("member"),
+  });
   // Both thread routes render here, not in their own leaf components, so the
   // draft-to-thread promotion keeps one ChatView mounted across the swap.
   const threadTarget = useParams({
     strict: false,
     select: (params) => resolveThreadRouteTarget(params),
   });
+  const homeProject = useParams({
+    strict: false,
+    select: (params) =>
+      params.environmentId && params.projectId
+        ? scopeProjectRef(
+            EnvironmentId.make(params.environmentId),
+            ProjectId.make(params.projectId),
+          )
+        : null,
+  });
+  const home = useProjectHomeDraft(homeProject);
+  const threadShell = useThreadShell(
+    threadTarget?.kind === "server" ? threadTarget.threadRef : null,
+  );
+  const draft = useComposerDraftStore((state) =>
+    home.draftId
+      ? state.getDraftSession(home.draftId)
+      : threadTarget?.kind === "draft"
+        ? state.getDraftSession(threadTarget.draftId)
+        : null,
+  );
+  const workspaceEnvironment =
+    threadShell?.environmentId ?? draft?.environmentId ?? homeProject?.environmentId;
+  const workspaceProject = threadShell?.projectId ?? draft?.projectId ?? homeProject?.projectId;
+  const target =
+    threadTarget ?? (home.draftId ? { kind: "draft" as const, draftId: home.draftId } : null);
   return (
     <>
       <ChatRouteGlobalShortcuts />
-      {threadTarget ? <ThreadRouteView target={threadTarget} /> : <Outlet />}
+      {target ? (
+        workspaceEnvironment && workspaceProject ? (
+          <ConversationWorkspace
+            environmentId={workspaceEnvironment}
+            projectId={workspaceProject}
+            primaryLabel={threadShell?.title ?? "New thread"}
+            primaryTarget={
+              threadShell
+                ? {
+                    kind: "thread",
+                    environmentId: workspaceEnvironment,
+                    projectId: workspaceProject,
+                    threadId: threadShell.id,
+                    ...(selectedMember ? { member: selectedMember } : {}),
+                    label: threadShell.title,
+                  }
+                : undefined
+            }
+          >
+            {(threadShell?.id ?? draft?.threadId) ? (
+              <AgentWorkspaceHandoffBanner
+                key={`${workspaceEnvironment}:${threadShell?.id ?? draft?.threadId}`}
+                environmentId={workspaceEnvironment}
+                threadId={(threadShell?.id ?? draft?.threadId)!}
+                persisted={Boolean(threadShell)}
+              />
+            ) : null}
+            <ThreadRouteView target={target} projectHome={homeProject !== null} embedded />
+          </ConversationWorkspace>
+        ) : (
+          <ThreadRouteView target={target} projectHome={homeProject !== null} />
+        )
+      ) : homeProject ? (
+        <SidebarInset>
+          <div className="space-y-4 p-8">
+            <p role={home.error ? "alert" : "status"}>{home.error ?? "Opening project..."}</p>
+            {home.error ? <Button onClick={home.retry}>Retry</Button> : null}
+          </div>
+        </SidebarInset>
+      ) : (
+        <Outlet />
+      )}
     </>
   );
 }

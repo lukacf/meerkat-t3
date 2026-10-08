@@ -1,9 +1,11 @@
 import { useAuth } from "@clerk/react";
+import { Link } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import type {
   AgentSessionProjectCandidate,
   EnvironmentId,
   ProjectId,
+  ProviderInstanceId,
   ScopedProjectRef,
   ServerConfig,
   ServerProvider,
@@ -20,7 +22,6 @@ import {
   CheckIcon,
   ChevronRightIcon,
   CloudIcon,
-  CopyIcon,
   LinkIcon,
   MonitorIcon,
   TerminalIcon,
@@ -31,7 +32,10 @@ import { TYPOGRAPHY_ADVANCED_STORAGE_KEY } from "../../appearanceFonts";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { hasCloudPublicConfig } from "../../cloud/publicConfig";
 import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
-import { useCompleteOnboarding } from "../../onboarding/firstRun";
+import { saveOnboardingProgress, useCompleteOnboarding } from "../../onboarding/firstRun";
+import { useClientSettings } from "../../hooks/useSettings";
+import { OnboardingCredentials } from "./OnboardingCredentials";
+import { OnboardingProjectStep } from "./OnboardingProjectStep";
 import {
   groupOnboardingProjects,
   partitionOnboardingProjects,
@@ -42,11 +46,12 @@ import {
 } from "../../onboarding/projectImport.logic";
 import {
   getOnboardingProviderState,
+  getMeerkatOnboardingPresentation,
+  selectOnboardingProviderSetup,
   resolveOnboardingProviderInstallCommand,
   resolveOnboardingProviderLoginCommand,
   selectOnboardingProvidersByDriver,
 } from "../../onboarding/providerReadiness.logic";
-import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { newProjectId, randomUUID } from "../../lib/utils";
 import { agentSessionImport } from "../../state/agentSessions";
 import { readProjects, useProjects } from "../../state/entities";
@@ -63,7 +68,7 @@ import { getDriverOption } from "../settings/providerDriverMeta";
 import { TerminalViewport } from "../ThreadTerminalDrawer";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
 import { ClaudeAI, OpenAI } from "../Icons";
-import { T3Wordmark } from "../T3Wordmark";
+import { APP_DISPLAY_NAME } from "../../branding";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
@@ -79,37 +84,42 @@ import { formatRelativeTime } from "../../timestampFormat";
 
 /**
  * First-run welcome wizard. Rendered over the workspace at `/welcome` on a
- * fresh install (no completed-onboarding flag, empty workspace). Flow per the
- * onboarding overhaul spec: connection choice → sign-in/pair (remote paths) →
- * agent setup with inline install terminal → project import → main screen.
- * Every step past the connection gate is skippable; the whole wizard is
- * re-runnable by clearing the flag.
+ * fresh install (no completed-onboarding flag, empty workspace). Flow:
+ * connection, model access, project choice and a first task. Only a successful
+ * reply or an explicit skip completes the persisted setup journey.
  */
 
-type WizardStep = "connection" | "agents" | "import";
+type WizardStep = "connection" | "agents" | "projects" | "import";
 const NO_ENVIRONMENTS: readonly EnvironmentId[] = [];
+const NO_PROVIDERS: readonly ServerProvider[] = [];
 
 const AGENT_ONBOARDING_THREAD_ID = ThreadId.make("onboarding-agent-setup");
-const ONBOARDING_STAGES = ["Connect", "Agents", "Projects"] as const;
+const ONBOARDING_STAGES = ["Connect", "Model access", "Project", "First task"] as const;
 const SCAN_LIMIT_MESSAGE = "Scan limit reached. Some projects or conversations may be missing.";
-
 export function WelcomeWizard({
   localAvailable,
   onDone,
 }: {
-  /** Whether this client is authenticated to the server serving the app. */
   readonly localAvailable: boolean;
-  readonly onDone: (projectRef?: ScopedProjectRef) => void;
+  readonly onDone: (projectRef?: ScopedProjectRef) => Promise<void>;
 }) {
   const completeOnboarding = useCompleteOnboarding();
-  const [step, setStep] = useState<WizardStep>("connection");
+  const progress = useClientSettings((settings) => settings.onboardingProgress);
+  const [step, setStep] = useState<WizardStep>(() =>
+    progress?.step === "first-task" ? "projects" : (progress?.step ?? "connection"),
+  );
   const { environments } = useEnvironments();
-  const [selection, setSelection] = useState<ReadonlySet<EnvironmentId> | null>(null);
-  const autoSelectedComputers = useRef(new Set<EnvironmentId>());
-  const [setupIds, setSetupIds] = useState<readonly EnvironmentId[]>([]);
+  const [selection, setSelection] = useState<ReadonlySet<EnvironmentId> | null>(() =>
+    progress ? new Set(progress.environmentIds) : null,
+  );
+  const autoSelectedComputers = useRef(new Set<EnvironmentId>(progress?.environmentIds ?? []));
+  const [setupIds, setSetupIds] = useState<readonly EnvironmentId[]>(
+    progress?.environmentIds ?? [],
+  );
+  const [projectPending, setProjectPending] = useState(false);
   const [isImporting, setIsImporting] = useState(false);
+  const [isFinishing, setIsFinishing] = useState(false);
   const finishingPromiseRef = useRef<Promise<boolean> | null>(null);
-  const completionErrorToastIdRef = useRef<ReturnType<typeof toastManager.add> | null>(null);
   const primaryEnvironment = usePrimaryEnvironment();
   useEffect(() => {
     const newComputers = environments.filter(
@@ -134,51 +144,101 @@ export function WelcomeWizard({
     step === "import" &&
     scans.every((scan) => scan.data === null) &&
     scans.some((scan) => scan.isPending);
-  const startSetup = (ids: readonly EnvironmentId[]) => {
+  const persistStep = useCallback(
+    async (next: WizardStep, ids: readonly EnvironmentId[] = setupIds) => {
+      try {
+        const projectRef =
+          progress?.projectRef && ids.includes(progress.projectRef.environmentId)
+            ? progress.projectRef
+            : null;
+        await saveOnboardingProgress({
+          step: next === "import" ? "projects" : next,
+          environmentIds: ids,
+          startedAt: progress?.startedAt ?? new Date().toISOString(),
+          projectRef,
+          threadId: projectRef ? (progress?.threadId ?? null) : null,
+        });
+        setStep(next);
+        return true;
+      } catch {
+        toastManager.add({
+          type: "error",
+          title: "Could not save setup progress",
+          description: "Try again before continuing.",
+        });
+        return false;
+      }
+    },
+    [progress, setupIds],
+  );
+  const startSetup = async (ids: readonly EnvironmentId[]) => {
     if (ids.length === 0) return;
-    setSetupIds(ids);
-    setStep("agents");
+    if (await persistStep("agents", ids)) setSetupIds(ids);
   };
-  const stageIndex = step === "agents" ? 1 : step === "import" ? 2 : 0;
+  const stageIndex = step === "agents" ? 1 : step === "import" || step === "projects" ? 2 : 0;
+  const reviewProject = useCallback(
+    async (projectRef: ScopedProjectRef) => {
+      try {
+        const sameProject =
+          progress?.projectRef?.environmentId === projectRef.environmentId &&
+          progress.projectRef.projectId === projectRef.projectId;
+        await saveOnboardingProgress({
+          step: "projects",
+          environmentIds: setupIds,
+          startedAt: sameProject ? progress.startedAt : new Date().toISOString(),
+          projectRef,
+          threadId: sameProject ? progress.threadId : null,
+        });
+        return true;
+      } catch {
+        toastManager.add({
+          type: "error",
+          title: "Could not save project selection",
+          description: "Try again before continuing.",
+        });
+        return false;
+      }
+    },
+    [progress, setupIds],
+  );
   const finish = useCallback(
     (projectRef?: ScopedProjectRef) => {
       if (finishingPromiseRef.current !== null) return finishingPromiseRef.current;
-      if (completionErrorToastIdRef.current !== null) {
-        toastManager.close(completionErrorToastIdRef.current);
-        completionErrorToastIdRef.current = null;
-      }
-
-      const completion = completeOnboarding()
-        .then(() => {
-          if (completionErrorToastIdRef.current !== null) {
-            toastManager.close(completionErrorToastIdRef.current);
-            completionErrorToastIdRef.current = null;
-          }
-          onDone(projectRef);
-          return true;
-        })
+      setIsFinishing(true);
+      const completion = (async () => {
+        if (projectRef) {
+          const sameProject =
+            progress?.projectRef?.environmentId === projectRef.environmentId &&
+            progress.projectRef.projectId === projectRef.projectId;
+          await saveOnboardingProgress({
+            step: "first-task",
+            environmentIds: setupIds,
+            startedAt: sameProject ? progress.startedAt : new Date().toISOString(),
+            projectRef,
+            threadId: sameProject ? progress.threadId : null,
+          });
+        } else {
+          await completeOnboarding();
+        }
+        await onDone(projectRef);
+        return true;
+      })()
         .catch(() => {
-          const errorToast = {
+          toastManager.add({
             type: "error",
-            title: "Could not finish setup",
-            description: "Your settings could not be saved. Try again.",
-          } as const;
-          if (completionErrorToastIdRef.current === null) {
-            completionErrorToastIdRef.current = toastManager.add(errorToast);
-          } else {
-            toastManager.update(completionErrorToastIdRef.current, errorToast);
-          }
+            title: "Could not continue setup",
+            description: "Your progress is saved when possible. Try again.",
+          });
           return false;
         })
         .finally(() => {
-          if (finishingPromiseRef.current === completion) {
-            finishingPromiseRef.current = null;
-          }
+          finishingPromiseRef.current = null;
+          setIsFinishing(false);
         });
       finishingPromiseRef.current = completion;
       return completion;
     },
-    [completeOnboarding, onDone],
+    [completeOnboarding, onDone, progress, setupIds],
   );
 
   return (
@@ -189,23 +249,22 @@ export function WelcomeWizard({
         initialFocus={() => document.getElementById("onboarding-pairing-url") ?? true}
       >
         <WizardHeader
-          title="Set up T3 Code"
+          title={`Set up ${APP_DISPLAY_NAME}`}
           identity={
-            <div className="flex items-baseline gap-1.5" role="img" aria-label="T3 Code">
-              <T3Wordmark className="h-4 w-auto shrink-0" aria-hidden />
-              <span className="text-2xl font-medium tracking-tight text-muted-foreground">
-                Code
-              </span>
-            </div>
+            <span className="text-2xl font-medium tracking-tight text-muted-foreground">
+              {APP_DISPLAY_NAME}
+            </span>
           }
         >
           <WizardSteps
             steps={ONBOARDING_STAGES}
             currentStep={stageIndex}
-            isStepDisabled={(index) => isImporting || index >= stageIndex}
+            isStepDisabled={(index) =>
+              isImporting || isFinishing || projectPending || index >= stageIndex
+            }
             onStepChange={(index) => {
-              if (isImporting || index > stageIndex) return;
-              setStep(index === 0 ? "connection" : "agents");
+              if (isImporting || isFinishing || projectPending || index > stageIndex) return;
+              void persistStep(index === 0 ? "connection" : index === 1 ? "agents" : "projects");
             }}
           />
         </WizardHeader>
@@ -237,15 +296,41 @@ export function WelcomeWizard({
               }}
             />
           ) : step === "agents" ? (
-            <AgentsStep environmentIds={setupIds} onContinue={() => setStep("import")} />
+            <AgentsStep
+              environmentIds={setupIds}
+              setupPending={isFinishing}
+              onContinue={() => void persistStep("projects")}
+            />
+          ) : step === "projects" ? (
+            <OnboardingProjectStep
+              environmentIds={setupIds}
+              onProject={finish}
+              onReviewProject={reviewProject}
+              initialProjectRef={progress?.projectRef ?? null}
+              onPendingChange={setProjectPending}
+              onImport={() => setStep("import")}
+            />
           ) : (
             <ImportStep
               scans={scans}
               isImporting={isImporting}
               setIsImporting={setIsImporting}
-              onDone={finish}
+              onDone={(projectRef) => (projectRef ? finish(projectRef) : persistStep("projects"))}
             />
           )}
+          <div className="mt-5 border-t border-border pt-3">
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={isImporting || isFinishing || projectPending}
+              onClick={() => void finish()}
+            >
+              Skip setup for now
+            </Button>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Search for "Set up Meerkat" to return here.
+            </p>
+          </div>
         </WizardPanel>
       </WizardPopup>
     </Dialog>
@@ -466,11 +551,12 @@ function ConnectAccountOption({
               ) : null}
             </div>
             <p className="text-sm text-muted-foreground">
-              Run this on each computer you want to connect.
+              This Meerkat pilot includes the runtime for your local Mac. Remote installation is not
+              included.
             </p>
-            <CommandBlock command="npx t3 connect" className="mt-3" />
             <p className="mt-3 text-xs text-muted-foreground">
-              Keep T3 Code running. Select the computers you want to set up above.
+              If you already have a compatible server, use its connection settings to link it. Keep
+              that server running, then select it above.
             </p>
           </div>
         </CollapsiblePanel>
@@ -584,12 +670,12 @@ function PairingForm({
           </div>
           <CollapsiblePanel>
             <p className="pt-3 text-sm text-muted-foreground">
-              Run this on the computer with your code.
+              Get a fresh pairing link from the connection settings of an existing compatible
+              server, or ask its operator for one.
             </p>
-            <CommandBlock command="npx t3 pair" className="mt-2" />
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
-              Start T3 Code first, or run <code className="font-mono">npx t3 serve</code>. Add{" "}
-              <code className="font-mono">--tailscale</code> to use your tailnet.
+              Remote installation is not included in the Meerkat pilot. For the supported local
+              setup, open Meerkat T3 on your Mac and choose this computer.
             </p>
           </CollapsiblePanel>
         </Collapsible>
@@ -623,19 +709,44 @@ interface AgentTerminalSession {
 function AgentsStep({
   environmentIds,
   onContinue,
+  setupPending,
 }: {
   readonly environmentIds: readonly EnvironmentId[];
   readonly onContinue: () => void;
+  readonly setupPending: boolean;
 }) {
   const { environments } = useEnvironments();
+  const [readyByEnvironment, setReadyByEnvironment] = useState<Readonly<Record<string, boolean>>>(
+    {},
+  );
+  const onReadinessChange = useCallback((environmentId: EnvironmentId, ready: boolean) => {
+    setReadyByEnvironment((current) =>
+      current[environmentId] === ready ? current : { ...current, [environmentId]: ready },
+    );
+  }, []);
+  const ready =
+    environmentIds.length > 0 &&
+    environmentIds.every(
+      (id) =>
+        readyByEnvironment[id] &&
+        environments.some(
+          (environment) =>
+            environment.environmentId === id && environment.connection.phase === "connected",
+        ),
+    );
   return (
-    <StepShell title="Your agents" description="Agents available on your selected computers.">
+    <StepShell
+      title="Connect a model"
+      description="Connect a provider before starting your first task. Existing credentials on these computers are detected automatically."
+    >
       <ScrollArea scrollFade className="mt-5 h-auto max-h-96">
         <div className="space-y-5 pr-3">
           {environmentIds.map((environmentId) => (
             <ConnectedAgentsStep
               key={environmentId}
               environmentId={environmentId}
+              onReadinessChange={onReadinessChange}
+              setupPending={setupPending}
               machineLabel={
                 environments.find((environment) => environment.environmentId === environmentId)
                   ?.label ?? "Computer"
@@ -644,8 +755,11 @@ function AgentsStep({
           ))}
         </div>
       </ScrollArea>
+      <p className="sr-only" role="status">
+        {ready ? "Provider setup is ready. Choose a project to try your first task." : null}
+      </p>
       <div className="mt-6 flex justify-end">
-        <Button autoFocus onClick={onContinue}>
+        <Button autoFocus onClick={onContinue} disabled={setupPending || !ready}>
           Continue
           <ArrowRightIcon className="size-3.5" />
         </Button>
@@ -657,26 +771,60 @@ function AgentsStep({
 function ConnectedAgentsStep({
   environmentId,
   machineLabel,
+  onReadinessChange,
+  setupPending,
 }: {
   readonly environmentId: EnvironmentId;
   readonly machineLabel: string;
+  readonly onReadinessChange: (environmentId: EnvironmentId, ready: boolean) => void;
+  readonly setupPending: boolean;
 }) {
-  const providers = useAtomValue(serverEnvironment.providersValueAtom(environmentId));
+  const providers =
+    useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? NO_PROVIDERS;
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
+  const [credentialTarget, setCredentialTarget] = useState<ProviderInstanceId | null>(null);
+  const [credentialPending, setCredentialPending] = useState(false);
+  const [credentialError, setCredentialError] = useState(false);
+  const [rechecking, setRechecking] = useState(false);
+  const [probeError, setProbeError] = useState<string | null>(null);
+  const ready =
+    !credentialPending &&
+    !credentialError &&
+    !rechecking &&
+    !probeError &&
+    providers.some((provider) => getOnboardingProviderState(provider) === "ready");
+  useEffect(() => {
+    onReadinessChange(environmentId, ready);
+  }, [environmentId, onReadinessChange, ready]);
   const [terminalSession, setTerminalSession] = useState<AgentTerminalSession | null>(null);
 
   // Re-probe on entry so freshly installed CLIs show up without a manual
   // refresh; harmless when nothing changed (single-flighted per environment).
-  useEffect(() => {
-    void refreshProviders({ environmentId, input: {} });
+  const recheck = useCallback(async () => {
+    setRechecking(true);
+    setProbeError(null);
+    try {
+      const result = await refreshProviders({ environmentId, input: {} });
+      if (result._tag === "Failure") throw squashAtomCommandFailure(result);
+    } catch (cause) {
+      setProbeError(
+        cause instanceof Error ? cause.message : "Could not check providers. Try again.",
+      );
+    } finally {
+      setRechecking(false);
+    }
   }, [environmentId, refreshProviders]);
+  useEffect(() => {
+    void recheck();
+  }, [recheck]);
 
   const byDriver = useMemo(() => selectOnboardingProvidersByDriver(providers), [providers]);
 
-  const primaryAgents = PRIMARY_AGENT_DRIVERS.map((driver) => ({
+  const { meerkatProviders, showCliProviders } = selectOnboardingProviderSetup(providers);
+  const primaryAgents = (showCliProviders ? PRIMARY_AGENT_DRIVERS : []).map((driver) => ({
     driver,
     provider: byDriver.get(driver),
   }));
@@ -684,6 +832,18 @@ function ConnectedAgentsStep({
     <section>
       <h2 className="mb-2 text-sm font-medium">{machineLabel}</h2>
       <div className="space-y-1.5">
+        {meerkatProviders.map((provider) => (
+          <MeerkatOnboardingCard
+            key={provider.instanceId}
+            provider={provider}
+            environmentId={environmentId}
+            setupPending={setupPending || credentialPending || rechecking}
+            rechecking={rechecking}
+            hasCredentialRetry={credentialTarget === provider.instanceId && credentialError}
+            onRecheck={() => void recheck()}
+            onConfigure={() => setCredentialTarget(provider.instanceId)}
+          />
+        ))}
         {primaryAgents.map(({ driver, provider }) => (
           <AgentCard
             key={driver}
@@ -714,17 +874,118 @@ function ConnectedAgentsStep({
           />
         ))}
       </div>
+      {probeError ? (
+        <div className="mt-2 space-y-2">
+          <p role="alert" className="text-xs text-destructive">
+            {probeError}
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void recheck()}
+            disabled={setupPending || credentialPending || rechecking}
+          >
+            Retry check
+          </Button>
+        </div>
+      ) : null}
+      {credentialTarget !== null ? (
+        <div className="mt-3">
+          <OnboardingCredentials
+            key={credentialTarget}
+            environmentId={environmentId}
+            instanceId={credentialTarget}
+            onPendingChange={setCredentialPending}
+            onErrorChange={setCredentialError}
+          />
+        </div>
+      ) : null}
       {terminalSession !== null ? (
         <AgentInstallTerminal
           key={`${terminalSession.environmentId}:${terminalSession.providerInstanceId}:${terminalSession.driver}`}
           session={terminalSession}
           onClose={() => {
             setTerminalSession(null);
-            void refreshProviders({ environmentId, input: {} });
+            void recheck();
           }}
         />
       ) : null}
     </section>
+  );
+}
+
+function MeerkatOnboardingCard({
+  provider,
+  environmentId,
+  onConfigure,
+  setupPending,
+  rechecking,
+  hasCredentialRetry,
+  onRecheck,
+}: {
+  readonly provider: ServerProvider;
+  readonly environmentId: EnvironmentId;
+  readonly onConfigure: () => void;
+  readonly setupPending: boolean;
+  readonly rechecking: boolean;
+  readonly hasCredentialRetry: boolean;
+  readonly onRecheck: () => void;
+}) {
+  const presentation = getMeerkatOnboardingPresentation(provider);
+  const Icon = getDriverOption(provider.driver)?.icon;
+  const needsRecovery =
+    !presentation.ready &&
+    (provider.availability === "unavailable" || getOnboardingProviderState(provider) !== "signIn");
+  return (
+    <div className="flex items-start gap-3 rounded-lg border border-border bg-background px-3 py-2.5">
+      {Icon ? <Icon className="mt-0.5 size-5 shrink-0" /> : null}
+      <div className="min-w-0 flex-1">
+        <span className="block text-sm font-medium text-foreground">
+          {provider.displayName?.trim() || "Meerkat"}
+        </span>
+        <p className="mt-0.5 text-xs leading-relaxed break-words text-muted-foreground">
+          {presentation.detail}
+        </p>
+        {(presentation.ready || getOnboardingProviderState(provider) === "signIn") &&
+        provider.availability !== "unavailable" ? (
+          <div className="mt-3">
+            <Button size="sm" onClick={onConfigure} disabled={setupPending}>
+              {setupPending
+                ? "Checking credentials..."
+                : presentation.ready
+                  ? "Manage credentials"
+                  : "Set up credentials"}
+              <ArrowRightIcon className="size-3.5" />
+            </Button>
+          </div>
+        ) : null}
+        {needsRecovery ? (
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            {!hasCredentialRetry ? (
+              <Button size="sm" variant="outline" onClick={onRecheck} disabled={setupPending}>
+                {rechecking ? "Checking..." : "Retry check"}
+              </Button>
+            ) : null}
+            <Link
+              to="/settings/providers"
+              search={{ environmentId, instanceId: provider.instanceId }}
+              className="text-xs text-primary underline underline-offset-2"
+            >
+              Open Providers
+            </Link>
+          </div>
+        ) : null}
+      </div>
+      <span
+        className={cn(
+          "inline-flex shrink-0 items-center gap-1.5 text-xs font-medium",
+          presentation.ready ? "text-success-foreground" : "text-muted-foreground",
+        )}
+      >
+        {presentation.ready ? <CheckIcon className="size-3.5" /> : null}
+        {presentation.label}
+      </span>
+    </div>
   );
 }
 
@@ -928,6 +1189,7 @@ function AgentInstallTerminal({
             providerInstanceId={providerInstanceId}
             advancedTypography={advancedTypography}
             onSessionExited={onClose}
+            onSessionClosed={onClose}
             focusRequestId={1}
             autoFocus
             visible
@@ -1511,42 +1773,5 @@ function StepShell({
       ) : null}
       {children}
     </>
-  );
-}
-
-function CommandBlock({
-  command,
-  className,
-  prominent = false,
-}: {
-  readonly command: string;
-  readonly className?: string;
-  readonly prominent?: boolean;
-}) {
-  const { copyToClipboard, isCopied } = useCopyToClipboard({
-    timeout: 1500,
-    target: "command",
-  });
-  return (
-    <div
-      className={cn(
-        "flex items-center justify-between gap-3 rounded-lg border border-border bg-muted/50 font-mono",
-        prominent ? "px-4 py-3.5 text-base" : "px-3 py-2.5 text-sm",
-        className,
-      )}
-    >
-      <span className="min-w-0 truncate">
-        <span className="mr-2 text-muted-foreground">$</span>
-        {command}
-      </span>
-      <Button
-        size="icon-xs"
-        variant="ghost"
-        aria-label="Copy command"
-        onClick={() => copyToClipboard(command, undefined)}
-      >
-        {isCopied ? <CheckIcon className="size-3.5" /> : <CopyIcon className="size-3.5" />}
-      </Button>
-    </div>
   );
 }

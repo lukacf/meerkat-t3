@@ -2,6 +2,7 @@ import type { ReactElement } from "react";
 import {
   DEFAULT_UNIFIED_SETTINGS,
   EnvironmentId,
+  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
@@ -11,17 +12,35 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { visitElements } from "../../test/reactElementTree";
 import { reactHookHarness as hooks } from "../../test/reactHookHarness";
+import type { resolveSettingsProviderReadiness } from "./settingsProviderReadiness";
+
+const scopeState = vi.hoisted(() => ({
+  context: null as {
+    scope: NonNullable<Parameters<typeof resolveSettingsProviderReadiness>[0]>;
+    target: Parameters<typeof resolveSettingsProviderReadiness>[1];
+    targets: NonNullable<Parameters<typeof resolveSettingsProviderReadiness>[1]>[];
+  } | null,
+}));
+vi.mock("./SettingsScopeContext", () => ({ useOptionalSettingsScope: () => scopeState.context }));
+vi.mock("./ProviderAccountContext", () => ({ useProviderAccountTarget: () => null }));
+vi.mock("@tanstack/react-router", () => ({ useNavigate: () => vi.fn() }));
+vi.mock("./SettingsWorkspaceReadiness", () => ({
+  useSettingsWorkspaceAccess: () =>
+    new Map(scopeState.context?.targets.map((target) => [target.environmentId, "granted"]) ?? []),
+}));
 
 const atoms = vi.hoisted(() => ({
   providers: null as ReadonlyArray<ServerProvider> | null,
   providersAtom: Symbol("providers"),
   refreshProviders: Symbol("refreshProviders"),
   updateProvider: Symbol("updateProvider"),
+  updateProviderSettings: Symbol("updateProviderSettings"),
 }));
 
 const commands = vi.hoisted(() => ({
   refresh: vi.fn(),
   updateProvider: vi.fn(),
+  updateProviderSettings: vi.fn(),
 }));
 
 const settingsState = vi.hoisted(() => ({
@@ -59,6 +78,7 @@ vi.mock("./settingsLayout", async (importOriginal) => {
 });
 
 vi.mock("./SettingsScopeSentence", () => ({ SettingsScopeSentence: () => null }));
+vi.mock("./MeerkatCredentialsEditor", () => ({ MeerkatCredentialsEditor: () => null }));
 vi.mock("react/compiler-runtime", async () => {
   const { reactHookHarness } = await import("../../test/reactHookHarness");
   return { c: reactHookHarness.useMemoCache };
@@ -74,12 +94,17 @@ vi.mock("../../state/server", () => ({
     providersValueAtom: () => atoms.providersAtom,
     refreshProviders: atoms.refreshProviders,
     updateProvider: atoms.updateProvider,
+    updateProviderSettings: atoms.updateProviderSettings,
   },
 }));
 
 vi.mock("../../state/use-atom-command", () => ({
-  useAtomCommand: (atom: symbol) =>
-    atom === atoms.refreshProviders ? commands.refresh : commands.updateProvider,
+  useAtomCommand: (atom: symbol) => {
+    if (atom === atoms.refreshProviders) return commands.refresh;
+    if (atom === atoms.updateProvider) return commands.updateProvider;
+    if (atom === atoms.updateProviderSettings) return commands.updateProviderSettings;
+    throw new Error("Unexpected provider command");
+  },
 }));
 
 vi.mock("../../hooks/useSettings", () => ({
@@ -172,6 +197,7 @@ async function flushPromises(): Promise<void> {
 describe("EnvironmentProviderSettings routing", () => {
   beforeEach(() => {
     hooks.reset();
+    scopeState.context = null;
     atoms.providers = null;
     settingsState.value = DEFAULT_UNIFIED_SETTINGS;
     settingsState.readEnvironmentIds = [];
@@ -182,11 +208,125 @@ describe("EnvironmentProviderSettings routing", () => {
     settingsSearchState.effects = [];
     commands.refresh.mockReset().mockResolvedValue({ _tag: "Success" });
     commands.updateProvider.mockReset().mockResolvedValue({ _tag: "Success" });
+    commands.updateProviderSettings.mockReset().mockResolvedValue({ _tag: "Success" });
   });
 
   it("coalesces a nullable provider snapshot before rendering array-backed UI", () => {
     expect(() => renderPanel()).not.toThrow();
     expect(settingsState.readEnvironmentIds).toEqual([environmentId]);
+  });
+
+  it("shows B's native account and catalog while retaining environment-scoped provider edits", async () => {
+    const nativeId = ProviderInstanceId.make("meerkat");
+    const projectId = ProjectId.make("project-b");
+    const target = { environmentId, projectId };
+    scopeState.context = {
+      scope: {
+        kind: "checkout",
+        members: [
+          {
+            id: projectId,
+            environmentId,
+            title: "B",
+            workspaceRoot: "/projects/b",
+            physicalProjectKey: "remote:/projects/b",
+            environmentLabel: "Remote device",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-10-04T00:00:00.000Z",
+            updatedAt: "2026-10-04T00:00:00.000Z",
+          },
+        ],
+      },
+      target,
+      targets: [target],
+    };
+    const modelB = {
+      slug: "openai:fixture-b",
+      name: "Fixture B",
+      isCustom: true,
+      capabilities: null,
+    };
+    const native: ServerProvider = {
+      ...provider(),
+      instanceId: nativeId,
+      driver: ProviderDriverKind.make("meerkat"),
+      supportsWorkspaceReadiness: true,
+      auth: { status: "unauthenticated" },
+      models: [{ ...modelB, slug: "openai:fixture-a", name: "Fixture A" }],
+      workspaceSnapshots: [
+        {
+          cwd: "/projects/b",
+          checkedAt: provider().checkedAt,
+          skills: [],
+          slashCommands: [],
+          readiness: {
+            status: "ready",
+            auth: { status: "authenticated", label: "B account" },
+            models: [modelB],
+          },
+        },
+      ],
+    };
+    settingsState.value = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [nativeId]: { driver: native.driver, enabled: true },
+      },
+    };
+    atoms.providers = [native];
+    let panel = renderPanel({ targetInstanceId: nativeId });
+    const editor = visitElements(
+      panel,
+      (element) => element.props.instanceId === nativeId && element.props.mode === "editor",
+    );
+    expect(editor?.props.liveProvider).toMatchObject({
+      auth: { status: "authenticated", label: "B account" },
+      models: [modelB],
+    });
+    expect(editor?.props.workspaceReadinessPending).toBe(false);
+    expect(native.auth.status).toBe("unauthenticated");
+    if (!editor) throw new Error("Native provider editor missing");
+    const update = editor.props.onUpdate as (next: {
+      driver: typeof native.driver;
+      enabled: boolean;
+    }) => Promise<boolean>;
+    commands.updateProviderSettings.mockResolvedValueOnce({ _tag: "Failure" });
+    expect(await update({ driver: native.driver, enabled: false })).toBe(false);
+    expect(await update({ driver: native.driver, enabled: false })).toBe(true);
+    expect(settingsState.readEnvironmentIds).toEqual([environmentId]);
+    expect(commands.updateProviderSettings).toHaveBeenCalledTimes(2);
+    for (const [request] of commands.updateProviderSettings.mock.calls) {
+      expect(request).toEqual({
+        environmentId,
+        input: {
+          kind: "edit",
+          instanceId: nativeId,
+          driver: native.driver,
+          changes: { enabled: false },
+        },
+      });
+    }
+    expect(settingsState.updateSettings).not.toHaveBeenCalled();
+    expect(commands.updateProvider).not.toHaveBeenCalled();
+
+    atoms.providers = [{ ...native, workspaceSnapshots: [] }];
+    panel = renderPanel({ targetInstanceId: nativeId });
+    const pending = visitElements(
+      panel,
+      (element) => element.props.instanceId === nativeId && element.props.mode === "editor",
+    );
+    expect(pending?.props.liveProvider).toMatchObject({ auth: { status: "unknown" }, models: [] });
+    expect(pending?.props.workspaceReadinessPending).toBe(true);
+    const refresh = visitElements(panel, isRefreshButton)?.props.onClick as
+      | (() => void)
+      | undefined;
+    refresh?.();
+    await flushPromises();
+    expect(commands.refresh).toHaveBeenCalledExactlyOnceWith({
+      environmentId,
+      input: { refreshModels: true },
+    });
   });
 
   it("routes refresh and provider update commands to the selected environment", async () => {
@@ -215,6 +355,7 @@ describe("EnvironmentProviderSettings routing", () => {
       environmentId,
       input: { provider: ProviderDriverKind.make("codex"), instanceId: codexId },
     });
+    expect(commands.updateProviderSettings).not.toHaveBeenCalled();
   });
 
   it("opens the requested provider instance instead of the first provider", () => {
@@ -252,12 +393,125 @@ describe("EnvironmentProviderSettings routing", () => {
     (editor.props[action] as (models: string[]) => void)(["chosen"]);
     expect(settingsState.updateClientSettings).toHaveBeenCalledExactlyOnceWith(expected);
     expect(settingsState.updateSettings).not.toHaveBeenCalled();
+    expect(commands.updateProviderSettings).not.toHaveBeenCalled();
   });
 
   it("does not substitute another account when the requested instance was removed", () => {
     atoms.providers = [provider()];
     const panel = renderPanel({ targetInstanceId: customId });
     expect(visitElements(panel, (element) => element.props.mode === "editor")).toBeNull();
+    expect(settingsState.updateSettings).not.toHaveBeenCalled();
+    expect(commands.updateProviderSettings).not.toHaveBeenCalled();
+  });
+
+  it("blocks captured edits until the credential operation completes, then sends only changed fields", async () => {
+    const nativeId = ProviderInstanceId.make("native");
+    const nativeInstance = {
+      driver: ProviderDriverKind.make("meerkat"),
+      enabled: true,
+      environment: [{ name: "OPENAI_API_KEY", value: "", sensitive: true, valueRedacted: true }],
+    };
+    settingsState.value = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [codexId]: { driver: ProviderDriverKind.make("codex"), enabled: true },
+        [nativeId]: nativeInstance,
+      },
+    };
+    atoms.providers = [provider()];
+    let panel = renderPanel({ targetInstanceId: codexId });
+    const donorEditor = visitElements(
+      panel,
+      (element) => element.props.instanceId === codexId && element.props.mode === "editor",
+    );
+    const reset = visitElements(
+      donorEditor?.props.headerAction,
+      (element) => typeof element.props.onClick === "function",
+    );
+    const nativeRow = visitElements(
+      panel,
+      (element) => element.props.instanceId === nativeId && element.props.mode === "list",
+    );
+    if (!nativeRow || !donorEditor || !reset) throw new Error("Expected provider controls");
+    (nativeRow.props.onSelect as () => void)();
+    panel = renderPanel();
+    const nativeEditor = visitElements(
+      panel,
+      (element) => element.props.instanceId === nativeId && element.props.mode === "editor",
+    );
+    if (!nativeEditor) throw new Error("Expected native provider editor");
+    const credentials = visitElements(
+      nativeEditor?.props.credentials,
+      (element) => typeof element.props.onActivityChange === "function",
+    );
+    expect(credentials).not.toBeNull();
+    const activity = credentials!.props.onActivityChange as (pending: boolean) => void;
+    activity(true);
+
+    // These callbacks were captured before React rendered the disabled controls.
+    expect(
+      await (nativeEditor.props.onUpdate as (value: unknown) => Promise<boolean>)({
+        ...nativeInstance,
+        displayName: "Would overwrite the key",
+      }),
+    ).toBe(false);
+    (nativeEditor.props.onDelete as () => void)();
+    expect(
+      await (donorEditor.props.onUpdate as (value: unknown) => Promise<boolean>)({
+        driver: "codex",
+        enabled: false,
+      }),
+    ).toBe(false);
+    (reset.props.onClick as () => void)();
+    expect(settingsState.updateSettings).not.toHaveBeenCalled();
+    expect(commands.updateProviderSettings).not.toHaveBeenCalled();
+
+    panel = renderPanel();
+    const pendingEditor = visitElements(
+      panel,
+      (element) => element.props.instanceId === nativeId && element.props.mode === "editor",
+    );
+    expect(pendingEditor?.props.instanceWritesPending).toBe(true);
+    const pendingCredentials = visitElements(
+      pendingEditor?.props.credentials,
+      (element) => typeof element.props.onActivityChange === "function",
+    );
+    expect(pendingCredentials?.props.readOnly).toBe(true);
+
+    const savedEnvironment = [
+      ...nativeInstance.environment,
+      { name: "ANTHROPIC_API_KEY", value: "", sensitive: true, valueRedacted: true },
+    ];
+    settingsState.value = {
+      ...settingsState.value,
+      providerInstances: {
+        ...settingsState.value.providerInstances,
+        [nativeId]: { ...nativeInstance, environment: savedEnvironment },
+      },
+    };
+    activity(false);
+    panel = renderPanel();
+    const latestEditor = visitElements(
+      panel,
+      (element) => element.props.instanceId === nativeId && element.props.mode === "editor",
+    );
+    if (!latestEditor) throw new Error("Expected latest native provider editor");
+    expect(
+      await (latestEditor.props.onUpdate as (value: unknown) => Promise<boolean>)({
+        ...nativeInstance,
+        environment: savedEnvironment,
+        displayName: "Updated name",
+      }),
+    ).toBe(true);
+    expect(commands.updateProviderSettings).toHaveBeenCalledExactlyOnceWith({
+      environmentId,
+      input: {
+        kind: "edit",
+        instanceId: nativeId,
+        driver: nativeInstance.driver,
+        changes: { displayName: "Updated name" },
+      },
+    });
     expect(settingsState.updateSettings).not.toHaveBeenCalled();
   });
 
@@ -357,13 +611,12 @@ describe("EnvironmentProviderSettings routing", () => {
     expect(customCard).not.toBeNull();
     (customCard?.props.onDelete as (() => void) | undefined)?.();
 
-    expect(settingsState.updateSettings).toHaveBeenLastCalledWith({
-      providerInstances: {
-        [codexId]: settingsState.value.providerInstances?.[codexId],
-      },
+    expect(commands.updateProviderSettings).toHaveBeenCalledExactlyOnceWith({
+      environmentId,
+      input: { kind: "delete", instanceId: customId },
     });
 
-    settingsState.updateSettings.mockClear();
+    commands.updateProviderSettings.mockClear();
     const defaultRow = visitElements(
       panel,
       (element) => element.props.instanceId === codexId && element.props.mode === "list",
@@ -382,11 +635,11 @@ describe("EnvironmentProviderSettings routing", () => {
     expect(resetButton).not.toBeNull();
     (resetButton?.props.onClick as (() => void) | undefined)?.();
 
-    const resetPatch = settingsState.updateSettings.mock.lastCall?.[0] as
-      | Record<string, unknown>
-      | undefined;
-    expect(Object.keys(resetPatch ?? {}).sort()).toEqual(["providerInstances", "providers"]);
-    expect(resetPatch).not.toHaveProperty("favorites");
-    expect(resetPatch).not.toHaveProperty("providerModelPreferences");
+    expect(commands.updateProviderSettings).toHaveBeenCalledExactlyOnceWith({
+      environmentId,
+      input: { kind: "resetDefault", driver: "codex" },
+    });
+    expect(settingsState.updateSettings).not.toHaveBeenCalled();
+    expect(settingsState.updateClientSettings).not.toHaveBeenCalled();
   });
 });

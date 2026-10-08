@@ -24,6 +24,7 @@ import {
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ProviderDriverKind,
   ProviderInstanceId,
+  RuntimeItemId,
   ProviderSessionStartInput,
   ThreadId,
   TurnId,
@@ -58,6 +59,7 @@ import {
   ProviderUnsupportedError,
   ProviderValidationError,
   ProviderWorkspaceMissingError,
+  ProviderSessionDirectoryPersistenceError,
   type ProviderAdapterError,
 } from "../Errors.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
@@ -78,6 +80,7 @@ import * as ServerSettings from "../../serverSettings.ts";
 import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { makeAdapterRegistryMock } from "../testUtils/providerAdapterRegistryMock.ts";
 import * as ProjectionSnapshotQuery from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ProfileRestoreReview } from "../../restoreReview.ts";
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const defaultServerSettingsLayer = ServerSettings.ServerSettingsService.layerTest();
@@ -475,6 +478,480 @@ function makeProviderServiceLayer(
   };
 }
 
+const meerkatDriver = ProviderDriverKind.make("meerkat");
+const meerkatInstanceId = ProviderInstanceId.make("meerkat");
+
+describe("ProviderService durable output observation", () => {
+  const withService = <A, E>(
+    registry: ProviderAdapterRegistry.ProviderAdapterRegistry["Service"],
+    effect: Effect.Effect<
+      A,
+      E,
+      | ProviderService.ProviderService
+      | ProviderSessionDirectory.ProviderSessionDirectory
+      | Scope.Scope
+    >,
+    projection?: ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"],
+  ) => {
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(
+      Layer.provide(ProviderSessionRuntime.layer.pipe(Layer.provide(SqlitePersistenceMemory))),
+    );
+    const serviceLayer = makeProviderServiceLive().pipe(
+      Layer.provide(NodeServices.layer),
+      Layer.provide(Layer.succeed(ProviderAdapterRegistry.ProviderAdapterRegistry, registry)),
+      Layer.provide(directoryLayer),
+      Layer.provide(defaultServerSettingsLayer),
+      Layer.provide(serverConfigTestLayer),
+      Layer.provide(AnalyticsService.layerTest),
+      Layer.provide(
+        Layer.succeed(
+          ProviderEventLoggers.ProviderEventLoggers,
+          ProviderEventLoggers.NoOpProviderEventLoggers,
+        ),
+      ),
+      Layer.provide(
+        projection
+          ? Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, projection)
+          : Layer.empty,
+      ),
+    );
+    return effect.pipe(Effect.provide(Layer.merge(serviceLayer, directoryLayer)), Effect.scoped);
+  };
+
+  it.effect("replays into an acquired subscription without resuming the runtime", () => {
+    const fake = makeFakeCodexAdapter(meerkatDriver);
+    const threadId = asThreadId("durable-peer-reply");
+    const resumeCursor = { mobId: "saved-mob", threadId };
+    const followup: ProviderRuntimeEvent = {
+      eventId: asEventId("native-completion-1"),
+      provider: meerkatDriver,
+      threadId,
+      createdAt: "2026-01-01T00:00:00.000Z",
+      type: "item.completed",
+      itemId: RuntimeItemId.make("native-message-1"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+        authoritativeText: "Review received.",
+      },
+    };
+    const observeSession = vi.fn(() => Effect.sync(() => fake.emit(followup)));
+    const adapter = { ...fake.adapter, observeSession };
+    return withService(
+      makeAdapterRegistryMock({ [meerkatDriver]: adapter }),
+      Effect.gen(function* () {
+        const service = yield* ProviderService.ProviderService;
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        yield* directory.upsert({
+          threadId,
+          provider: meerkatDriver,
+          providerInstanceId: meerkatInstanceId,
+          status: "stopped",
+          resumeCursor,
+        });
+        assert.equal(observeSession.mock.calls.length, 0);
+        const stream = yield* service.subscribeEvents!;
+        yield* service.observePersistedSessions!();
+        const events = yield* stream.pipe(Stream.take(1), Stream.runCollect);
+        assert.equal(events[0]?.eventId, followup.eventId);
+        assert.equal(events[0]?.turnId, undefined);
+        assert.deepEqual(observeSession.mock.calls, [[{ threadId, resumeCursor }]]);
+        assert.equal(fake.startSession.mock.calls.length, 0);
+        assert.equal(fake.sendTurn.mock.calls.length, 0);
+        assert.equal((yield* service.listSessions()).length, 0);
+        assert.equal(
+          (yield* directory.getBinding(threadId)).pipe(Option.getOrThrow).status,
+          "stopped",
+        );
+      }),
+    );
+  });
+
+  it.effect("isolates observation failures and skips missing or foreign resume bindings", () => {
+    const fake = makeFakeCodexAdapter(meerkatDriver);
+    const observed: string[] = [];
+    const adapter: ProviderAdapterShape<ProviderAdapterError> = {
+      ...fake.adapter,
+      observeSession: ({ threadId }) =>
+        threadId === "failed-observation"
+          ? Effect.fail(
+              new ProviderAdapterSessionNotFoundError({ provider: meerkatDriver, threadId }),
+            )
+          : Effect.sync(() => {
+              observed.push(threadId);
+            }),
+    };
+    return withService(
+      makeAdapterRegistryMock({ [meerkatDriver]: adapter }),
+      Effect.gen(function* () {
+        const service = yield* ProviderService.ProviderService;
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        for (const [id, cursor] of [
+          ["failed-observation", {}],
+          ["valid-observation", {}],
+          ["no-cursor", null],
+        ] as const) {
+          yield* directory.upsert({
+            threadId: asThreadId(id),
+            provider: meerkatDriver,
+            providerInstanceId: meerkatInstanceId,
+            resumeCursor: cursor,
+          });
+        }
+        yield* directory.upsert({
+          threadId: asThreadId("foreign-instance"),
+          provider: meerkatDriver,
+          providerInstanceId: ProviderInstanceId.make("other-meerkat"),
+          resumeCursor: {},
+        });
+        yield* directory.upsert({
+          threadId: asThreadId("foreign-driver"),
+          provider: CODEX_DRIVER,
+          providerInstanceId: meerkatInstanceId,
+          resumeCursor: {},
+        });
+        yield* service.observePersistedSessions!();
+        assert.deepEqual(observed, ["valid-observation"]);
+        assert.equal(fake.startSession.mock.calls.length, 0);
+      }),
+    );
+  });
+
+  it.effect("acknowledges durable output only through its exact provider binding", () => {
+    const fake = makeFakeCodexAdapter(meerkatDriver);
+    const acknowledgments: EventId[] = [];
+    const adapter = {
+      ...fake.adapter,
+      acknowledgeEvent: (eventId: EventId) =>
+        Effect.sync(() => {
+          acknowledgments.push(eventId);
+        }),
+    };
+    return withService(
+      makeAdapterRegistryMock({ [meerkatDriver]: adapter }),
+      Effect.gen(function* () {
+        const service = yield* ProviderService.ProviderService;
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const event: ProviderRuntimeEvent = {
+          eventId: asEventId("persisted-native-output"),
+          provider: meerkatDriver,
+          providerInstanceId: meerkatInstanceId,
+          threadId: asThreadId("acknowledged-thread"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+          type: "item.completed",
+          payload: { itemType: "assistant_message", authoritativeText: "Review received." },
+        };
+        yield* directory.upsert({
+          threadId: event.threadId,
+          provider: meerkatDriver,
+          providerInstanceId: meerkatInstanceId,
+          resumeCursor: {},
+        });
+        yield* service.acknowledgeEvent!({ ...event, threadId: asThreadId("unknown-thread") });
+        yield* service.acknowledgeEvent!({ ...event, provider: CODEX_DRIVER });
+        yield* service.acknowledgeEvent!({
+          ...event,
+          providerInstanceId: ProviderInstanceId.make("another-meerkat"),
+        });
+        const { providerInstanceId: _instance, ...withoutInstance } = event;
+        yield* service.acknowledgeEvent!(withoutInstance);
+        assert.deepEqual(acknowledgments, []);
+        yield* service.acknowledgeEvent!(event);
+        assert.deepEqual(acknowledgments, [event.eventId]);
+        assert.equal(fake.startSession.mock.calls.length, 0);
+      }),
+    );
+  });
+
+  it.effect("observes stopped threads but skips deleted and missing threads at startup", () => {
+    const fake = makeFakeCodexAdapter(meerkatDriver);
+    const observed: ThreadId[] = [];
+    const adapter = {
+      ...fake.adapter,
+      observeSession: ({ threadId }: { threadId: ThreadId; resumeCursor: unknown }) =>
+        Effect.sync(() => {
+          observed.push(threadId);
+        }),
+    };
+    const projection = {
+      getCommandReadModel: () =>
+        Effect.succeed({
+          threads: [
+            { id: asThreadId("stopped-observation"), deletedAt: null },
+            { id: asThreadId("deleted-observation"), deletedAt: "2026-01-01T00:00:00.000Z" },
+          ],
+        }),
+    } as unknown as ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"];
+    return withService(
+      makeAdapterRegistryMock({ [meerkatDriver]: adapter }),
+      Effect.gen(function* () {
+        const service = yield* ProviderService.ProviderService;
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        for (const id of ["stopped-observation", "deleted-observation", "missing-observation"]) {
+          yield* directory.upsert({
+            threadId: asThreadId(id),
+            provider: meerkatDriver,
+            providerInstanceId: meerkatInstanceId,
+            status: "stopped",
+            resumeCursor: {},
+          });
+        }
+        yield* service.observePersistedSessions!();
+        assert.deepEqual(observed, [asThreadId("stopped-observation")]);
+        assert.equal(fake.startSession.mock.calls.length, 0);
+      }),
+      projection,
+    );
+  });
+
+  it.effect("retries a transient binding read before registering persisted observations", () => {
+    const fake = makeFakeCodexAdapter(meerkatDriver);
+    const observed: ThreadId[] = [];
+    const adapter = {
+      ...fake.adapter,
+      observeSession: ({ threadId }: { threadId: ThreadId; resumeCursor: unknown }) =>
+        Effect.sync(() => {
+          observed.push(threadId);
+        }),
+    };
+    return withService(
+      makeAdapterRegistryMock({ [meerkatDriver]: adapter }),
+      Effect.gen(function* () {
+        const service = yield* ProviderService.ProviderService;
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const threadId = asThreadId("retried-observation");
+        yield* directory.upsert({
+          threadId,
+          provider: meerkatDriver,
+          providerInstanceId: meerkatInstanceId,
+          resumeCursor: {},
+        });
+        const firstAttempt = yield* Deferred.make<void>();
+        const reads = vi.spyOn(directory, "listBindings");
+        reads.mockImplementationOnce(() =>
+          Deferred.succeed(firstAttempt, undefined).pipe(
+            Effect.andThen(
+              Effect.fail(
+                new ProviderSessionDirectoryPersistenceError({
+                  operation: "listBindings",
+                  detail: "busy",
+                }),
+              ),
+            ),
+          ),
+        );
+        const registration = yield* service.observePersistedSessions!().pipe(Effect.forkChild);
+        yield* Deferred.await(firstAttempt);
+        yield* TestClock.adjust("200 millis");
+        yield* Fiber.join(registration);
+        assert.equal(reads.mock.calls.length, 2);
+        assert.deepEqual(observed, [threadId]);
+        reads.mockRestore();
+      }),
+    );
+  });
+
+  it.effect(
+    "removes only the persisted binding's observer without stopping its native session",
+    () => {
+      const fake = makeFakeCodexAdapter(meerkatDriver);
+      const stopped: ThreadId[] = [];
+      const adapter = {
+        ...fake.adapter,
+        stopObservingSession: (threadId: ThreadId) =>
+          Effect.sync(() => {
+            stopped.push(threadId);
+          }),
+      };
+      return withService(
+        makeAdapterRegistryMock({ [meerkatDriver]: adapter }),
+        Effect.gen(function* () {
+          const service = yield* ProviderService.ProviderService;
+          const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+          const threadId = asThreadId("removed-observation");
+          yield* directory.upsert({
+            threadId,
+            provider: meerkatDriver,
+            providerInstanceId: meerkatInstanceId,
+          });
+          yield* directory.upsert({
+            threadId: asThreadId("foreign-observation"),
+            provider: CODEX_DRIVER,
+            providerInstanceId: meerkatInstanceId,
+          });
+          yield* service.stopObservingSession!(asThreadId("missing-observation"));
+          yield* service.stopObservingSession!(asThreadId("foreign-observation"));
+          assert.deepEqual(stopped, []);
+          yield* service.stopObservingSession!(threadId);
+          assert.deepEqual(stopped, [threadId]);
+          assert.equal(fake.startSession.mock.calls.length, 0);
+          assert.equal(fake.stopSession.mock.calls.length, 0);
+        }),
+      );
+    },
+  );
+
+  it.effect("registers persisted observations when an instance adapter is rebuilt", () => {
+    const fake = makeFakeCodexAdapter(meerkatDriver);
+    return Effect.gen(function* () {
+      const changes = yield* PubSub.unbounded<void>();
+      const rebuiltObserved = yield* Deferred.make<void>();
+      const firstObserved: ThreadId[] = [];
+      const secondObserved: ThreadId[] = [];
+      let current: ProviderAdapterShape<ProviderAdapterError> = {
+        ...fake.adapter,
+        observeSession: ({ threadId }) =>
+          Effect.sync(() => {
+            firstObserved.push(threadId);
+          }),
+      };
+      const baseRegistry = makeAdapterRegistryMock({ [meerkatDriver]: fake.adapter });
+      const registry = {
+        ...baseRegistry,
+        getByInstance: () => Effect.sync(() => current),
+        subscribeChanges: PubSub.subscribe(changes),
+      };
+      yield* withService(
+        registry,
+        Effect.gen(function* () {
+          const service = yield* ProviderService.ProviderService;
+          const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+          const threadId = asThreadId("rebuilt-observation");
+          yield* directory.upsert({
+            threadId,
+            provider: meerkatDriver,
+            providerInstanceId: meerkatInstanceId,
+            resumeCursor: {},
+          });
+          yield* service.observePersistedSessions!();
+          current = {
+            ...fake.adapter,
+            observeSession: ({ threadId: observedThreadId }) =>
+              Effect.sync(() => {
+                secondObserved.push(observedThreadId);
+              }).pipe(Effect.andThen(Deferred.succeed(rebuiltObserved, undefined))),
+          };
+          yield* PubSub.publish(changes, undefined);
+          yield* Deferred.await(rebuiltObserved);
+          assert.deepEqual(firstObserved, [threadId]);
+          assert.deepEqual(secondObserved, [threadId]);
+          assert.equal(fake.startSession.mock.calls.length, 0);
+        }),
+      );
+    });
+  });
+});
+
+const meerkat = makeFakeCodexAdapter(meerkatDriver);
+const meerkatRouting = makeProviderServiceLayer({
+  registry: makeAdapterRegistryMock({ [meerkatDriver]: meerkat.adapter }),
+});
+meerkatRouting.layer("ProviderServiceLive Meerkat admission ordering", (it) => {
+  for (const terminalTiming of ["before-reply", "during-binding-write"] as const) {
+    it.effect(`preserves terminal state ${terminalTiming}`, () =>
+      Effect.gen(function* () {
+        const provider = yield* ProviderService.ProviderService;
+        const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
+        const threadId = asThreadId(`meerkat-terminal-${terminalTiming}`);
+        const turnId = asTurnId(`meerkat-turn-${terminalTiming}`);
+        yield* provider.startSession(threadId, {
+          provider: meerkatDriver,
+          providerInstanceId: meerkatInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+        });
+        yield* directory.upsert({
+          threadId,
+          provider: meerkatDriver,
+          providerInstanceId: meerkatInstanceId,
+          runtimePayload: {
+            continueAfterServerUpdate: turnId,
+            continueAfterServerUpdatePrepared: turnId,
+          },
+        });
+        const observedTerminal = yield* Deferred.make<void>();
+        yield* provider.streamEvents.pipe(
+          Stream.filter((event) => event.threadId === threadId && event.type === "turn.completed"),
+          Stream.take(1),
+          Stream.runForEach(() => Deferred.succeed(observedTerminal, undefined)),
+          Effect.forkChild,
+        );
+        yield* Effect.yieldNow;
+        const complete = () => {
+          meerkat.updateSession(threadId, ({ activeTurnId: _activeTurnId, ...session }) => ({
+            ...session,
+            status: "ready",
+          }));
+          meerkat.emit({
+            type: "turn.completed",
+            eventId: asEventId(`meerkat-terminal-${terminalTiming}`),
+            provider: meerkatDriver,
+            createdAt: "2026-01-01T00:00:01.000Z",
+            threadId,
+            turnId,
+            payload: { state: "completed" },
+          });
+        };
+        const writeStarted = yield* Deferred.make<void>();
+        const releaseWrite = yield* Deferred.make<void>();
+        const originalUpsert = directory.upsert;
+        const upsert = vi.spyOn(directory, "upsert").mockImplementation((binding, options) => {
+          const payload = binding.runtimePayload as Record<string, unknown> | undefined;
+          if (
+            terminalTiming === "during-binding-write" &&
+            binding.threadId === threadId &&
+            payload?.lastRuntimeEvent === "provider.sendTurn"
+          ) {
+            return Effect.gen(function* () {
+              yield* Deferred.succeed(writeStarted, undefined);
+              yield* Deferred.await(releaseWrite);
+              yield* originalUpsert(binding, options);
+            });
+          }
+          return originalUpsert(binding, options);
+        });
+        yield* Effect.gen(function* () {
+          meerkat.sendTurn.mockImplementationOnce(() =>
+            Effect.gen(function* () {
+              meerkat.updateSession(threadId, (session) => ({
+                ...session,
+                status: "running",
+                activeTurnId: turnId,
+              }));
+              if (terminalTiming === "before-reply") {
+                complete();
+                yield* Deferred.await(observedTerminal);
+              }
+              return { threadId, turnId };
+            }),
+          );
+          const sending = yield* provider
+            .sendTurn({ threadId, input: "steer this work" })
+            .pipe(Effect.forkChild);
+          if (terminalTiming === "during-binding-write") {
+            yield* Deferred.await(writeStarted);
+            complete();
+            yield* Effect.yieldNow;
+            yield* Deferred.succeed(releaseWrite, undefined);
+          }
+          assert.equal((yield* Fiber.join(sending)).turnId, turnId);
+          yield* Deferred.await(observedTerminal);
+          const binding = yield* directory.getBinding(threadId);
+          assert(Option.isSome(binding));
+          assert.equal(binding.value.status, "running");
+          assert.propertyVal(binding.value.runtimePayload, "activeTurnId", null);
+          assert.propertyVal(binding.value.runtimePayload, "continueAfterServerUpdate", null);
+          assert.propertyVal(
+            binding.value.runtimePayload,
+            "continueAfterServerUpdatePrepared",
+            null,
+          );
+        }).pipe(Effect.ensuring(Effect.sync(() => upsert.mockRestore())));
+      }),
+    );
+  }
+});
+
 for (const [enabled, completed] of [
   [false, false],
   [true, false],
@@ -594,6 +1071,75 @@ for (const [enabled, completed] of [
       }).pipe(Effect.provide(NodeServices.layer)),
   );
 }
+
+it.effect("held-profile shutdown stops adapters without rewriting saved session evidence", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const persistence = yield* Layer.build(
+      ProviderSessionDirectoryLive.pipe(
+        Layer.provide(ProviderSessionRuntime.layer.pipe(Layer.provide(SqlitePersistenceMemory))),
+      ),
+    );
+    const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory.pipe(
+      Effect.provide(persistence),
+    );
+    const threadId = asThreadId("held-shutdown-evidence");
+    yield* directory.upsert({
+      threadId,
+      provider: CODEX_DRIVER,
+      providerInstanceId: codexInstanceId,
+      status: "running",
+      runtimeMode: "full-access",
+      resumeCursor: { opaque: "restored-resume" },
+      runtimePayload: {
+        activeTurnId: null,
+        continueAfterServerUpdate: "restored-turn",
+        continueAfterServerUpdatePrepared: true,
+      },
+    });
+    const before = yield* directory.getBinding(threadId);
+    const scope = yield* Scope.make();
+    yield* Layer.build(
+      makeProviderServiceLive().pipe(
+        Layer.provide(NodeServices.layer),
+        Layer.provide(Layer.succeed(ProviderSessionDirectory.ProviderSessionDirectory, directory)),
+        Layer.provide(
+          Layer.succeed(
+            ProviderAdapterRegistry.ProviderAdapterRegistry,
+            makeStaticInstanceRegistry([[codexInstanceId, codex.adapter]]),
+          ),
+        ),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(serverConfigTestLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(
+          Layer.succeed(
+            ProviderEventLoggers.ProviderEventLoggers,
+            ProviderEventLoggers.NoOpProviderEventLoggers,
+          ),
+        ),
+        Layer.provide(
+          Layer.succeed(ProfileRestoreReview, {
+            held: true,
+            status: () => ({
+              status: "restart-required",
+              restoreId: "restore",
+              restoredAt: null,
+              backupCreatedAt: null,
+              message: "Restart required",
+            }),
+            consent: async () => {
+              throw new Error("Unused consent");
+            },
+          }),
+        ),
+      ),
+    ).pipe(Scope.provide(scope));
+    yield* Scope.close(scope, Exit.void);
+    assert.equal(codex.stopAll.mock.calls.length, 1);
+    assert.deepStrictEqual(yield* directory.getBinding(threadId), before);
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
 
 it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
   Effect.gen(function* () {
@@ -1546,6 +2092,24 @@ it.effect(
 );
 
 routing.layer("ProviderServiceLive routing", (it) => {
+  it.effect("rejects read-only before a donor adapter can fall through to full access", () =>
+    Effect.gen(function* () {
+      const provider = yield* ProviderService.ProviderService;
+      const threadId = asThreadId("read-only-unsupported-driver");
+      const before = routing.codex.startSession.mock.calls.length;
+      const result = yield* provider
+        .startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "read-only",
+        })
+        .pipe(Effect.flip);
+      assert.instanceOf(result, ProviderValidationError);
+      assert.include(result.message, "Read-only access");
+      assert.equal(routing.codex.startSession.mock.calls.length, before);
+    }),
+  );
   it.effect.each([CODEX_DRIVER, CLAUDE_AGENT_DRIVER, CURSOR_DRIVER])(
     "rejects missing, file, and saved workspace paths before starting %s",
     (driver) =>
@@ -4961,6 +5525,7 @@ describe("agent browser access", () => {
         Layer.provide(runtimeRepositoryLayer),
       );
       const projectionLayer = Layer.succeed(ProjectionSnapshotQuery.ProjectionSnapshotQuery, {
+        getReviewWorkspaceRoots: () => Effect.die("unused"),
         getTurnStartMessage: () => Effect.die("unused"),
         getImportedAgentSessionSources: () => Effect.die("unused"),
         getUserInputActivity: () => Effect.die("unused"),

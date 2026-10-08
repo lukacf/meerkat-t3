@@ -1,3 +1,4 @@
+import { useConversationPaneActive } from "../team/ConversationPaneContext";
 import {
   buildRemoteOpenUrl,
   EditorId,
@@ -209,6 +210,7 @@ export const OpenInPicker = memo(function OpenInPicker({
   compact?: boolean;
   enableShortcut?: boolean;
 }) {
+  const paneActive = useConversationPaneActive();
   const openInEditorMutation = useAtomCommand(shellEnvironment.openInEditor, "open in editor");
   const remote = useRemoteOpenState(environmentId);
   const remoteCapableEditors = useRemoteCapableEditors();
@@ -275,6 +277,7 @@ export const OpenInPicker = memo(function OpenInPicker({
   useEffect(() => {
     if (!enableShortcut) return;
     const handler = (e: globalThis.KeyboardEvent) => {
+      if (!paneActive()) return;
       if (!isOpenFavoriteEditorShortcut(e, keybindings)) return;
       if (!openInCwd) return;
       if (!preferredEditor) return;
@@ -284,7 +287,7 @@ export const OpenInPicker = memo(function OpenInPicker({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [enableShortcut, keybindings, openInCwd, openInEditor, preferredEditor]);
+  }, [enableShortcut, keybindings, openInCwd, openInEditor, preferredEditor, paneActive]);
 
   const editorItems = (
     <>

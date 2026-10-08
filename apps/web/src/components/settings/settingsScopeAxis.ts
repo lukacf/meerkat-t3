@@ -3,6 +3,48 @@ import type { SettingsScopeSearch } from "./settingsScope";
 
 type ScopeEnvironment = Pick<EnvironmentPresentation, "environmentId" | "label" | "displayUrl">;
 
+function compactEnvironmentAddress(environment: ScopeEnvironment) {
+  if (!environment.displayUrl) return null;
+  try {
+    const url = new URL(environment.displayUrl);
+    const address =
+      ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) && url.port
+        ? `:${url.port}`
+        : url.host;
+    return address.length <= 24 ? address : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Keep a same-name environment's identity visible even when its name is clipped. */
+export function settingsScopeEnvironmentDiscriminator(
+  environment: ScopeEnvironment,
+  environments: readonly ScopeEnvironment[],
+) {
+  const siblings = environments.filter(
+    (other) =>
+      other.environmentId !== environment.environmentId && other.label === environment.label,
+  );
+  if (siblings.length === 0) return null;
+  const address = compactEnvironmentAddress(environment);
+  if (address && siblings.every((other) => compactEnvironmentAddress(other) !== address)) {
+    return address;
+  }
+  // Shared addresses can represent different saved environments. Use their identity,
+  // extending the prefix only when another same-name environment shares it.
+  let length = 6;
+  while (
+    length < environment.environmentId.length &&
+    siblings.some((other) =>
+      other.environmentId.startsWith(environment.environmentId.slice(0, length)),
+    )
+  ) {
+    length += 1;
+  }
+  return `#${environment.environmentId.slice(0, length)}`;
+}
+
 export function settingsScopeEnvironmentLabel(
   environment: ScopeEnvironment,
   environments: readonly ScopeEnvironment[],

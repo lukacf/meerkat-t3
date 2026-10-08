@@ -13,6 +13,7 @@ const {
   setDesktopNameMock,
   mkdirSyncMock,
   writeFileSyncMock,
+  setPathMock,
 } = vi.hoisted(() => ({
   appendSwitchMock: vi.fn(),
   getSwitchValueMock: vi.fn(),
@@ -21,10 +22,12 @@ const {
   setDesktopNameMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
+  setPathMock: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
   app: {
+    setPath: setPathMock,
     setDesktopName: setDesktopNameMock,
     getVersion: () => "0.0.37",
     commandLine: {
@@ -45,6 +48,7 @@ vi.mock("node:fs", () => ({
 }));
 
 import * as DesktopPreReadyPlatform from "./DesktopPreReadyPlatform.ts";
+import * as DesktopConfig from "./DesktopConfig.ts";
 
 describe("DesktopPreReadyPlatform", () => {
   beforeEach(() => {
@@ -55,6 +59,52 @@ describe("DesktopPreReadyPlatform", () => {
     setDesktopNameMock.mockReset();
     mkdirSyncMock.mockReset();
     writeFileSyncMock.mockReset();
+    setPathMock.mockReset();
+  });
+
+  it.effect("prepares and selects the isolated profile before the next event-loop turn", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const events: string[] = [];
+        mkdirSyncMock.mockImplementation(() => events.push("mkdir"));
+        appendSwitchMock.mockImplementation((name) => events.push(`switch:${name}`));
+        setPathMock.mockImplementation((name) => events.push(`path:${name}`));
+        const nextTurn = Promise.resolve().then(() => [...events]);
+        const options = yield* DesktopPreReadyPlatform.make.pipe(
+          Effect.provideService(HostProcessPlatform, "darwin"),
+          Effect.provide(
+            DesktopConfig.layerTest({ T3CODE_DESKTOP_USER_DATA_DIR: " /tmp/isolated-profile " }),
+          ),
+        );
+
+        assert.equal(options.userDataPath, "/tmp/isolated-profile");
+        assert.deepEqual(mkdirSyncMock.mock.calls, [["/tmp/isolated-profile", { recursive: true }]]);
+        assert.deepEqual(appendSwitchMock.mock.calls, [["user-data-dir", "/tmp/isolated-profile"]]);
+        assert.deepEqual(setPathMock.mock.calls, [["userData", "/tmp/isolated-profile"]]);
+        assert.deepEqual(yield* Effect.promise(() => nextTurn), [
+          "mkdir",
+          "switch:user-data-dir",
+          "path:userData",
+        ]);
+      }),
+    ),
+  );
+
+  it.effect("does not touch an Electron profile when preparing the override fails", () => {
+    const cause = new Error("profile unavailable");
+    mkdirSyncMock.mockImplementation(() => {
+      throw cause;
+    });
+    return DesktopPreReadyPlatform.make.pipe(
+      Effect.provideService(HostProcessPlatform, "darwin"),
+      Effect.provide(DesktopConfig.layerTest({ T3CODE_DESKTOP_USER_DATA_DIR: "/tmp/blocked" })),
+      Effect.exit,
+      Effect.map((exit) => {
+        assert.isTrue(exit._tag === "Failure");
+        assert.equal(setPathMock.mock.calls.length, 0);
+        assert.equal(appendSwitchMock.mock.calls.length, 0);
+      }),
+    );
   });
 
   it.effect("preserves an explicit Linux password-store switch", () => {
@@ -89,7 +139,7 @@ describe("DesktopPreReadyPlatform", () => {
           desktopName = name;
         });
         writeFileSyncMock.mockImplementation((path: string, contents: string) => {
-          if (path === "/xdg/applications/com.t3tools.T3Code.desktop") desktopEntry = contents;
+          if (path === "/xdg/applications/ai.rkat.MeerkatT3.desktop") desktopEntry = contents;
         });
 
         return Effect.scoped(
@@ -101,10 +151,10 @@ describe("DesktopPreReadyPlatform", () => {
               ),
             );
             const identity = yield* Effect.promise(() => portalIdentity);
-            assert.equal(identity.desktopName, "com.t3tools.T3Code.desktop");
+            assert.equal(identity.desktopName, "ai.rkat.MeerkatT3.desktop");
             assert.include(identity.desktopEntry ?? "", 'Exec="/Applications/current.AppImage" %U');
-            assert.include(identity.desktopEntry ?? "", "Name=T3 Code (Alpha)");
-            assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/t3code;");
+            assert.include(identity.desktopEntry ?? "", "Name=Meerkat T3 (Prototype)");
+            assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/meerkat-t3;");
           }),
         ).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())));
       },
@@ -165,6 +215,7 @@ describe("DesktopPreReadyPlatform", () => {
           preReady: {
             linux: null,
             linuxPasswordStoreCommandLine: null,
+            userDataPath: result.preReady.userDataPath,
           },
         });
         assert.deepEqual(events, ["pre-ready", "clerk"]);

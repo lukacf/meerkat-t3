@@ -1,3 +1,4 @@
+import type { OnboardingProgress } from "@t3tools/contracts/settings";
 import { useCallback } from "react";
 
 import { ensureClientSettingsHydrated, persistClientSettingsUpdate } from "../hooks/useSettings";
@@ -11,6 +12,20 @@ export function useCompleteOnboarding(): () => Promise<void> {
   return useCallback(async () => {
     await ensureClientSettingsHydrated();
     const onboardingCompletedAt = new Date().toISOString();
-    await persistClientSettingsUpdate((current) => ({ ...current, onboardingCompletedAt }));
+    await persistClientSettingsUpdate((current) => ({
+      ...current,
+      onboardingCompletedAt,
+      onboardingProgress: null,
+    }));
   }, []);
+}
+
+/** One persisted record owns the setup journey, including its first real task. */
+export async function saveOnboardingProgress(progress: OnboardingProgress): Promise<void> {
+  await ensureClientSettingsHydrated();
+  await persistClientSettingsUpdate((current) => ({
+    ...current,
+    onboardingCompletedAt: null,
+    onboardingProgress: progress,
+  }));
 }

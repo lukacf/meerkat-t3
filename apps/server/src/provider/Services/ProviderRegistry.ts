@@ -18,6 +18,9 @@ import type * as Stream from "effect/Stream";
 import type { ProviderMaintenanceCapabilities } from "../providerMaintenance.ts";
 
 export type ProviderMaintenanceActionKind = "update";
+export interface ProviderRefreshOptions {
+  readonly invalidateWorkspaces?: boolean;
+}
 
 export interface ProviderRegistryShape {
   /**
@@ -36,7 +39,10 @@ export interface ProviderRegistryShape {
    *
    * @deprecated prefer `refreshInstance` for new call sites.
    */
-  readonly refresh: (provider?: ProviderDriverKind) => Effect.Effect<ReadonlyArray<ServerProvider>>;
+  readonly refresh: (
+    provider?: ProviderDriverKind,
+    options?: ProviderRefreshOptions,
+  ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
 
   /**
    * Refresh the specific configured instance. Returns the updated snapshot
@@ -46,11 +52,15 @@ export interface ProviderRegistryShape {
    */
   readonly refreshInstance: (
     instanceId: ProviderInstanceId,
+    options?: ProviderRefreshOptions,
   ) => Effect.Effect<ReadonlyArray<ServerProvider>>;
 
   readonly refreshWorkspaceSnapshot: (input: {
     readonly instanceId: ProviderInstanceId;
     readonly cwd: string;
+    // Auth changes can affect inherited bindings in other workspaces. Clear
+    // every scoped result for this instance before checking the acted-on cwd.
+    readonly invalidate?: boolean;
   }) => Effect.Effect<ReadonlyArray<ServerProvider>>;
 
   /**

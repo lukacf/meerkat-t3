@@ -8,6 +8,13 @@ import {
 } from "./ProviderSettingsForm";
 
 describe("ProviderSettingsForm helpers", () => {
+  it("recognizes Meerkat without requiring CLI paths or donor authentication fields", () => {
+    const meerkat = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("meerkat")];
+    expect(meerkat).toBeDefined();
+    expect(deriveProviderSettingsFields(meerkat!)).toEqual([]);
+    expect(meerkat?.modelsManagedByRuntime).toBe(true);
+  });
+
   it("derives visible provider config fields from the client definition schema", () => {
     const codex = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("codex")];
 

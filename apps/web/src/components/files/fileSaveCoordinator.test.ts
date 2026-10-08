@@ -18,6 +18,37 @@ describe("FileSaveCoordinator", () => {
     vi.useRealTimers();
   });
 
+  it("keeps a failed mounted writer armed until its one final disposed retry settles", async () => {
+    vi.useFakeTimers();
+    const persist = vi
+      .fn()
+      .mockResolvedValue(AsyncResult.failure(Cause.fail(new Error("write failed"))));
+    const onSaveSettled = vi.fn();
+    const onPendingChange = vi.fn();
+    const coordinator = new FileSaveCoordinator({
+      debounceMs: 500,
+      persist,
+      onPendingChange,
+      onConfirmed: vi.fn(),
+      onSaveSettled,
+    });
+    coordinator.change("unsaved text");
+    await vi.advanceTimersByTimeAsync(500);
+    expect(persist).toHaveBeenCalledOnce();
+    expect(onSaveSettled).not.toHaveBeenCalled();
+    expect(onPendingChange).not.toHaveBeenCalledWith(false);
+
+    coordinator.dispose();
+    await vi.runAllTimersAsync();
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(onSaveSettled).toHaveBeenCalledOnce();
+    expect(onPendingChange).not.toHaveBeenCalledWith(false);
+    coordinator.dispose();
+    coordinator.change("retired callback");
+    await vi.runAllTimersAsync();
+    expect(persist).toHaveBeenCalledTimes(2);
+  });
+
   it("debounces edits and persists only the latest contents", async () => {
     vi.useFakeTimers();
     const persist = vi

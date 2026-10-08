@@ -1,6 +1,7 @@
 import { PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES } from "@t3tools/client-runtime/text-paste";
 import { PROVIDER_SEND_TURN_MAX_INPUT_CHARS } from "@t3tools/contracts";
 import { collectComposerInlineTokens } from "@t3tools/shared/composerInlineTokens";
+import { providerSkillReferenceMeta } from "@t3tools/client-runtime/providerSkills";
 import { composerContextEditorTokens } from "../lib/composerContext";
 import { requireNativeView } from "expo";
 import {
@@ -153,10 +154,20 @@ export function ComposerEditor({
     [],
   );
 
-  const skillLabels = useMemo(
-    () => new Map(skills.map((skill) => [skill.name, skill.displayName?.trim() || skill.name])),
-    [skills],
-  );
+  const skillLabels = useMemo(() => {
+    const labels = new Map<string, string>();
+    const nativeNames = new Set<string>();
+    for (const skill of skills) {
+      const label = skill.displayName?.trim() || skill.name;
+      if (/^meerkat-skill:/iu.test(skill.path ?? "")) nativeNames.add(skill.name);
+      else labels.set(skill.name, label);
+      if (skill.path) labels.set(skill.path, label);
+    }
+    for (const name of nativeNames) {
+      if (!labels.has(name)) labels.set(name, providerSkillReferenceMeta(skills, name).label);
+    }
+    return labels;
+  }, [skills]);
   const tokensJson = useMemo(() => {
     const tokens = collectComposerInlineTokens(props.value, {
       preserveTrailingFrom: confirmedTokensRef.current,
@@ -176,7 +187,10 @@ export function ComposerEditor({
           ...contextChipPresentation(token.type === "context" ? token.kind : token.type, record),
           label:
             token.type === "skill"
-              ? (skillLabels.get(token.value) ?? token.value)
+              ? (skillLabels.get(token.path ?? token.value) ??
+                (token.path
+                  ? providerSkillReferenceMeta(skills, token.value, token.path).label
+                  : token.value))
               : token.type === "context"
                 ? `${token.label}${props.context?.records.some((record) => record.contextId === token.contextId) ? "" : " · unavailable"}`
                 : basename(token.value),
@@ -193,7 +207,7 @@ export function ComposerEditor({
         };
       }),
     );
-  }, [props.value, props.context, skillLabels]);
+  }, [props.value, props.context, skillLabels, skills]);
   // Every render resolves against the snapshot history, so a render whose
   // (value, selection) lags the acknowledged native state is stamped behind
   // the native revision and rejected by the editor instead of re-applying a

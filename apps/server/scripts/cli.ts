@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { verifyMeerkatRuntime } from "@t3tools/shared/meerkatRuntime";
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
@@ -88,6 +89,12 @@ const buildCmd = Command.make(
           shell: false,
         }),
       );
+
+      const runtimeDir = path.join(repoRoot, "apps/server/resources/meerkat-runtime");
+      if (yield* fs.exists(runtimeDir)) {
+        yield* Effect.tryPromise(() => verifyMeerkatRuntime(runtimeDir));
+        yield* fs.copy(runtimeDir, path.join(serverDir, "dist/meerkat-runtime"));
+      }
 
       const webDist = path.join(repoRoot, "apps/web/dist");
       const clientTarget = path.join(serverDir, "dist/client");

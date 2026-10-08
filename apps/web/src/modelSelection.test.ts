@@ -9,11 +9,15 @@ import { describe, expect, it } from "vite-plus/test";
 import { createModelSelection } from "@t3tools/shared/model";
 import { deriveEffectiveComposerModelState } from "./composerDraftStore";
 import { getComposerProviderState } from "./components/chat/composerProviderState";
+import { getComposerModelSendBlock } from "./components/chat/composerModelReadiness";
 import { deriveProviderInstanceEntries, NO_PROVIDER_MODEL_SELECTION } from "./providerInstances";
+import { getDefaultServerModel } from "./providerModels";
+import { getDisplayModelName } from "./components/chat/providerIconUtils";
 import {
   getCustomModelOptionsByInstance,
   getAppModelOptionsForInstance,
   resolveAppModelSelectionForInstance,
+  resolveAppModelSelection,
   resolveAppModelSelectionState,
   resolvePlanAgentHealPatch,
   withoutPlanAgentSelection,
@@ -66,6 +70,249 @@ function settingsWithProviderInstances(): UnifiedSettings {
 }
 
 describe("instance-scoped model selection", () => {
+  it.each(["empty", "different"] as const)(
+    "keeps a restored Meerkat model and reasoning when its checkout catalog is %s",
+    (catalog) => {
+      const driver = ProviderDriverKind.make("meerkat");
+      const instanceId = ProviderInstanceId.make("native-work");
+      const otherInstanceId = ProviderInstanceId.make("native-other");
+      const saved = createModelSelection(instanceId, "openai:fixture-b", [
+        { id: "reasoning_effort", value: "high" },
+      ]);
+      const fallback = "anthropic:claude-fable-5";
+      const providers = [
+        {
+          ...provider({ provider: driver, instanceId }),
+          models:
+            catalog === "empty"
+              ? []
+              : [
+                  {
+                    slug: fallback,
+                    name: "Claude Fable 5",
+                    aliases: [saved.model],
+                    isDefault: true,
+                    isCustom: false,
+                    capabilities: {},
+                  },
+                ],
+        },
+        provider({ provider: driver, instanceId: otherInstanceId, models: [saved.model] }),
+      ];
+      const settings = DEFAULT_UNIFIED_SETTINGS;
+      for (const draft of [
+        null,
+        { activeProvider: instanceId, modelSelectionByProvider: { [instanceId]: saved } },
+      ]) {
+        const state = deriveEffectiveComposerModelState({
+          draft,
+          providers,
+          selectedProvider: driver,
+          selectedInstanceId: instanceId,
+          threadModelSelection: saved,
+          projectModelSelection: createModelSelection(instanceId, fallback),
+          settings,
+        });
+        expect(state.selectedModel).toBe(saved.model);
+        expect(state.modelOptions?.[instanceId]).toEqual(saved.options);
+        const entries = deriveProviderInstanceEntries(providers);
+        const options = new Map(
+          entries.map((entry) => [
+            entry.instanceId,
+            getAppModelOptionsForInstance(
+              settings,
+              entry,
+              entry.instanceId === instanceId ? state.selectedModel : null,
+            ),
+          ]),
+        );
+        expect(options.get(instanceId)?.find((option) => option.slug === saved.model)).toEqual({
+          slug: saved.model,
+          name: saved.model,
+          isCustom: false,
+          isUnavailable: true,
+        });
+        expect(
+          getComposerModelSendBlock({
+            entries,
+            selections: [createModelSelection(instanceId, state.selectedModel)],
+            modelOptionsByInstance: options,
+            catalogKnown: true,
+            continuesActiveTurn: false,
+            nativeInstanceIds: new Set([instanceId, otherInstanceId]),
+          })?.reason,
+        ).toContain(
+          catalog === "empty" ? "No models are available" : "selected model is unavailable",
+        );
+      }
+    },
+  );
+
+  it("allows an explicit replacement or the restored native model once its catalog recovers", () => {
+    const driver = ProviderDriverKind.make("meerkat");
+    const instanceId = ProviderInstanceId.make("native-work");
+    const saved = createModelSelection(instanceId, "openai:fixture-b", [
+      { id: "reasoning_effort", value: "high" },
+    ]);
+    const replacement = createModelSelection(instanceId, "anthropic:claude-fable-5");
+    for (const selection of [replacement, saved]) {
+      const providers = [provider({ provider: driver, instanceId, models: [selection.model] })];
+      const state = deriveEffectiveComposerModelState({
+        draft: {
+          activeProvider: instanceId,
+          modelSelectionByProvider: { [instanceId]: selection },
+        },
+        providers,
+        selectedProvider: driver,
+        selectedInstanceId: instanceId,
+        threadModelSelection: saved,
+        projectModelSelection: null,
+        settings: DEFAULT_UNIFIED_SETTINGS,
+      });
+      expect(state.selectedModel).toBe(selection.model);
+      const entries = deriveProviderInstanceEntries(providers);
+      const options = new Map(
+        entries.map((entry) => [
+          entry.instanceId,
+          getAppModelOptionsForInstance(DEFAULT_UNIFIED_SETTINGS, entry, state.selectedModel),
+        ]),
+      );
+      expect(
+        options.get(instanceId)?.find((option) => option.slug === selection.model)?.isUnavailable,
+      ).toBeUndefined();
+      expect(
+        getComposerModelSendBlock({
+          entries,
+          selections: [createModelSelection(instanceId, state.selectedModel)],
+          modelOptionsByInstance: options,
+          catalogKnown: true,
+          continuesActiveTurn: false,
+          nativeInstanceIds: new Set([instanceId]),
+        }),
+      ).toBeNull();
+    }
+  });
+
+  it("uses Meerkat's connected default for new drafts while preserving every explicit native model", () => {
+    const driver = ProviderDriverKind.make("meerkat");
+    const instanceId = ProviderInstanceId.make("meerkat");
+    const providers = [
+      {
+        ...provider({ provider: driver, instanceId }),
+        models: [
+          {
+            slug: "anthropic:claude-opus-5-5",
+            name: "Claude Opus 5.5",
+            isDefault: false,
+            isCustom: false,
+            capabilities: {},
+          },
+          {
+            slug: "openai:gpt-5.6",
+            name: "[openai:gpt-5.6] GPT-5.6 Sol",
+            isDefault: false,
+            isCustom: false,
+            capabilities: {},
+          },
+          {
+            slug: "openai:gpt-5.6-sol",
+            name: "[openai:gpt-5.6-sol] GPT-5.6 Sol",
+            subProvider: "openai",
+            isDefault: false,
+            isCustom: false,
+            capabilities: {},
+          },
+          {
+            slug: "openai:gpt-6-astra",
+            name: "GPT-6 Astra",
+            isDefault: true,
+            isCustom: false,
+            capabilities: {},
+          },
+          {
+            slug: "self_hosted:gpt-5.6-sol",
+            name: "[self_hosted:gpt-5.6-sol] GPT-5.6 Sol",
+            subProvider: "self_hosted",
+            isDefault: false,
+            isCustom: true,
+            capabilities: {},
+          },
+          {
+            slug: "self_hosted:local",
+            name: "Local",
+            isDefault: false,
+            isCustom: true,
+            capabilities: {},
+          },
+        ],
+      },
+    ];
+    const settings: UnifiedSettings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: { [instanceId]: { driver, config: {} } },
+    };
+    expect(resolveAppModelSelectionForInstance(instanceId, settings, providers, null)).toBe(
+      "openai:gpt-6-astra",
+    );
+    expect(getDefaultServerModel(providers, driver)).toBe("openai:gpt-6-astra");
+    expect(new Set(providers[0]!.models.map((model) => getDisplayModelName(model))).size).toBe(
+      providers[0]!.models.length,
+    );
+    for (const model of providers[0]!.models) {
+      expect(resolveAppModelSelectionForInstance(instanceId, settings, providers, model.slug)).toBe(
+        model.slug,
+      );
+      expect(
+        resolveAppModelSelectionState(
+          {
+            ...settings,
+            textGenerationModelSelection: createModelSelection(instanceId, model.slug),
+          },
+          providers,
+        ),
+      ).toEqual(createModelSelection(instanceId, model.slug));
+    }
+  });
+
+  it("uses Meerkat's native catalog for composer and background selections", () => {
+    const driver = ProviderDriverKind.make("meerkat");
+    const instanceId = ProviderInstanceId.make("meerkat");
+    const customId = ProviderInstanceId.make("meerkat_work");
+    const nativeModel = "local:project-model";
+    const providers = [instanceId, customId].map((id) => ({
+      ...provider({ provider: driver, instanceId: id, models: ["openai:gpt-5.6-sol"] }),
+      models: [
+        { slug: "openai:gpt-5.6-sol", name: "GPT 5.6 Sol", isCustom: false, capabilities: {} },
+        { slug: nativeModel, name: "Project model", isCustom: true, capabilities: {} },
+      ],
+    }));
+    const settings: UnifiedSettings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      textGenerationModelSelection: createModelSelection(customId, nativeModel),
+      providerInstances: {
+        [instanceId]: { driver, config: { customModels: ["stale-donor-model"] } },
+        [customId]: { driver, config: { customModels: ["another-stale-model"] } },
+      },
+    };
+
+    for (const entry of deriveProviderInstanceEntries(providers)) {
+      expect(getAppModelOptionsForInstance(settings, entry).map((model) => model.slug)).toEqual([
+        "openai:gpt-5.6-sol",
+        nativeModel,
+      ]);
+      expect(
+        resolveAppModelSelectionForInstance(entry.instanceId, settings, providers, nativeModel),
+      ).toBe(nativeModel);
+    }
+    expect(resolveAppModelSelection(driver, settings, providers, nativeModel)).toBe(nativeModel);
+    expect(resolveAppModelSelectionState(settings, providers)).toEqual(
+      createModelSelection(customId, nativeModel),
+    );
+    expect(settings.providerInstances?.[instanceId]?.config).toEqual({
+      customModels: ["stale-donor-model"],
+    });
+  });
+
   it("preserves server-provided legacy model metadata", () => {
     const baseProvider = provider({
       instanceId: "claudeAgent",

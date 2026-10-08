@@ -31,6 +31,10 @@ export function resolvePendingThreadCreation(input: {
   readonly pending: PendingThreadCreation | null;
   readonly previous: PendingThreadCreation | null;
   readonly detail: {
+    readonly preparedTurn?: {
+      readonly phase: string;
+      readonly command: { readonly commandId: string };
+    } | null;
     readonly messages: ReadonlyArray<{ readonly id: string }>;
     readonly latestTurn: { readonly turnId: string } | null;
     readonly session: { readonly status: string } | null;
@@ -43,8 +47,13 @@ export function resolvePendingThreadCreation(input: {
   ) {
     return null;
   }
-  if (creation.outcome?.kind === "failed") return creation;
   const detail = input.detail;
+  if (
+    detail?.preparedTurn?.phase === "released" &&
+    detail.preparedTurn.command.commandId === creation.message.commandId
+  )
+    return null;
+  if (creation.outcome?.kind === "failed") return creation;
   if (
     detail?.session?.status === "error" ||
     detail?.session?.status === "stopped" ||
@@ -87,6 +96,20 @@ export function clearPendingThreadCreationOutcome(threadKey: string): void {
   const next = { ...current };
   delete next[threadKey];
   appAtomRegistry.set(pendingThreadCreationOutcomesAtom, next);
+}
+
+/** A released original is now owned by prepared recovery, not creation failure UI. */
+export function retireReleasedPreparedCreationOutcome(
+  threadKey: string,
+  prepared:
+    | { readonly phase: string; readonly command: { readonly commandId: string } }
+    | null
+    | undefined,
+): void {
+  if (prepared?.phase !== "released") return;
+  const outcome = appAtomRegistry.get(pendingThreadCreationOutcomesAtom)[threadKey];
+  if (outcome?.message.commandId === prepared.command.commandId)
+    clearPendingThreadCreationOutcome(threadKey);
 }
 
 /**

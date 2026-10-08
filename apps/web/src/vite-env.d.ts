@@ -3,6 +3,7 @@
 import type { DesktopBridge } from "@t3tools/contracts";
 
 interface ImportMetaEnv {
+  readonly VITE_MEERKAT_RELEASE_REPOSITORY?: string;
   readonly VITE_HTTP_URL: string;
   readonly VITE_WS_URL: string;
   readonly VITE_HOSTED_APP_URL: string;

@@ -1,6 +1,7 @@
 import { SettingsGroup } from "./SettingsGroup";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { useAtomValue } from "@effect/atom-react";
+import { useNavigate } from "@tanstack/react-router";
 import { connectionStatusTitle } from "@t3tools/client-runtime/connection";
 import { safeErrorLogAttributes } from "@t3tools/client-runtime/errors";
 import {
@@ -39,7 +40,6 @@ import {
 } from "../../hooks/useSettings";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { cn } from "../../lib/utils";
-import { resolveAppModelSelectionState } from "../../modelSelection";
 import {
   useEnvironments,
   usePrimaryEnvironmentId,
@@ -82,13 +82,16 @@ import { stackedThreadToast, toastManager } from "../ui/toast";
 import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
 import { ExpandableText } from "./ExpandableText";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
+import { MeerkatCredentialsEditor } from "./MeerkatCredentialsEditor";
+import { MeerkatProviderControls } from "../team/MeerkatProviderControls";
+import { useProviderAccountTarget } from "./ProviderAccountContext";
+import { useSettingsProviderReadiness } from "./useSettingsProviderReadiness";
 import { UsageProviderSettings } from "./UsageProviderSettings";
 import { ProviderSetupSection, readAntigravityAuthMethod } from "./ProviderSetupSection";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import { searchableSetting } from "./settingsSearch";
 import {
   backgroundActivityOverrideSettings,
-  buildProviderInstanceUpdatePatch,
   durationToSeconds,
   normalizeIntervalSeconds,
   PROVIDER_HEALTH_INTERVAL_STEP_SECONDS,
@@ -104,6 +107,7 @@ import {
 } from "./settingsLayout";
 import {
   buildProviderEnvironmentOptions,
+  buildProviderSettingsEdit,
   classifyProviderEnvironmentAccess,
   isProviderSettingsEnvironmentAvailable,
   type ProviderEnvironmentAccess,
@@ -111,7 +115,9 @@ import {
   resolvePrimaryOperateAccess,
   resolveRemoteOperateAccess,
   resolveSelectedProviderEnvironmentId,
+  selectProviderSettingsRow,
 } from "./ProviderSettingsPanel.logic";
+import { orderProviderSettingsRows } from "./ProviderSettingsPanel.logic";
 
 function withoutProviderInstanceKey<V>(
   record: Readonly<Record<ProviderInstanceId, V>> | undefined,
@@ -588,20 +594,39 @@ export function EnvironmentProviderSettings({
    */
   readonly readOnly?: boolean;
 }) {
+  const accountTarget = useProviderAccountTarget();
+  const navigate = useNavigate();
   const settings = useEnvironmentSettings(environmentId);
   // Provider instances hold per-machine credentials and binaries, so this
   // page always edits exactly the environment it displays.
   const updateSettings = useUpdateEnvironmentSettings(environmentId);
+  const updateProviderSettings = useAtomCommand(serverEnvironment.updateProviderSettings, {
+    label: "provider settings update",
+  });
   const updateClientSettings = useUpdateClientSettings();
   const serverProviders =
     useAtomValue(serverEnvironment.providersValueAtom(environmentId)) ?? EMPTY_SERVER_PROVIDERS;
+  const {
+    providers: scopedProviders,
+    pendingInstanceIds,
+    cwd,
+    projectScoped,
+    operateAccess,
+  } = useSettingsProviderReadiness(environmentId, serverProviders);
   const refreshServerProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
   const updateProvider = useAtomCommand(serverEnvironment.updateProvider, {
     reportFailure: false,
   });
-  const [isRefreshingProviders, setIsRefreshingProviders] = useState(false);
+  const refreshScope = useMemo(() => ({ environmentId }), [environmentId]);
+  const [refreshState, setRefreshState] = useState<{
+    readonly scope: typeof refreshScope;
+    readonly pending: boolean;
+    readonly failed: boolean;
+  } | null>(null);
+  const isRefreshingProviders = refreshState?.scope === refreshScope && refreshState.pending;
+  const refreshFailed = refreshState?.scope === refreshScope && refreshState.failed;
   const [isAddInstanceDialogOpen, setIsAddInstanceDialogOpen] = useState(false);
   const [selectedInstanceId, setSelectedInstanceId] = useState<ProviderInstanceId | null>(
     targetInstanceId ?? null,
@@ -609,8 +634,29 @@ export function EnvironmentProviderSettings({
   const [updatingProviderInstanceIds, setUpdatingProviderInstanceIds] = useState<
     ReadonlySet<ProviderInstanceId>
   >(() => new Set());
-  const refreshingRef = useRef(false);
+  const refreshingRef = useRef<typeof refreshScope | null>(null);
+  useEffect(
+    () => () => {
+      // A response from a departed computer must not change the current panel.
+      if (refreshingRef.current === refreshScope) refreshingRef.current = null;
+    },
+    [refreshScope],
+  );
   const updatingInstanceIdsRef = useRef<Set<ProviderInstanceId>>(new Set());
+  // Keep provider controls stable while a credential save is awaiting acknowledgement.
+  const credentialRequestsRef = useRef(new Set<EnvironmentId>());
+  const [credentialRequests, setCredentialRequests] = useState<ReadonlySet<EnvironmentId>>(
+    () => new Set(),
+  );
+  const onCredentialActivityChange = useCallback(
+    (pending: boolean) => {
+      if (pending) credentialRequestsRef.current.add(environmentId);
+      else credentialRequestsRef.current.delete(environmentId);
+      setCredentialRequests(new Set(credentialRequestsRef.current));
+    },
+    [environmentId],
+  );
+  const providerWritesPending = credentialRequests.has(environmentId);
 
   const providerUpdateCandidateByInstanceId = useMemo(
     () =>
@@ -629,8 +675,6 @@ export function EnvironmentProviderSettings({
           provider.instanceId === defaultInstanceIdForDriver(ProviderDriverKind.make("cursor")),
       ),
   );
-  const textGenerationModelSelection = resolveAppModelSelectionState(settings, serverProviders);
-  const textGenInstanceId = textGenerationModelSelection.instanceId;
   const resolvedBackgroundActivity = resolveServerBackgroundActivitySettings(settings);
   const providerHealthPreset = getBackgroundActivityPresetSettings(
     resolvedBackgroundActivity.profile,
@@ -639,26 +683,31 @@ export function EnvironmentProviderSettings({
     resolvedBackgroundActivity.providerHealthRefreshInterval,
   );
   const defaultProviderHealthRefreshIntervalSeconds = durationToSeconds(providerHealthPreset);
-  const lastCheckedAt =
-    serverProviders.length > 0
-      ? serverProviders.reduce(
-          (latest, provider) => (provider.checkedAt > latest ? provider.checkedAt : latest),
-          serverProviders[0]!.checkedAt,
-        )
-      : null;
+  let lastCheckedAt: string | null = null;
+  for (const provider of scopedProviders) {
+    if (lastCheckedAt === null || provider.checkedAt > lastCheckedAt) {
+      lastCheckedAt = provider.checkedAt;
+    }
+  }
 
   const refreshProviders = useCallback(() => {
-    if (refreshingRef.current) return;
-    refreshingRef.current = true;
-    setIsRefreshingProviders(true);
+    if (readOnly || refreshingRef.current === refreshScope) return;
+    refreshingRef.current = refreshScope;
+    setRefreshState((previous) => ({
+      scope: refreshScope,
+      pending: true,
+      failed: previous?.scope === refreshScope && previous.failed,
+    }));
     void (async () => {
       const result = await refreshServerProviders({
         environmentId,
         input: { refreshModels: true },
       });
-      refreshingRef.current = false;
-      setIsRefreshingProviders(false);
-      if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+      if (refreshingRef.current !== refreshScope) return;
+      refreshingRef.current = null;
+      const failed = result._tag === "Failure" && !isAtomCommandInterrupted(result);
+      setRefreshState({ scope: refreshScope, pending: false, failed });
+      if (failed) {
         console.warn("Failed to refresh providers", {
           operation: "refresh-providers",
           environmentId,
@@ -666,13 +715,14 @@ export function EnvironmentProviderSettings({
         });
       }
     })();
-  }, [environmentId, refreshServerProviders]);
+  }, [environmentId, readOnly, refreshScope, refreshServerProviders]);
 
   const runProviderUpdate = useCallback(
     async (
       candidate: Pick<ProviderSettingsUpdateCandidate, "driver" | "instanceId">,
       targetVersion?: string,
     ) => {
+      if (readOnly || credentialRequestsRef.current.has(environmentId)) return;
       // Ref-based re-entry guard, mirroring refreshProviders: a state updater
       // may run after this function returns, so it cannot gate the dispatch.
       if (updatingInstanceIdsRef.current.has(candidate.instanceId)) {
@@ -712,7 +762,7 @@ export function EnvironmentProviderSettings({
         return next;
       });
     },
-    [environmentId, updateProvider],
+    [environmentId, readOnly, updateProvider],
   );
 
   interface InstanceRow {
@@ -786,7 +836,7 @@ export function EnvironmentProviderSettings({
         instanceId: defaultInstanceId,
         instance: effectiveInstance,
         driver,
-        isDefault: true,
+        isDefault: defaultLegacyConfig !== undefined,
         isDirty,
       });
     }
@@ -811,34 +861,28 @@ export function EnvironmentProviderSettings({
     targetInstanceId !== undefined &&
     selectedInstanceId === targetInstanceId &&
     !rows.some((row) => row.instanceId === targetInstanceId);
-  const selectedRow =
-    rows.find((row) => row.instanceId === selectedInstanceId) ??
-    (targetInstanceMissing ? null : (rows[0] ?? null));
+  const orderedRows = orderProviderSettingsRows(rows);
+  const selectedRow = selectProviderSettingsRow(orderedRows, selectedInstanceId, targetInstanceId);
+  const accountProvider =
+    accountTarget?.environmentId === environmentId &&
+    selectedRow?.instanceId === accountTarget.instanceId
+      ? serverProviders.find((provider) => provider.instanceId === accountTarget.instanceId)
+      : undefined;
 
-  const updateProviderInstance = (
-    row: InstanceRow,
-    next: ProviderInstanceConfig,
-    options?: {
-      readonly textGenerationModelSelection?: Parameters<
-        typeof buildProviderInstanceUpdatePatch
-      >[0]["textGenerationModelSelection"];
-    },
-  ) => {
-    updateSettings(
-      buildProviderInstanceUpdatePatch({
-        settings,
-        instanceId: row.instanceId,
-        instance: next,
-        driver: row.driver,
-        isDefault: row.isDefault,
-        textGenerationModelSelection: options?.textGenerationModelSelection,
-      }),
-    );
+  const updateProviderInstance = async (row: InstanceRow, next: ProviderInstanceConfig) => {
+    if (readOnly || credentialRequestsRef.current.has(environmentId)) return false;
+    const result = await updateProviderSettings({
+      environmentId,
+      input: buildProviderSettingsEdit(row.instanceId, row.instance, next),
+    });
+    return result._tag === "Success";
   };
 
   const deleteProviderInstance = (id: ProviderInstanceId) => {
-    updateSettings({
-      providerInstances: withoutProviderInstanceKey(settings.providerInstances, id),
+    if (readOnly || credentialRequestsRef.current.has(environmentId)) return;
+    void updateProviderSettings({
+      environmentId,
+      input: { kind: "delete", instanceId: id },
     });
   };
 
@@ -887,26 +931,20 @@ export function EnvironmentProviderSettings({
   };
 
   const resetDefaultInstance = (driverKind: ProviderDriverKind) => {
-    type LegacyProviderSettings = (typeof settings.providers)[keyof typeof settings.providers];
-    const defaultLegacyProviders = DEFAULT_UNIFIED_SETTINGS.providers as Record<
-      string,
-      LegacyProviderSettings | undefined
-    >;
-    const defaultInstanceId = defaultInstanceIdForDriver(driverKind);
-    const defaultLegacyProvider = defaultLegacyProviders[driverKind];
-    if (defaultLegacyProvider === undefined) return;
-    updateSettings({
-      providers: {
-        ...settings.providers,
-        [driverKind]: defaultLegacyProvider,
-      } as typeof settings.providers,
-      providerInstances: withoutProviderInstanceKey(settings.providerInstances, defaultInstanceId),
+    if (readOnly || credentialRequestsRef.current.has(environmentId)) return;
+    if (!Object.hasOwn(DEFAULT_UNIFIED_SETTINGS.providers, driverKind)) return;
+    void updateProviderSettings({
+      environmentId,
+      input: {
+        kind: "resetDefault",
+        driver: driverKind as keyof typeof settings.providers,
+      },
     });
   };
 
   const renderProviderInstance = (row: InstanceRow, mode: "list" | "editor") => {
     const driverOption = getDriverOption(row.driver);
-    const liveProvider = serverProviders.find(
+    const liveProvider = scopedProviders.find(
       (candidate) => candidate.instanceId === row.instanceId,
     );
     const updateCandidate = providerUpdateCandidateByInstanceId.get(row.instanceId);
@@ -931,10 +969,41 @@ export function EnvironmentProviderSettings({
         instance={row.instance}
         driverOption={driverOption}
         liveProvider={liveProvider}
+        workspaceReadinessPending={pendingInstanceIds.has(row.instanceId)}
+        workspaceReadinessAccess={operateAccess}
         mode={mode}
         selected={mode === "list" && selectedRow?.instanceId === row.instanceId}
-        onSelect={mode === "list" ? () => setSelectedInstanceId(row.instanceId) : undefined}
+        onSelect={
+          mode === "list"
+            ? () => {
+                if (accountTarget && row.instanceId !== accountTarget.instanceId) {
+                  void navigate({
+                    to: "/settings/providers",
+                    search: {
+                      environmentId,
+                      instanceId: row.instanceId,
+                      machine: environmentId,
+                      project: undefined,
+                      checkout: undefined,
+                    },
+                  });
+                } else setSelectedInstanceId(row.instanceId);
+              }
+            : undefined
+        }
         readOnly={readOnly}
+        instanceWritesPending={providerWritesPending}
+        credentials={
+          mode === "editor" && row.driver === "meerkat" ? (
+            <MeerkatCredentialsEditor
+              environmentId={environmentId}
+              environmentLabel={environmentLabel}
+              instanceId={row.instanceId}
+              readOnly={readOnly || providerWritesPending}
+              onActivityChange={onCredentialActivityChange}
+            />
+          ) : null
+        }
         setup={
           mode === "editor" && row.driver === "antigravity" ? (
             <ProviderSetupSection
@@ -945,26 +1014,12 @@ export function EnvironmentProviderSettings({
               binaryPath={configuredBinaryPath(row.instance.config)}
               authMethod={readAntigravityAuthMethod(row.instance.config)}
               enabled={resolveProviderInstanceEnabled(row.instance)}
-              readOnly={readOnly}
+              readOnly={readOnly || providerWritesPending}
               onEnable={() => updateProviderInstance(row, { ...row.instance, enabled: true })}
             />
           ) : null
         }
-        onUpdate={(next) => {
-          const wasEnabled = resolveProviderInstanceEnabled(row.instance);
-          const isDisabling = next.enabled === false && wasEnabled;
-          const shouldClearTextGen = isDisabling && textGenInstanceId === row.instanceId;
-          updateProviderInstance(
-            row,
-            next,
-            shouldClearTextGen
-              ? {
-                  textGenerationModelSelection:
-                    DEFAULT_UNIFIED_SETTINGS.textGenerationModelSelection,
-                }
-              : undefined,
-          );
-        }}
+        onUpdate={(next) => updateProviderInstance(row, next)}
         onDelete={
           mode === "editor" && !row.isDefault
             ? () => deleteProviderInstance(row.instanceId)
@@ -1021,7 +1076,44 @@ export function EnvironmentProviderSettings({
 
   return (
     <>
+      {accountTarget &&
+      accountTarget.environmentId === environmentId &&
+      selectedRow?.instanceId === accountTarget.instanceId ? (
+        <SettingsSection title="Thread account" variant="plain">
+          <SettingsGroup divided={false}>
+            {readOnly ? (
+              <p className="p-3 text-sm text-muted-foreground">
+                This connection cannot change accounts. Open the thread from a connection with
+                permission to operate this environment.
+              </p>
+            ) : accountProvider?.driver !== "meerkat" || !accountProvider.enabled ? (
+              <p role="alert" className="p-3 text-sm text-muted-foreground">
+                This thread's provider is unavailable. Reconnect or enable it to set up its account.
+              </p>
+            ) : !accountProvider.supportsThreadAuthScope ? (
+              <p role="alert" className="p-3 text-sm text-muted-foreground">
+                Update this environment to set up an account for the thread's checkout.
+              </p>
+            ) : (
+              <MeerkatProviderControls {...accountTarget} />
+            )}
+          </SettingsGroup>
+        </SettingsSection>
+      ) : null}
       <SettingsSection {...searchableSetting("providers")} variant="plain">
+        {accountTarget ? (
+          <p className="px-3 text-xs text-muted-foreground sm:px-4">
+            Environment provider settings. Credentials and runtime changes below apply across{" "}
+            {environmentLabel}.
+          </p>
+        ) : null}
+        {projectScoped ? (
+          <p className="px-3 text-xs text-muted-foreground sm:px-4">
+            {cwd
+              ? `Models and account status for ${cwd}. Provider settings apply to ${environmentLabel}.`
+              : "Select an available checkout to check its account and models."}
+          </p>
+        ) : null}
         <div className="flex min-h-11 min-w-0 items-center gap-2 px-3 sm:px-4">
           {deviceTabs}
           <div className="ml-auto flex min-w-0 shrink-0 items-center gap-2">
@@ -1061,7 +1153,12 @@ export function EnvironmentProviderSettings({
                       <Button
                         size="icon-xs"
                         variant="ghost-muted"
-                        onClick={() => setIsAddInstanceDialogOpen(true)}
+                        disabled={providerWritesPending}
+                        onClick={() => {
+                          if (!credentialRequestsRef.current.has(environmentId)) {
+                            setIsAddInstanceDialogOpen(true);
+                          }
+                        }}
                         aria-label="Add provider"
                       >
                         <PlusIcon />
@@ -1074,6 +1171,12 @@ export function EnvironmentProviderSettings({
             )}
           </div>
         </div>
+        {refreshFailed ? (
+          <p role="alert" className="px-3 pb-3 text-sm text-destructive sm:px-4">
+            Could not refresh provider status for {environmentLabel}. The displayed status may be
+            out of date. Use Refresh provider status to try again.
+          </p>
+        ) : null}
         {readOnly ? (
           <SettingsGroup divided={false} className="overflow-hidden">
             <SettingsRow
@@ -1096,7 +1199,7 @@ export function EnvironmentProviderSettings({
               className="@min-[48rem]/providers:min-h-0 @min-[48rem]/providers:flex-1"
             >
               <div className="divide-y divide-border/50">
-                {rows.map((row) => renderProviderInstance(row, "list"))}
+                {orderedRows.map((row) => renderProviderInstance(row, "list"))}
               </div>
             </ScrollArea>
           </div>

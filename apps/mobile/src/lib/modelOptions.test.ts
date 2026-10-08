@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { ProviderInstanceId, type ModelSelection, type ServerConfig } from "@t3tools/contracts";
+import { applyProviderOptionSelection, resolveProviderOptionDescriptors } from "./providerOptions";
 
 import {
   buildModelOptions,
@@ -13,6 +14,69 @@ import {
 } from "./modelOptions";
 
 describe("mobile model options", () => {
+  it("uses native reasoning-only capabilities for both composer and staged settings choices", () => {
+    const config = {
+      providers: [
+        {
+          instanceId: "native-work",
+          driver: "meerkat",
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [
+            {
+              slug: "openai:example",
+              name: "Example",
+              isCustom: false,
+              capabilities: {
+                optionDescriptors: [
+                  { id: "prompt_cache_enabled", label: "Prompt caching", type: "boolean" },
+                  {
+                    id: "reasoning_effort",
+                    label: "Reasoning",
+                    type: "select",
+                    options: [
+                      { id: "low", label: "Low" },
+                      { id: "high", label: "High" },
+                    ],
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ],
+    } as unknown as ServerConfig;
+    const saved: ModelSelection = {
+      instanceId: ProviderInstanceId.make("native-work"),
+      model: "openai:example",
+      options: [
+        { id: "prompt_cache_enabled", value: false },
+        { id: "reasoning_effort", value: "high" },
+      ],
+    };
+    const [model] = buildModelOptions(config, saved);
+    expect(model?.capabilities?.optionDescriptors).toEqual([
+      {
+        id: "reasoning_effort",
+        label: "Reasoning level",
+        type: "select",
+        options: [
+          { id: "low", label: "Low" },
+          { id: "high", label: "High" },
+        ],
+      },
+    ]);
+    expect(model?.selection).toBe(saved);
+    const descriptors = resolveProviderOptionDescriptors({
+      capabilities: model?.capabilities,
+      selections: model?.selection.options,
+    });
+    expect(
+      applyProviderOptionSelection(descriptors, { id: "reasoning_effort", value: "low" }),
+    ).toEqual([{ id: "reasoning_effort", value: "low" }]);
+    expect(saved.options?.[0]).toEqual({ id: "prompt_cache_enabled", value: false });
+  });
   it("groups models by provider and flags legacy entries", () => {
     const config = {
       providers: [

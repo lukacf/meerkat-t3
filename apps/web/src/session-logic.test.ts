@@ -7,7 +7,10 @@ import {
   type OrchestrationThreadActivity,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
-import { resolveWorkEntryToolPresentation } from "@t3tools/client-runtime/work-log/presentation";
+import {
+  resolveWorkEntryToolPresentation,
+  workLogEntryIsToolLike,
+} from "@t3tools/client-runtime/work-log/presentation";
 
 import {
   createMessageAttachmentPreviewProjector,
@@ -477,6 +480,50 @@ describe("workEntryIndicatesToolNeutralStatus", () => {
 });
 
 describe("deriveWorkLogEntries", () => {
+  it("retains native skill receipts as informational or error activity with expandable details", () => {
+    const key = "78249a26-13e0-4f13-a9c7-a96c5d258502/review";
+    const entries = deriveWorkLogEntries([
+      makeActivity({
+        id: "skill-resolved",
+        kind: "skills.resolved",
+        summary: "Skills resolved: review",
+        tone: "info",
+        turnId: "native-turn",
+        sequence: 1,
+        payload: { detail: `${key}\nInjected bytes: 163` },
+      }),
+      makeActivity({
+        id: "skill-failed",
+        kind: "skills.resolution-failed",
+        summary: "Skill resolution failed",
+        tone: "error",
+        turnId: "native-turn",
+        sequence: 2,
+        payload: { detail: `${key}\nReason:\n{\"reason_type\":\"not_found\"}` },
+      }),
+    ]);
+    expect(entries).toMatchObject([
+      {
+        id: "skill-resolved",
+        label: "Skills resolved: review",
+        tone: "info",
+        detail: `${key}\nInjected bytes: 163`,
+        sourceActivityKind: "skills.resolved",
+        turnId: "native-turn",
+      },
+      {
+        id: "skill-failed",
+        label: "Skill resolution failed",
+        tone: "error",
+        detail: `${key}\nReason:\n{\"reason_type\":\"not_found\"}`,
+        sourceActivityKind: "skills.resolution-failed",
+        turnId: "native-turn",
+      },
+    ]);
+    expect(entries.map(workLogEntryIsToolLike)).toEqual([false, false]);
+    expect(entries.every((entry) => entry.toolCallId === undefined)).toBe(true);
+  });
+
   it("keeps the latest task progress without emitting plan-update log entries", () => {
     const activities = [
       makeActivity({ id: "before", kind: "tool.completed", summary: "Read files", sequence: 0 }),

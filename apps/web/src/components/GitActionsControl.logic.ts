@@ -14,6 +14,138 @@ export type GitActionIconName = "commit" | "push" | "pr";
 
 export type GitDialogAction = "commit" | "push" | "create_pr";
 
+export type CommitMessageDrafts = Readonly<Record<string, string>>;
+
+export interface GitActionIntent {
+  action: GitStackedAction;
+  owner: string;
+  branchName: string | null | undefined;
+  includesCommit: boolean;
+  filePaths?: string[];
+}
+
+/** Freeze what was selected before a confirmation or author setup can delay dispatch. */
+export function captureGitActionIntent(input: {
+  action: GitStackedAction;
+  owner: string;
+  status: VcsStatusResult | null;
+  featureBranch?: boolean;
+  filePaths?: readonly string[];
+}): GitActionIntent | null {
+  const includesCommit =
+    (input.action === "commit" ||
+      input.action === "commit_push" ||
+      input.action === "commit_push_pr") &&
+    (input.action === "commit" ||
+      input.status?.hasWorkingTreeChanges !== false ||
+      input.featureBranch === true);
+  const filePaths = includesCommit
+    ? snapshotCommitFilePaths(input.filePaths, input.status?.workingTree.files ?? [])
+    : null;
+  if (includesCommit && filePaths === null) return null;
+  const action = includesCommit
+    ? input.action
+    : input.action === "commit_push"
+      ? "push"
+      : input.action === "commit_push_pr"
+        ? "create_pr"
+        : input.action;
+  return {
+    action,
+    owner: input.owner,
+    branchName: input.status?.refName,
+    includesCommit,
+    ...(filePaths ? { filePaths } : {}),
+  };
+}
+
+export function isGitActionIntentCurrent(
+  intent: GitActionIntent,
+  owner: string,
+  status: VcsStatusResult | null,
+): boolean {
+  return (
+    intent.owner === owner &&
+    (intent.branchName === undefined || (status !== null && intent.branchName === status.refName))
+  );
+}
+
+/** A result's next action belongs to the checkout and branch that produced it. */
+export function captureGitActionFollowupIntent(
+  original: GitActionIntent,
+  result: GitRunStackedActionResult,
+): GitActionIntent | null {
+  const cta = result.toast.cta;
+  if (
+    cta.kind !== "run_action" ||
+    (cta.action.kind !== "push" && cta.action.kind !== "create_pr")
+  ) {
+    return null;
+  }
+
+  // An intentional feature-branch step supersedes the branch admitted for the
+  // original action. Otherwise retain that branch, never the current selection.
+  const branchName = result.branch.status === "created" ? result.branch.name : original.branchName;
+  if (!branchName || (result.push.branch !== undefined && result.push.branch !== branchName)) {
+    return null;
+  }
+
+  return {
+    action: cta.action.kind,
+    owner: original.owner,
+    branchName,
+    includesCommit: false,
+  };
+}
+
+/** Empty and omitted paths both stage everything on the server, so neither is a safe snapshot. */
+export function snapshotCommitFilePaths(
+  selectedPaths: readonly string[] | undefined,
+  currentFiles: readonly { readonly path: string }[],
+): string[] | null {
+  const paths = selectedPaths ?? currentFiles.map((file) => file.path);
+  return paths.length > 0 ? [...paths] : null;
+}
+
+/** A late Git result may only clear the message it successfully committed. */
+export function clearCommittedMessageDraft(
+  drafts: CommitMessageDrafts,
+  scopeKey: string,
+  submittedMessage: string,
+  commitStatus: GitRunStackedActionResult["commit"]["status"],
+): CommitMessageDrafts {
+  if (commitStatus !== "created" || drafts[scopeKey]?.trim() !== submittedMessage.trim()) {
+    return drafts;
+  }
+  const next = { ...drafts };
+  delete next[scopeKey];
+  return next;
+}
+
+export function manualPrSubmissionBlocker(gitStatus: VcsStatusResult | null): string | null {
+  if (!gitStatus) return "Waiting for repository status.";
+  if (!gitStatus.isRepo || !gitStatus.hasPrimaryRemote)
+    return "Connect this repository to a remote before creating a pull request.";
+  if (!gitStatus.refName) return "Check out a branch before creating a pull request.";
+  if (gitStatus.hasWorkingTreeChanges)
+    return "Commit or stash local changes before creating a pull request. Your title and description will stay here.";
+  return null;
+}
+
+export function resolvePublishRepositoryEntry(input: {
+  readonly environmentId: string | null;
+  readonly cwd: string | null;
+  readonly gitStatus: VcsStatusResult | null;
+  readonly pendingRecoveryCount: number;
+  readonly recoveryReadable: boolean;
+}): "create" | "resume" | null {
+  if (!input.environmentId || !input.cwd) return null;
+  // A hosting-status failure must not hide an already-created repository.
+  // The resume command revalidates the saved checkout and remote on the server.
+  if (input.pendingRecoveryCount > 0 || !input.recoveryReadable) return "resume";
+  return input.gitStatus?.isRepo && !input.gitStatus.hasPrimaryRemote ? "create" : null;
+}
+
 export interface GitActionMenuItem {
   id: "commit" | "push" | "pr";
   label: string;
@@ -322,6 +454,41 @@ export function requiresDefaultBranchConfirmation(
   );
 }
 
+export function canContinueOnFeatureBranch(
+  action: DefaultBranchConfirmableAction,
+  includesCommit: boolean,
+): boolean {
+  // The server's automatic feature branch step derives its name from changes to commit.
+  return includesCommit && (action === "commit_push" || action === "commit_push_pr");
+}
+
+export function resolveGeneratedDraftAction(
+  gitStatus: VcsStatusResult | null,
+  isBusy: boolean,
+): { action: "create_pr" | "commit_push_pr"; label: string; disabled: boolean } | null {
+  if (
+    !gitStatus?.isRepo ||
+    !gitStatus.hasPrimaryRemote ||
+    gitStatus.sourceControlProvider?.kind !== "github" ||
+    gitStatus.pr?.state === "open" ||
+    gitStatus.behindCount > 0 ||
+    (gitStatus.isDefaultRef && !gitStatus.hasWorkingTreeChanges)
+  ) {
+    return null;
+  }
+  // Default-ref protection remains in the action runner, including new-branch selection.
+  const quickAction = resolveQuickAction(gitStatus, false, false);
+  if (quickAction.action !== "create_pr" && quickAction.action !== "commit_push_pr") return null;
+  return {
+    action: quickAction.action,
+    label:
+      quickAction.action === "commit_push_pr"
+        ? "Commit, push & create draft PR"
+        : "Create draft PR",
+    disabled: isBusy,
+  };
+}
+
 export function resolveDefaultBranchActionDialogCopy(input: {
   action: DefaultBranchConfirmableAction;
   branchName: string;
@@ -329,7 +496,9 @@ export function resolveDefaultBranchActionDialogCopy(input: {
   terminology?: ChangeRequestTerminology;
 }): DefaultBranchActionDialogCopy {
   const branchLabel = input.branchName;
-  const suffix = ` on "${branchLabel}". You can continue on this ref or create a feature ref and run the same action there.`;
+  const suffix = canContinueOnFeatureBranch(input.action, input.includesCommit)
+    ? ` on "${branchLabel}". You can continue on this ref or create a feature ref and run the same action there.`
+    : ` on "${branchLabel}". To use a feature branch, cancel and create it with the branch selector first.`;
   const terminology = input.terminology ?? DEFAULT_CHANGE_REQUEST_TERMINOLOGY;
 
   if (input.action === "push" || input.action === "commit_push") {

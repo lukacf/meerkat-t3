@@ -66,6 +66,21 @@ import Migration0051 from "./Migrations/051_ProjectionThreadMessageContext.ts";
 import Migration0052 from "./Migrations/052_ProjectionThreadTitleState.ts";
 import Migration0053 from "./Migrations/053_PullRequestFilesViewed.ts";
 import Migration0054 from "./Migrations/054_ProjectionThreadsAutoSettleDisabledAt.ts";
+import Migration0055 from "./Migrations/055_MeerkatProjectAgents.ts";
+import Migration0056 from "./Migrations/056_MeerkatProjectAgentPreparation.ts";
+import Migration0057 from "./Migrations/057_MeerkatAgentDeliveryIdentity.ts";
+import Migration0058 from "./Migrations/058_MeerkatPeerConnections.ts";
+import Migration0059 from "./Migrations/059_MeerkatObservedAgents.ts";
+import Migration0060 from "./Migrations/060_MeerkatProjectAgentRevisions.ts";
+import Migration0061 from "./Migrations/061_MeerkatAgentQueue.ts";
+import Migration0062 from "./Migrations/062_MeerkatAttention.ts";
+import Migration0063 from "./Migrations/063_MeerkatWorkspaceCheckpoints.ts";
+import Migration0064 from "./Migrations/064_MeerkatCoordinatorReceiptTargets.ts";
+import Migration0065 from "./Migrations/065_MeerkatProjectAgentAccess.ts";
+import Migration0066 from "./Migrations/066_ProjectCloneIntents.ts";
+import Migration0067 from "./Migrations/067_ThreadPreparedTurn.ts";
+import Migration0068 from "./Migrations/068_MeerkatProjectAgentOptions.ts";
+import Migration0069 from "./Migrations/069_CreatedPullRequestLinks.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -132,6 +147,21 @@ const migrationEntries = [
   [52, "ProjectionThreadTitleState", Migration0052],
   [53, "PullRequestFilesViewed", Migration0053],
   [54, "ProjectionThreadsAutoSettleDisabledAt", Migration0054],
+  [55, "MeerkatProjectAgents", Migration0055],
+  [56, "MeerkatProjectAgentPreparation", Migration0056],
+  [57, "MeerkatAgentDeliveryIdentity", Migration0057],
+  [58, "MeerkatPeerConnections", Migration0058],
+  [59, "MeerkatObservedAgents", Migration0059],
+  [60, "MeerkatProjectAgentRevisions", Migration0060],
+  [61, "MeerkatAgentQueue", Migration0061],
+  [62, "MeerkatAttention", Migration0062],
+  [63, "MeerkatWorkspaceCheckpoints", Migration0063],
+  [64, "MeerkatCoordinatorReceiptTargets", Migration0064],
+  [65, "MeerkatProjectAgentAccess", Migration0065],
+  [66, "ProjectCloneIntents", Migration0066],
+  [67, "ThreadPreparedTurn", Migration0067],
+  [68, "MeerkatProjectAgentOptions", Migration0068],
+  [69, "CreatedPullRequestLinks", Migration0069],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

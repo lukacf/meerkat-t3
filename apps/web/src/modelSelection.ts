@@ -7,6 +7,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
+  type ServerProviderModel,
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
 import {
@@ -32,6 +33,7 @@ import {
   NO_PROVIDER_MODEL_SELECTION,
 } from "./providerInstances";
 import { sortModelsForProviderInstance } from "./modelOrdering";
+import { modelCredentialRequirement } from "./modelCredentials";
 
 const MAX_CUSTOM_MODEL_COUNT = 32;
 export const MAX_CUSTOM_MODEL_LENGTH = 256;
@@ -58,7 +60,7 @@ function readInstanceCustomModels(
   instanceId: ProviderInstanceId,
   driverKind: ProviderDriverKind,
 ): ReadonlyArray<CustomModelDefinition> {
-  if (driverKind === "antigravity") return [];
+  if (driverKind === "antigravity" || driverKind === "meerkat") return [];
   const instance = settings.providerInstances?.[instanceId];
   const config = instance?.config;
   if (config !== null && typeof config === "object") {
@@ -79,6 +81,7 @@ function readInstanceCustomModels(
 }
 
 export interface AppModelOption {
+  credentialState?: ServerProviderModel["credentialState"];
   slug: string;
   name: string;
   shortName?: string;
@@ -98,21 +101,27 @@ function appendUnavailableDynamicModelSelection(
   selectedModel: string | null | undefined,
   hiddenModels: ReadonlyArray<string>,
 ): AppModelOption[] {
-  if (provider !== "opencode" && provider !== "antigravity") return options;
+  if (provider !== "opencode" && provider !== "antigravity" && provider !== "meerkat")
+    return options;
   const slug = normalizeCustomModelSlug(selectedModel);
   if (!slug) return options;
   if (provider === "antigravity" && slug === ANTIGRAVITY_DEFAULT_MODEL) return options;
 
   // A model that exists in the raw catalog can be absent from `options`
   // because the user hid it. Keep that preference authoritative.
-  if (resolveSelectableModel(provider, slug, rawModels) !== null) return options;
+  if (
+    provider === "meerkat"
+      ? rawModels.some((model) => model.slug === slug)
+      : resolveSelectableModel(provider, slug, rawModels) !== null
+  )
+    return options;
   if (hiddenModels.includes(slug)) return options;
   if (options.some((option) => option.slug === slug)) return options;
 
   return [...options, { slug, name: slug, isCustom: false, isUnavailable: true }];
 }
 
-function toAppModelOption(model: ServerProvider["models"][number]): AppModelOption {
+export function toAppModelOption(model: ServerProvider["models"][number]): AppModelOption {
   const option: AppModelOption = {
     slug: model.slug,
     name: model.name,
@@ -120,6 +129,7 @@ function toAppModelOption(model: ServerProvider["models"][number]): AppModelOpti
   };
   if (model.shortName) option.shortName = model.shortName;
   if (model.subProvider) option.subProvider = model.subProvider;
+  if (model.credentialState) option.credentialState = model.credentialState;
   if (model.aliases) option.aliases = model.aliases;
   if (model.badge) option.badge = model.badge;
   if (model.isDefault) option.isDefault = true;
@@ -188,9 +198,9 @@ function getAppModelOptions(
   const rawModels = getProviderModels(providers, provider);
   // Server-reported custom rows mirror settings and can lag a removal, so
   // only built-ins are taken from the snapshot; custom rows are rebuilt from
-  // settings below.
+  // settings below. Meerkat owns its entire native catalog, including custom rows.
   const options: AppModelOption[] = rawModels
-    .filter((model) => !model.isCustom)
+    .filter((model) => provider === "meerkat" || !model.isCustom)
     .map(toAppModelOption);
   const seen = new Set(options.map((option) => option.slug));
   const builtInModelSlugs = new Set(
@@ -235,7 +245,8 @@ function getAppModelOptions(
  * instances only. This keeps two instances of the same kind from leaking
  * custom slugs into each other. Custom rows reported by the server are
  * ignored so a slug removed in Settings disappears without waiting for the
- * next provider probe.
+ * next provider probe. Meerkat's native catalog owns custom entries too;
+ * its config does not accept donor custom-model declarations.
  */
 export function getAppModelOptionsForInstance(
   settings: UnifiedSettings,
@@ -243,7 +254,7 @@ export function getAppModelOptionsForInstance(
   selectedModel?: string | null,
 ): AppModelOption[] {
   const options: AppModelOption[] = entry.models
-    .filter((model) => !model.isCustom)
+    .filter((model) => entry.driverKind === "meerkat" || !model.isCustom)
     .map(toAppModelOption);
   const seen = new Set(options.map((option) => option.slug));
   const builtInModelSlugs = new Set(
@@ -297,6 +308,12 @@ export function resolveAppModelSelectionForInstance(
     (candidate) => candidate.instanceId === instanceId,
   );
   if (!entry) return null;
+  // A saved native request names an exact model. Catalog changes may block
+  // that choice, but must not replace it with a different model on the next send.
+  if (entry.driverKind === "meerkat" && resolutionOptions?.preserveUnavailableSelection) {
+    const savedModel = normalizeCustomModelSlug(selectedModel);
+    if (savedModel) return savedModel;
+  }
   const options = getAppModelOptionsForInstance(
     settings,
     entry,
@@ -321,7 +338,8 @@ export function resolveAppModelSelectionForInstance(
       return unavailableSelection;
     }
   }
-  return options.find((option) => option.isDefault)?.slug ?? options[0]?.slug ?? null;
+  const usableOptions = options.filter((option) => !modelCredentialRequirement(option));
+  return usableOptions.find((option) => option.isDefault)?.slug ?? usableOptions[0]?.slug ?? null;
 }
 
 /**

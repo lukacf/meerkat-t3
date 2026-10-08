@@ -108,12 +108,14 @@ function headerLabel(snapshot: WorktreeSetupSnapshot): string {
       return "Setting up worktree…";
     case "done":
       return snapshot.stages.some((stage) => stage.status === "failed")
-        ? "Worktree ready, setup script failed"
+        ? "Worktree ready, initial setup script failed"
         : "Worktree ready";
     case "failed":
-      return "Worktree setup failed";
+      return snapshot.stages.some((stage) => stage.id === "agent" && stage.status === "failed")
+        ? "Initial agent start failed"
+        : "Initial worktree setup failed";
     case "cancelled":
-      return "Worktree setup cancelled";
+      return "Initial worktree setup cancelled";
   }
 }
 
@@ -393,7 +395,7 @@ export function WorktreeSetupCard({
       )}
 
       {snapshot.phase === "failed" && snapshot.error ? (
-        <p className="mt-1 ml-8 text-xs text-muted-foreground">{snapshot.error}</p>
+        <p className="mt-1 ml-8 text-xs text-muted-foreground">Initial attempt: {snapshot.error}</p>
       ) : null}
 
       {detailsOpen ? <SetupDetails snapshot={snapshot} /> : null}

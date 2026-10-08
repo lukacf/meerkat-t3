@@ -10,6 +10,7 @@ import {
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsPatch,
+  ProviderSettingsIntent,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
@@ -83,7 +84,7 @@ describe("ServerSettings default permissions", () => {
     expect(DEFAULT_SERVER_SETTINGS.defaultRuntimeMode).toBe("full-access");
   });
 
-  it.each(["approval-required", "auto-accept-edits", "auto", "full-access"])(
+  it.each(["read-only", "approval-required", "auto-accept-edits", "auto", "full-access"])(
     "round-trips %s as an environment default and project override",
     (defaultRuntimeMode) => {
       const input = {
@@ -991,4 +992,80 @@ it("validates remote device hosts and rejects ambiguous host ids", () => {
     decodeDeviceHostSettings({ deviceHosts: [{ ...host, target: "-oProxyCommand=bad" }] }),
   ).toThrow();
   expect(() => decodeDeviceHostSettings({ deviceHosts: [{ ...host, port: 0 }] })).toThrow();
+});
+
+describe("resumable onboarding settings", () => {
+  it("keeps legacy installations compatible without inventing setup progress", () => {
+    expect(decodeClientSettings({}).onboardingProgress).toBeNull();
+  });
+  it("round-trips the chosen computer, project and first task independently of completion", () => {
+    const onboardingProgress = {
+      step: "first-task",
+      environmentIds: ["computer"],
+      startedAt: "2026-10-04T10:00:00.000Z",
+      projectRef: { environmentId: "computer", projectId: "project" },
+      threadId: "thread",
+    };
+    const settings = decodeClientSettings({ onboardingProgress });
+    expect(settings.onboardingCompletedAt).toBeNull();
+    expect(encodeClientSettings(settings).onboardingProgress).toEqual(onboardingProgress);
+    expect(decodeClientSettingsPatch({ onboardingProgress })).toEqual({ onboardingProgress });
+  });
+  it("rejects progress with an unknown stage or unscoped project", () => {
+    const progress = {
+      step: "projects",
+      environmentIds: ["computer"],
+      startedAt: "2026-10-04T10:00:00.000Z",
+      projectRef: null,
+      threadId: null,
+    };
+    expect(() =>
+      decodeClientSettingsPatch({ onboardingProgress: { ...progress, step: "done" } }),
+    ).toThrow();
+    expect(() =>
+      decodeClientSettingsPatch({
+        onboardingProgress: { ...progress, projectRef: { projectId: "project" } },
+      }),
+    ).toThrow();
+  });
+});
+
+describe("provider settings intents", () => {
+  const decode = Schema.decodeUnknownSync(ProviderSettingsIntent);
+  it("distinguishes omitted fields, explicit removal, and opaque config values", () => {
+    const intent = {
+      kind: "edit",
+      instanceId: "custom",
+      driver: "fork",
+      changes: {
+        displayName: null,
+        environment: null,
+        config: { set: { future: [1, { nested: true }] }, remove: ["old"] },
+      },
+    };
+    expect(decode(intent)).toEqual(intent);
+    expect(decode({ kind: "edit", instanceId: "custom", driver: "fork", changes: {} })).toEqual({
+      kind: "edit",
+      instanceId: "custom",
+      driver: "fork",
+      changes: {},
+    });
+  });
+  it("preserves sensitive environment metadata and opaque add configurations", () => {
+    const intent = {
+      kind: "add",
+      instanceId: "custom",
+      instance: {
+        driver: "fork",
+        config: ["opaque"],
+        environment: [{ name: "KEY", value: "", sensitive: true, valueRedacted: true }],
+      },
+    };
+    expect(decode(intent)).toEqual(intent);
+  });
+  it("rejects missing operation identities and invalid default resets", () => {
+    expect(() => decode({ kind: "delete" })).toThrow();
+    expect(() => decode({ kind: "edit", instanceId: "custom", changes: {} })).toThrow();
+    expect(() => decode({ kind: "resetDefault", driver: "meerkat" })).toThrow();
+  });
 });

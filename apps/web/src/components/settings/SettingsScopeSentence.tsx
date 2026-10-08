@@ -26,6 +26,7 @@ import {
   projectAxisValue,
   selectEnvironmentAxis,
   selectProjectAxis,
+  settingsScopeEnvironmentDiscriminator,
   settingsScopeEnvironmentLabel,
 } from "./settingsScopeAxis";
 
@@ -82,22 +83,30 @@ function ScopeMenu({
   ariaLabel,
   icon,
   label,
+  displayLabel = label,
+  discriminator,
   children,
 }: {
   ariaLabel: string;
   icon: ReactNode;
   label: string;
+  displayLabel?: string | undefined;
+  discriminator?: string | null;
   children: ReactNode;
 }) {
   return (
     <Menu>
       <MenuTrigger
-        aria-label={`${ariaLabel}: ${label}`}
+        aria-label={`${ariaLabel}: ${label}${discriminator ? ` (${discriminator})` : ""}`}
+        title={label}
         render={<InlineButton tone="picker" />}
         className="min-w-0 max-w-72"
       >
         {icon}
-        <span className="min-w-0 truncate">{label}</span>
+        <span className="min-w-0 truncate">{displayLabel}</span>
+        {discriminator ? (
+          <span className="shrink-0 text-xs text-muted-foreground">{discriminator}</span>
+        ) : null}
         <ChevronDownIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
       </MenuTrigger>
       <MenuPopup align="start">{children}</MenuPopup>
@@ -133,6 +142,10 @@ function EnvironmentScopeMenu({ value, groups, environments, onChange }: Setting
             ? "Unavailable environment"
             : "All environments"
       }
+      displayLabel={selected?.label}
+      discriminator={
+        selected ? settingsScopeEnvironmentDiscriminator(selected, environments) : null
+      }
     >
       <MenuRadioGroup
         value={environmentValue}
@@ -149,15 +162,20 @@ function EnvironmentScopeMenu({ value, groups, environments, onChange }: Setting
         </MenuRadioItem>
         <MenuSeparator />
         {environments.map((environment) => (
-          <MenuRadioItem key={environment.environmentId} value={environment.environmentId}>
+          <MenuRadioItem
+            key={environment.environmentId}
+            value={environment.environmentId}
+            title={settingsScopeEnvironmentLabel(environment, environments)}
+          >
             <span className="flex min-w-0 items-center gap-2">
               <EnvironmentMachineIcon
                 aria-hidden
                 kind={resolveEnvironmentMachineKind(environment.serverConfig)}
                 className="size-3.5"
               />
-              <span className="min-w-0 flex-1 truncate">
-                {settingsScopeEnvironmentLabel(environment, environments)}
+              <span className="min-w-0 flex-1 truncate">{environment.label}</span>
+              <span className="shrink-0 text-xs text-muted-foreground">
+                {settingsScopeEnvironmentDiscriminator(environment, environments)}
               </span>
               {environment.connection.phase === "connected" ? null : (
                 <span className="shrink-0 text-xs text-muted-foreground">Offline</span>

@@ -1,5 +1,7 @@
 # Messages and context
 
+For Meerkat project specialists and native workers, use the [agent message guide](agents.md#follow-up-messages). Their Message, Steer, Queue for idle, and Stop controls have different queue behavior from the ordinary T3 thread composer described below.
+
 Give the agent a task in the composer. Add files, quote a previous response, or
 include a skill when the task needs more context.
 
@@ -33,7 +35,7 @@ also send files to T3 Code through another app's system share sheet.
 
 See [images and videos](#images-and-videos-in-messages) for previewing and saving media.
 
-## Send while the agent is working
+## Ordinary thread follow-ups
 
 On web and desktop, a message sent during a running turn waits at the end of the conversation as a
 dashed bubble. It goes out on its own when the agent finishes its next tool

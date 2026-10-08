@@ -361,6 +361,11 @@ export function commandDetailRepeatsCommand(input: {
 }
 
 export function workLogEntryIsToolLike(entry: WorkLogPresentationEntry): boolean {
+  if (
+    entry.sourceActivityKind === "skills.resolved" ||
+    entry.sourceActivityKind === "skills.resolution-failed"
+  )
+    return false;
   if (entry.tone === "tool" || entry.tone === "thinking" || entry.tone === "error") return true;
   if (entry.command !== undefined && entry.command.trim().length > 0) return true;
   if (entry.requestKind !== undefined) return true;

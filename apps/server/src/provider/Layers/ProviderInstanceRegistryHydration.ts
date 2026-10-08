@@ -49,12 +49,14 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { BUILT_IN_DRIVERS, type BuiltInDriversEnv } from "../builtInDrivers.ts";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
 import { ProviderInstanceRegistryMutator } from "../Services/ProviderInstanceRegistryMutator.ts";
+import { ProviderInstanceSettingsReconciler } from "../Services/ProviderInstanceSettingsReconciler.ts";
 import { ProviderInstanceRegistryMutableLayer } from "./ProviderInstanceRegistryLive.ts";
 
 /**
@@ -109,28 +111,36 @@ export const deriveProviderInstanceConfigMap = (
  * layer scope (process lifetime in production), so it is interrupted on
  * shutdown without leaking.
  *
- * Errors inside the watcher are logged and swallowed — the registry's own
- * "unavailable" bucket already absorbs unknown drivers and invalid
- * configs, so the only way the watcher could fail is a settings stream
- * tear-down, which logs and exits cleanly.
+ * The registry handles known configuration, creation, and disposal failures
+ * with unavailable snapshots. Unexpected reconciliation defects are logged
+ * here so a single failed update does not terminate the settings watcher.
  */
-const SettingsWatcherLive = Layer.effectDiscard(
+export const ProviderInstanceSettingsReconcilerLive = Layer.effect(
+  ProviderInstanceSettingsReconciler,
   Effect.gen(function* () {
     const mutator = yield* ProviderInstanceRegistryMutator;
     const serverSettings = yield* ServerSettingsService;
+    const reconcileLock = yield* Semaphore.make(1);
+    // Read inside the lock: queued notifications are wakeups, not snapshots
+    // that may overwrite a newer credential refresh after it has completed.
+    const reconcileCurrentSettings = reconcileLock.withPermits(1)(
+      Effect.gen(function* () {
+        const current = yield* serverSettings.getSettings;
+        yield* mutator.reconcile(deriveProviderInstanceConfigMap(current));
+      }),
+    );
     const settingsChanges = yield* serverSettings.subscribeChanges;
     yield* settingsChanges.pipe(
-      Stream.runForEach((next) =>
-        mutator
-          .reconcile(deriveProviderInstanceConfigMap(next))
-          .pipe(
-            Effect.catchCause((cause) =>
-              Effect.logError("ProviderInstanceRegistry reconcile failed", cause),
-            ),
+      Stream.runForEach(() =>
+        reconcileCurrentSettings.pipe(
+          Effect.catchCause((cause) =>
+            Effect.logError("ProviderInstanceRegistry reconcile failed", cause),
           ),
+        ),
       ),
       Effect.forkScoped,
     );
+    return { reconcileCurrentSettings };
   }),
 );
 
@@ -142,7 +152,7 @@ const SettingsWatcherLive = Layer.effectDiscard(
  *   - `ProviderInstanceRegistryMutableLayer` produces the registry +
  *     mutator from the initial config map. Its scope owns every
  *     per-instance child scope created during reconcile.
- *   - `SettingsWatcherLive` consumes the mutator, acquires its settings
+ *   - `ProviderInstanceSettingsReconcilerLive` consumes the mutator, acquires its settings
  *     subscription before forking, and runs a daemon fiber in the same scope.
  *
  * Composing via `Layer.provideMerge` makes the watcher's deps available
@@ -151,7 +161,7 @@ const SettingsWatcherLive = Layer.effectDiscard(
  * it, so the visibility leak is harmless in practice.
  */
 export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
-  ProviderInstanceRegistry,
+  ProviderInstanceRegistry | ProviderInstanceSettingsReconciler,
   never,
   BuiltInDriversEnv | ServerSettingsService
 > = Layer.unwrap(
@@ -170,6 +180,10 @@ export const ProviderInstanceRegistryHydrationLive: Layer.Layer<
       configMap: initialConfigMap,
     });
 
-    return SettingsWatcherLive.pipe(Layer.provideMerge(mutableLayer));
+    return ProviderInstanceSettingsReconcilerLive.pipe(Layer.provideMerge(mutableLayer));
   }),
-) as Layer.Layer<ProviderInstanceRegistry, never, BuiltInDriversEnv | ServerSettingsService>;
+) as Layer.Layer<
+  ProviderInstanceRegistry | ProviderInstanceSettingsReconciler,
+  never,
+  BuiltInDriversEnv | ServerSettingsService
+>;

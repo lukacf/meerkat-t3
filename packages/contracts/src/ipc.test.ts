@@ -1,7 +1,24 @@
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { DesktopEnvironmentBootstrapSchema } from "./ipc.ts";
+import { DesktopAppBrandingSchema, DesktopEnvironmentBootstrapSchema } from "./ipc.ts";
+
+describe("DesktopAppBrandingSchema", () => {
+  const decode = Schema.decodeUnknownSync(DesktopAppBrandingSchema);
+  const branding = {
+    baseName: "Meerkat T3",
+    stageLabel: "Prototype",
+    displayName: "Meerkat T3 (Prototype)",
+  };
+
+  it("preserves the running shell version while accepting older desktop payloads", () => {
+    expect(decode({ ...branding, appVersion: "0.0.56" })).toEqual({
+      ...branding,
+      appVersion: "0.0.56",
+    });
+    expect(decode(branding)).toEqual(branding);
+  });
+});
 
 describe("DesktopEnvironmentBootstrapSchema", () => {
   const decode = Schema.decodeUnknownSync(DesktopEnvironmentBootstrapSchema);

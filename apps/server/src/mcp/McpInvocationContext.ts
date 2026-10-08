@@ -17,6 +17,8 @@ export interface McpInvocationScope {
   readonly providerInstanceId: ProviderInstanceId;
   readonly capabilities: ReadonlySet<McpCapability>;
   readonly issuedAt: number;
+  /** Optional caller constraint: never route this grant to another desktop connection. */
+  readonly previewHostConnectionId?: string;
 }
 
 export class McpInvocationContext extends Context.Service<

@@ -20,6 +20,7 @@ import {
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 import * as GitHubGraphQlBudget from "./githubGraphQlBudget.ts";
 import * as SourceControlRateLimit from "./SourceControlRateLimit.ts";
+import type { CreatedChangeRequest } from "./SourceControlProvider.ts";
 import {
   decodeGitHubPullRequestJson,
   decodeGitHubPullRequestListJson,
@@ -27,6 +28,30 @@ import {
 } from "./gitHubPullRequests.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
+const decodeCreatedPullRequestUrl = Schema.decodeUnknownOption(Schema.URLFromString);
+
+function createdPullRequestIdentity(
+  result: VcsProcess.VcsProcessOutput,
+): CreatedChangeRequest | undefined {
+  if (result.stdoutTruncated || result.stdoutInvalidUtf8) return undefined;
+  const raw = result.stdout.trim();
+  if (/\s/u.test(raw)) return undefined;
+  const decoded = decodeCreatedPullRequestUrl(raw);
+  if (Option.isNone(decoded)) return undefined;
+  const url = decoded.value;
+  if (
+    (url.protocol !== "https:" && url.protocol !== "http:") ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  )
+    return undefined;
+  const match = /^\/[^/]+\/[^/]+\/pull\/([1-9]\d*)\/?$/u.exec(url.pathname);
+  const number = Number(match?.[1]);
+  if (!Number.isSafeInteger(number) || number < 1) return undefined;
+  return { url: raw, number };
+}
 
 /** Server-local credential scope; never put its value in RPC payloads or cache keys. */
 export const PinnedGitHubCredential = Context.Reference<{
@@ -201,6 +226,19 @@ export class GitHubRepositoryDecodeError extends Schema.TaggedError<GitHubReposi
   }
 }
 
+export class GitHubPullRequestCreationUnconfirmedError extends Schema.TaggedError<GitHubPullRequestCreationUnconfirmedError>()(
+  "GitHubPullRequestCreationUnconfirmedError",
+  gitHubCliDecodeFields,
+) {
+  get detail(): string {
+    return "GitHub CLI finished, but did not return a usable pull request URL. The PR may have been created. Check GitHub for this branch before retrying to avoid duplicates.";
+  }
+
+  override get message(): string {
+    return this.detail;
+  }
+}
+
 export const GitHubCliError = Schema.Union([
   GitHubCliUnavailableError,
   GitHubCliAuthenticationError,
@@ -211,6 +249,7 @@ export const GitHubCliError = Schema.Union([
   GitHubChangeRequestListDecodeError,
   GitHubPullRequestDecodeError,
   GitHubRepositoryDecodeError,
+  GitHubPullRequestCreationUnconfirmedError,
 ]);
 export type GitHubCliError = typeof GitHubCliError.Type;
 
@@ -323,7 +362,8 @@ export class GitHubCli extends Context.Service<
       readonly headSelector: string;
       readonly title: string;
       readonly bodyFile: string;
-    }) => Effect.Effect<void, GitHubCliError>;
+      readonly draft?: boolean;
+    }) => Effect.Effect<CreatedChangeRequest | void, GitHubCliError>;
 
     readonly getDefaultBranch: (input: {
       readonly cwd: string;
@@ -635,8 +675,22 @@ export const make = Effect.gen(function* () {
           input.title,
           "--body-file",
           input.bodyFile,
+          ...(input.draft ? ["--draft"] : []),
         ],
-      }).pipe(Effect.asVoid),
+      }).pipe(
+        Effect.flatMap((result) => {
+          const identity = createdPullRequestIdentity(result);
+          return identity
+            ? Effect.succeed(identity)
+            : Effect.fail(
+                new GitHubPullRequestCreationUnconfirmedError({
+                  command: "gh",
+                  cwd: input.cwd,
+                  cause: new Error("Creation output did not contain a complete pull request URL."),
+                }),
+              );
+        }),
+      ),
     getDefaultBranch: (input) =>
       execute({
         cwd: input.cwd,

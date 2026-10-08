@@ -9,6 +9,8 @@ import {
 } from "../../providerInstances";
 import { useEnvironments } from "../../state/environments";
 import { useSettingsScope } from "./SettingsScopeContext";
+import { resolveSettingsProviderReadiness } from "./settingsProviderReadiness";
+import { useSettingsWorkspaceAccess } from "./SettingsWorkspaceReadiness";
 
 /**
  * A model choice fans out to every selected target, so it must exist on all
@@ -20,8 +22,9 @@ export function useScopedModelDisabledReason(
   settings: UnifiedSettings,
   entries: readonly ProviderInstanceEntry[],
 ) {
-  const { targets } = useSettingsScope();
+  const { scope, targets } = useSettingsScope();
   const { environments } = useEnvironments();
+  const access = useSettingsWorkspaceAccess();
   return useCallback(
     (instanceId: ProviderInstanceId, model: string): string | null => {
       const sourceEntry = entries.find((entry) => entry.instanceId === instanceId);
@@ -31,13 +34,26 @@ export function useScopedModelDisabledReason(
         );
         const config = environment?.serverConfig;
         if (!config) continue;
+        const { providers, pendingInstanceIds, cwd } = resolveSettingsProviderReadiness(
+          scope,
+          candidate,
+          config.providers,
+        );
+        if (pendingInstanceIds.has(instanceId)) {
+          if (access.get(candidate.environmentId) !== "granted") {
+            return access.get(candidate.environmentId) === "denied"
+              ? `This connection cannot check models for ${cwd ?? candidate.label}. Reconnect with permission to operate this environment.`
+              : "Waiting for connection permissions before checking checkout models.";
+          }
+          return `Checking models for ${cwd ?? candidate.label}. Try again when the check finishes.`;
+        }
         const entry = applyProviderInstanceSettings(
-          deriveProviderInstanceEntries(config.providers),
+          deriveProviderInstanceEntries(providers),
           candidate.settings,
         ).find((option) => option.instanceId === instanceId);
         const options = getCustomModelOptionsByInstance(
           { ...settings, ...candidate.settings },
-          config.providers,
+          providers,
         ).get(instanceId);
         if (
           !entry?.enabled ||
@@ -45,11 +61,11 @@ export function useScopedModelDisabledReason(
           entry.driverKind !== sourceEntry?.driverKind ||
           !options?.some((option) => option.slug === model && !option.isUnavailable)
         ) {
-          return `This model is unavailable on ${environment?.label ?? "a selected environment"}. Select that environment to choose its model separately.`;
+          return `This model is unavailable on ${cwd ?? environment?.label ?? "a selected environment"}. Select that checkout or environment to choose its model separately.`;
         }
       }
       return null;
     },
-    [entries, environments, settings, targets],
+    [access, entries, environments, scope, settings, targets],
   );
 }

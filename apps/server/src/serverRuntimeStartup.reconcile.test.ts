@@ -27,6 +27,25 @@ import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDi
 import { ServerActivation } from "./serverActivation.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
+import {
+  ProfileRestoreReview,
+  RESTORE_REVIEW_MESSAGE,
+  type RestoreReviewService,
+} from "./restoreReview.ts";
+
+const restoreHold: RestoreReviewService = {
+  held: true,
+  status: () => ({
+    status: "required",
+    restoreId: "restore",
+    restoredAt: null,
+    backupCreatedAt: null,
+    message: RESTORE_REVIEW_MESSAGE,
+  }),
+  consent: async () => {
+    throw new Error("Unused consent");
+  },
+};
 
 const providerInstanceId = ProviderInstanceId.make("codex");
 const updatedAt = "2026-08-20T12:00:00.000Z";
@@ -114,6 +133,35 @@ const runReconciliation = (input: {
       ),
     ),
   );
+
+it.effect("does not consume or rewrite restored continuation state before review", () => {
+  const thread = makeThread("restored", "running", TurnId.make("saved-turn"));
+  const directory: ProviderSessionDirectory.ProviderSessionDirectory["Service"] = {
+    getBinding: () =>
+      Effect.die("Restore hold must precede reading and consuming continuation state"),
+    upsert: () => Effect.die("Restore hold must preserve saved continuation markers"),
+    recordImportedTranscript: () => Effect.die("Restore hold must not import transcript"),
+    getProvider: () => Effect.die("Unused provider"),
+    listThreadIds: () => Effect.die("Unused thread list"),
+    listBindings: () => Effect.die("Restore hold must precede runtime reconciliation"),
+  };
+  return Effect.gen(function* () {
+    yield* runReconciliation({
+      threads: [thread],
+      continueAfterRestart: true,
+      directory,
+      dispatch: () => Effect.die("Restore hold must not settle or restart sessions"),
+    });
+    const marked = yield* ServerRuntimeStartup.markRunningProviderSessionsForContinuation.pipe(
+      Effect.provideService(ProviderSessionDirectory.ProviderSessionDirectory, directory),
+      Effect.provideService(
+        ProjectionSnapshotQuery.ProjectionSnapshotQuery,
+        queryWithThreads([thread]),
+      ),
+    );
+    assert.deepStrictEqual(marked, []);
+  }).pipe(Effect.provideService(ProfileRestoreReview, restoreHold));
+});
 
 it.effect("marks active running sessions that have persisted resume state", () => {
   const active = makeThread("thread-mark-active", "running", TurnId.make("turn-mark-active"));

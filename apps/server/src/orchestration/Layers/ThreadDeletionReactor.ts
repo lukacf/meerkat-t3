@@ -60,6 +60,13 @@ const make = Effect.gen(function* () {
     event: ThreadDeletedEvent,
   ) {
     const { threadId } = event.payload;
+    if (providerService.stopObservingSession) {
+      yield* logCleanupCauseUnlessInterrupted({
+        effect: providerService.stopObservingSession(threadId),
+        message: "thread deletion cleanup skipped provider observation removal",
+        threadId,
+      });
+    }
     yield* stopProviderSession(threadId);
     yield* closeThreadTerminals(threadId);
   });

@@ -47,6 +47,7 @@ export function shouldShowProviderStatusBanner(
 
 export function hasProviderSetup(status: ServerProvider): boolean {
   return (
+    status.driver === "meerkat" ||
     status.driver === "antigravity" ||
     status.setup?.canAuthenticate === true ||
     status.setup?.canInstall === true

@@ -7,6 +7,9 @@ import {
 } from "@t3tools/contracts";
 import { getProviderOptionDescriptors } from "@t3tools/shared/model";
 import { getProviderModelCapabilities } from "../../providerModels";
+import { resolveMeerkatTurnDispatch } from "../../meerkatTurnDispatch";
+import { ProviderInstanceId } from "@t3tools/contracts";
+import { buildTraitsOptionSelections } from "./TraitsPicker";
 import {
   getComposerPromptInjectionState,
   getComposerProviderState,
@@ -73,6 +76,189 @@ const ULTRATHINK_FRAME_CLASSES = {
 } as const;
 
 describe("getComposerProviderState", () => {
+  it("keeps unavailable native reasoning for admission while filtering hidden controls", () => {
+    const state = getComposerProviderState({
+      provider: ProviderDriverKind.make("meerkat"),
+      model: MODEL,
+      models: modelWith([
+        selectDescriptor("reasoning_effort", [{ id: "low", label: "Low", isDefault: true }]),
+      ]),
+      modelOptions: selections(
+        ["prompt_cache_enabled", false],
+        ["reasoning_effort", "high"],
+        ["reasoning_context", "all"],
+      ),
+      planModeEnabled: false,
+    });
+    expect(state.promptEffort).toBe("high");
+    expect(state.modelOptionsForDispatch).toEqual(selections(["reasoning_effort", "high"]));
+  });
+
+  it("removes an explicit Model default draft choice before native dispatch", () => {
+    const state = getComposerProviderState({
+      provider: ProviderDriverKind.make("meerkat"),
+      model: MODEL,
+      models: modelWith([
+        selectDescriptor("reasoning_effort", [{ id: "low", label: "Low", isDefault: true }]),
+      ]),
+      modelOptions: selections(["prompt_cache_enabled", false], ["reasoning_effort", "default"]),
+      planModeEnabled: false,
+    });
+    expect(state.promptEffort).toBeNull();
+    expect(state.modelOptionsForDispatch).toBeUndefined();
+  });
+
+  it("keeps steering on the original native option bag after reasoning metadata disappears", () => {
+    const options = selections(["reasoning_effort", "high"], ["prompt_cache_enabled", false]);
+    const activeModel = {
+      instanceId: ProviderInstanceId.make("native-work"),
+      model: MODEL,
+      options,
+    };
+    const state = getComposerProviderState({
+      provider: ProviderDriverKind.make("meerkat"),
+      model: MODEL,
+      models: modelWith([]),
+      modelOptions: options,
+      preserveNativeTurnOptions: true,
+      planModeEnabled: false,
+    });
+    expect(state.modelOptionsForDispatch).toEqual(options);
+    expect(
+      resolveMeerkatTurnDispatch({
+        provider: "meerkat",
+        phase: "running",
+        activeModel,
+        selectedModel: {
+          instanceId: activeModel.instanceId,
+          model: activeModel.model,
+          ...(state.modelOptionsForDispatch ? { options: state.modelOptionsForDispatch } : {}),
+        },
+      }),
+    ).toEqual({ handlingMode: "steer", blockReason: null });
+  });
+
+  it("allows steering after changing native reasoning away from and back to its active level", () => {
+    const provider = ProviderDriverKind.make("meerkat");
+    const options = selections(
+      ["prompt_cache_enabled", false],
+      ["reasoning_context", "all"],
+      ["reasoning_effort", "high"],
+    );
+    const descriptor = selectDescriptor("reasoning_effort", [
+      { id: "low", label: "Low" },
+      { id: "high", label: "High" },
+    ]);
+    const models = modelWith([descriptor]);
+    const activeModel = {
+      instanceId: ProviderInstanceId.make("native-work"),
+      model: MODEL,
+      options,
+    };
+    const state = getComposerProviderState({
+      provider,
+      model: MODEL,
+      models,
+      modelOptions: options,
+      planModeEnabled: false,
+      preserveNativeTurnOptions: true,
+    });
+    expect(
+      resolveMeerkatTurnDispatch({
+        provider: "meerkat",
+        phase: "running",
+        activeModel,
+        selectedModel: {
+          instanceId: activeModel.instanceId,
+          model: activeModel.model,
+          ...(state.modelOptionsForDispatch ? { options: state.modelOptionsForDispatch } : {}),
+        },
+      }),
+    ).toEqual({ handlingMode: "steer", blockReason: null });
+    const changedOptions = buildTraitsOptionSelections(
+      provider,
+      [{ ...descriptor, currentValue: "low" }],
+      options,
+    );
+    const changed = getComposerProviderState({
+      provider,
+      model: MODEL,
+      models,
+      modelOptions: changedOptions,
+      planModeEnabled: false,
+      preserveNativeTurnOptions: true,
+    });
+    expect(
+      resolveMeerkatTurnDispatch({
+        provider: "meerkat",
+        phase: "running",
+        activeModel,
+        selectedModel: {
+          instanceId: activeModel.instanceId,
+          model: activeModel.model,
+          ...(changed.modelOptionsForDispatch ? { options: changed.modelOptionsForDispatch } : {}),
+        },
+      }).blockReason,
+    ).toContain("Steering keeps the active model");
+    const restoredOptions = buildTraitsOptionSelections(
+      provider,
+      [{ ...descriptor, currentValue: "high" }],
+      changedOptions,
+    );
+    const restored = getComposerProviderState({
+      provider,
+      model: MODEL,
+      models,
+      modelOptions: restoredOptions,
+      planModeEnabled: false,
+      preserveNativeTurnOptions: true,
+    });
+    expect(
+      resolveMeerkatTurnDispatch({
+        provider: "meerkat",
+        phase: "running",
+        activeModel,
+        selectedModel: {
+          instanceId: activeModel.instanceId,
+          model: activeModel.model,
+          ...(restored.modelOptionsForDispatch
+            ? { options: restored.modelOptionsForDispatch }
+            : {}),
+        },
+      }),
+    ).toEqual({ handlingMode: "steer", blockReason: null });
+    expect(
+      getComposerProviderState({
+        provider,
+        model: MODEL,
+        models,
+        modelOptions: restoredOptions,
+        planModeEnabled: false,
+      }).modelOptionsForDispatch,
+    ).toEqual(selections(["reasoning_effort", "high"]));
+  });
+  it("dispatches an explicit native reasoning level without reviving stale cache controls", () => {
+    const state = getComposerProviderState({
+      provider: ProviderDriverKind.make("meerkat"),
+      model: MODEL,
+      models: modelWith([
+        booleanDescriptor("prompt_cache_enabled"),
+        selectDescriptor("reasoning_effort", [
+          { id: "low", label: "Low" },
+          { id: "high", label: "High" },
+        ]),
+        selectDescriptor("reasoning_mode", [{ id: "concise", label: "Concise" }]),
+      ]),
+      modelOptions: selections(
+        ["prompt_cache_enabled", false],
+        ["reasoning_effort", "high"],
+        ["reasoning_mode", "concise"],
+      ),
+      planModeEnabled: false,
+    });
+    expect(state.promptEffort).toBe("high");
+    expect(state.modelOptionsForDispatch).toEqual(selections(["reasoning_effort", "high"]));
+  });
   it("derives a stable prompt injection state for ordinary prompt edits", () => {
     expect(getComposerPromptInjectionState("Investigate this failure")).toBe("none");
     expect(getComposerPromptInjectionState("Ultrathink:\nInvestigate this failure")).toBe(

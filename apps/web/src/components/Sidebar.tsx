@@ -1,3 +1,4 @@
+import { NativeThreadAttentionBadge } from "./team/NativeThreadAttentionBadge";
 import { requestCustomSnooze } from "./CustomSnoozeDialog";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
 import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
@@ -51,6 +52,8 @@ import {
   CircleDashedIcon,
   ClockIcon,
   EyeIcon,
+  EllipsisIcon,
+  LinkIcon,
   FolderIcon,
   GitBranchIcon,
   MessageCircleQuestionIcon,
@@ -77,7 +80,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { useParams, useRouter } from "@tanstack/react-router";
+import { useLocation, useParams, useRouter } from "@tanstack/react-router";
 
 import { useRightPanelStore } from "../rightPanelStore";
 import {
@@ -222,6 +225,11 @@ import {
 } from "../providerInstances";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
 import { stackedThreadToast, toastManager } from "./ui/toast";
+import {
+  useMeerkatPeerConnections,
+  useMeerkatPeerDrag,
+  type PeerItem,
+} from "./team/MeerkatPeerConnections";
 import { Button, InlineButton } from "./ui/button";
 import {
   Combobox,
@@ -235,6 +243,14 @@ import {
 } from "./ui/combobox";
 import { SidebarContent, SidebarGroup, useSidebar } from "./ui/sidebar";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { MeerkatProjectAgents, MeerkatProjectAttention } from "./sidebar/MeerkatProjectAgents";
+import {
+  buildMeerkatSidebarGroups,
+  MEERKAT_HISTORY_INITIAL_COUNT,
+  MEERKAT_HISTORY_PAGE_COUNT,
+} from "./sidebar/meerkatSidebarRows";
+import { projectAgentRouteScope } from "./sidebar/meerkatAgentNavigation";
+import { SidebarProjectNavigation } from "./sidebar/SidebarProjectNavigation";
 import { SidebarHeaderIconButton, SidebarThreadHeader } from "./sidebar/SidebarThreadHeader";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuShortcut, MenuTrigger } from "./ui/menu";
 import { Tooltip, TooltipPopup, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
@@ -1184,6 +1200,36 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
   const modelInstanceId = thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
   const providerEntry = props.providerEntryByInstanceId.get(modelInstanceId) ?? null;
   const driverKind = providerEntry?.driverKind ?? null;
+  const peerItem: PeerItem | null =
+    driverKind === "meerkat"
+      ? {
+          environmentId: thread.environmentId,
+          endpoint: {
+            kind: "thread",
+            projectId: thread.projectId,
+            threadId: thread.id,
+            instanceId: modelInstanceId,
+          },
+          label: thread.title,
+          projectTitle: props.projectDisplayName ?? props.project?.title ?? "Project",
+        }
+      : null;
+  const { dragProps: peerDragProps, isDropTarget: isPeerDropTarget } = useMeerkatPeerDrag(peerItem);
+  const peerConnections = useMeerkatPeerConnections();
+  const peerConnectButton =
+    peerItem && peerConnections ? (
+      <Button
+        size="icon-xs"
+        variant="ghost-muted"
+        aria-label={`Connect ${thread.title} to another agent or thread`}
+        onClick={(event) => {
+          event.stopPropagation();
+          peerConnections.choosePeer(peerItem);
+        }}
+      >
+        <LinkIcon />
+      </Button>
+    ) : null;
   const showInstanceBadge =
     providerEntry !== null &&
     shouldShowInstanceBadge(providerEntry, props.providerEntryByInstanceId.values());
@@ -1406,7 +1452,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
     shouldRecede &&
       (status === "working" || status === "monitoring") &&
       "opacity-70 transition-opacity hover:opacity-100 focus-within:opacity-100 motion-reduce:transition-none",
-    isFileDragOver && "ring-1 ring-inset ring-primary/70",
+    (isFileDragOver || isPeerDropTarget) && "ring-1 ring-inset ring-primary/70",
     // The hover tint must not clobber an active/selected row's own surface.
     isFileDragOver && !props.isActive && !isSelected && "bg-sidebar-row-hover",
     // The lifted row is an opaque card so the rows beneath it never show
@@ -1432,7 +1478,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
               ? ("hidden" as const)
               : undefined,
         },
-        ...sortable.listeners,
+        ...(peerItem ? {} : sortable.listeners),
       }
     : {};
   const dragDestination =
@@ -1588,6 +1634,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
           <TooltipTrigger
             render={
               <div
+                {...peerDragProps}
                 ref={rowRef}
                 role="button"
                 tabIndex={0}
@@ -1615,6 +1662,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
             {draftIndicator}
             {title}
             {pinIndicator}
+            {driverKind === "meerkat" ? (
+              <NativeThreadAttentionBadge
+                environmentId={thread.environmentId}
+                projectId={thread.projectId}
+                threadId={thread.id}
+              />
+            ) : null}
+            {peerConnectButton}
             {terminalStatusIcon}
             {isRegeneratingTitle ? (
               <span role="status" className="sr-only">
@@ -1741,6 +1796,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
         <TooltipTrigger
           render={
             <div
+              {...peerDragProps}
               ref={rowRef}
               role="button"
               tabIndex={0}
@@ -1773,6 +1829,14 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: {
                 <span className="flex-1" />
               )}
               {pinIndicator}
+              {driverKind === "meerkat" ? (
+                <NativeThreadAttentionBadge
+                  environmentId={thread.environmentId}
+                  projectId={thread.projectId}
+                  threadId={thread.id}
+                />
+              ) : null}
+              {peerConnectButton}
               {/* The visible state owns this slot's width: status at rest,
                   actions on hover/keyboard focus or while the popover is open. Keeping
                   the hidden state out of flow lets the project label reclaim
@@ -2365,6 +2429,12 @@ export default function Sidebar() {
   // project preferences, so routes that unmount the sidebar (Settings) and
   // app restarts keep it.
   const projectScopeKey = useUiStateStore((store) => store.sidebarProjectScopeKey);
+  const routeDestination = useLocation({
+    select: (location) => location.pathname + location.searchStr,
+  });
+  const projectAgentScope = useLocation({
+    select: (location) => projectAgentRouteScope(location.pathname, location.searchStr),
+  });
   const setProjectScopeKey = useUiStateStore((store) => store.setSidebarProjectScopeKey);
   // {value, label} items let Base UI drive the combobox selection contract
   // while the popup search filters the same collection.
@@ -2389,6 +2459,34 @@ export default function Sidebar() {
     () => new Map(projectGroups.map((project) => [project.projectKey, project] as const)),
     [projectGroups],
   );
+  const routeProjectScopeKey = useMemo(
+    () =>
+      projectAgentScope
+        ? (projectGroups.find((group) =>
+            group.memberProjectRefs.some(
+              (ref) =>
+                ref.environmentId === projectAgentScope.environmentId &&
+                ref.projectId === projectAgentScope.projectId,
+            ),
+          )?.projectKey ?? null)
+        : null,
+    [projectAgentScope, projectGroups],
+  );
+  const lastProjectRouteScopeRef = useRef<string | null>(null);
+  const routeProjectIdentity = projectAgentScope
+    ? `${projectAgentScope.environmentId}:${projectAgentScope.projectId}`
+    : null;
+  useEffect(() => {
+    if (routeProjectIdentity === null) {
+      lastProjectRouteScopeRef.current = null;
+      return;
+    }
+    if (!routeProjectScopeKey || lastProjectRouteScopeRef.current === routeProjectIdentity) return;
+    // Entering a project's agent/home view reveals its sidebar group once.
+    // Later explicit filter choices remain authoritative while the view stays open.
+    lastProjectRouteScopeRef.current = routeProjectIdentity;
+    setProjectScopeKey(routeProjectScopeKey);
+  }, [routeProjectIdentity, routeProjectScopeKey, setProjectScopeKey]);
   const selectedProjectScopeItem = useMemo(
     () =>
       projectScopeItems.find((item) => item.value === (projectScopeKey ?? "all")) ??
@@ -2434,6 +2532,13 @@ export default function Sidebar() {
           ),
     [scopedProjectGroup],
   );
+  const meerkatProjectNavigation = environments.some((environment) =>
+    environment.serverConfig?.providers.some((provider) => provider.driver === "meerkat"),
+  );
+  const [collapsedMeerkatProjects, setCollapsedMeerkatProjects] = useState<Record<string, boolean>>(
+    {},
+  );
+  const [meerkatHistoryCounts, setMeerkatHistoryCounts] = useState<Record<string, number>>({});
   // A persisted scope whose project is gone falls back to all projects, but
   // only after every catalog environment has a live project snapshot. Cached
   // or disconnected environments cannot establish that the project is gone.
@@ -2773,9 +2878,90 @@ export default function Sidebar() {
     return routeThread === undefined ? EMPTY_THREADS : [routeThread];
   }, [routeThreadKey, snoozedShelfExpanded, snoozedThreads]);
 
+  const meerkatSidebarGroups = useMemo(
+    () =>
+      meerkatProjectNavigation
+        ? buildMeerkatSidebarGroups({
+            projects: projectGroups.filter(
+              (project) =>
+                scopedProjectGroup === null || project.projectKey === scopedProjectGroup.projectKey,
+            ),
+            pinned: pinnedThreads,
+            active: activeThreads,
+            snoozed: snoozedThreads,
+            settled: settledThreads,
+            collapsed: collapsedMeerkatProjects,
+            historyCounts: meerkatHistoryCounts,
+            routeThreadKey,
+          })
+        : [],
+    [
+      meerkatProjectNavigation,
+      projectGroups,
+      scopedProjectGroup,
+      pinnedThreads,
+      activeThreads,
+      snoozedThreads,
+      settledThreads,
+      collapsedMeerkatProjects,
+      meerkatHistoryCounts,
+      routeThreadKey,
+    ],
+  );
+  const lastMeerkatRoute = useRef<string | null>(null);
+  useEffect(() => {
+    if (!meerkatProjectNavigation) return;
+    const routeIdentity = routeThreadKey
+      ? JSON.stringify(["thread", routeThreadKey])
+      : routeProjectIdentity
+        ? JSON.stringify(["project", routeProjectIdentity, routeDestination])
+        : null;
+    if (lastMeerkatRoute.current === routeIdentity) return;
+    if (routeIdentity === null) {
+      lastMeerkatRoute.current = null;
+      return;
+    }
+    const routeThread = threads.find(
+      (thread) =>
+        scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)) === routeThreadKey,
+    );
+    const projectKey = routeThread
+      ? projectGroups.find((project) =>
+          project.memberProjectRefs.some(
+            (ref) =>
+              ref.environmentId === routeThread.environmentId &&
+              ref.projectId === routeThread.projectId,
+          ),
+        )?.projectKey
+      : routeProjectScopeKey;
+    if (projectKey) {
+      lastMeerkatRoute.current = routeIdentity;
+      setCollapsedMeerkatProjects((current) =>
+        current[projectKey] ? { ...current, [projectKey]: false } : current,
+      );
+    }
+  }, [
+    meerkatProjectNavigation,
+    routeThreadKey,
+    routeProjectIdentity,
+    routeDestination,
+    routeProjectScopeKey,
+    threads,
+    projectGroups,
+  ]);
   const orderedThreads = useMemo(
-    () => [...pinnedThreads, ...activeThreads, ...visibleSnoozedThreads, ...renderedSettledThreads],
-    [pinnedThreads, activeThreads, visibleSnoozedThreads, renderedSettledThreads],
+    () =>
+      meerkatProjectNavigation
+        ? meerkatSidebarGroups.flatMap((group) => group.items.map((item) => item.thread))
+        : [...pinnedThreads, ...activeThreads, ...visibleSnoozedThreads, ...renderedSettledThreads],
+    [
+      meerkatProjectNavigation,
+      meerkatSidebarGroups,
+      pinnedThreads,
+      activeThreads,
+      visibleSnoozedThreads,
+      renderedSettledThreads,
+    ],
   );
   const orderedThreadKeys = useMemo(
     () =>
@@ -3357,6 +3543,14 @@ export default function Sidebar() {
   // Include every visible row in the measured order. Older servers disable
   // pickup on their rows without changing where those rows render.
   const sidebarListItems = useMemo((): readonly SidebarListItem[] => {
+    if (meerkatProjectNavigation)
+      return meerkatSidebarGroups.flatMap((group) =>
+        group.items.map(({ thread, section }) => ({
+          kind: "thread" as const,
+          key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+          section,
+        })),
+      );
     const rowsOf = (
       list: readonly EnvironmentThreadShell[],
       section: SidebarSection,
@@ -3391,6 +3585,8 @@ export default function Sidebar() {
     items.push(...settledRows);
     return items;
   }, [
+    meerkatProjectNavigation,
+    meerkatSidebarGroups,
     activeThreads,
     pinnedThreads,
     renderedSettledThreads,
@@ -4681,7 +4877,9 @@ export default function Sidebar() {
                         // row: every other thread is a full card. Density comes
                         // from users (or the auto rules) actually parking work,
                         // not from the sidebar second-guessing what still matters.
-                        const isCard = section === "active" || section === "pinned";
+                        const isCard =
+                          !meerkatProjectNavigation &&
+                          (section === "active" || section === "pinned");
                         const rowVariant = isCard ? "card" : "slim";
                         return (
                           <SidebarThreadRow
@@ -4798,6 +4996,148 @@ export default function Sidebar() {
                           </SortableThreadRow>
                         );
                       };
+                      if (meerkatProjectNavigation) {
+                        return meerkatSidebarGroups.map(
+                          ({
+                            project,
+                            projectKeys,
+                            expanded,
+                            items: projectItems,
+                            hiddenHistoryCount,
+                          }) => {
+                            return (
+                              <li key={project.projectKey} className="mb-3 list-none">
+                                <details
+                                  open={expanded}
+                                  className="group/meerkat-project"
+                                  onToggle={(event) => {
+                                    if (event.target !== event.currentTarget) return;
+                                    const open = event.currentTarget.open;
+                                    setCollapsedMeerkatProjects((current) =>
+                                      (current[project.projectKey] !== true) === open
+                                        ? current
+                                        : { ...current, [project.projectKey]: !open },
+                                    );
+                                  }}
+                                >
+                                  <summary className="flex cursor-pointer list-none items-center gap-2 rounded px-2 py-1.5 text-sm font-medium hover:bg-sidebar-row-hover">
+                                    <ChevronDownIcon className="size-3.5 -rotate-90 group-open/meerkat-project:rotate-0" />
+                                    <ProjectFavicon project={project} className="size-4" />
+                                    <SidebarProjectNavigation
+                                      project={project}
+                                      attention={
+                                        <MeerkatProjectAttention
+                                          projectRefs={project.memberProjectRefs}
+                                        />
+                                      }
+                                      supportsAgents={(environmentId) =>
+                                        serverConfigs
+                                          .get(environmentId)
+                                          ?.providers.some(
+                                            (provider) => provider.driver === "meerkat",
+                                          ) === true
+                                      }
+                                      onOpenProject={(projectRef) => {
+                                        if (isMobile) setOpenMobile(false);
+                                        void router.navigate({
+                                          to: "/$environmentId/projects/$projectId/start",
+                                          params: projectRef,
+                                        });
+                                      }}
+                                      onNewThread={(projectRef) => {
+                                        if (isMobile) setOpenMobile(false);
+                                        void handleNewThreadRef.current(
+                                          projectRef,
+                                          project.memberProjects.length > 1
+                                            ? {
+                                                environmentSelection: "manual",
+                                                loadBalancedEnvironmentId: null,
+                                              }
+                                            : undefined,
+                                        );
+                                      }}
+                                      onProposeAgents={(projectRef) => {
+                                        if (isMobile) setOpenMobile(false);
+                                        void router.navigate({
+                                          to: "/$environmentId/projects/$projectId/agents/propose",
+                                          params: projectRef,
+                                        });
+                                      }}
+                                      onAddAgent={(projectRef) => {
+                                        if (isMobile) setOpenMobile(false);
+                                        void router.navigate({
+                                          to: "/$environmentId/projects/$projectId/agents/new",
+                                          params: projectRef,
+                                        });
+                                      }}
+                                      onSettings={() => {
+                                        void router.navigate({
+                                          to: "/projects/$projectKey",
+                                          params: { projectKey: project.projectKey },
+                                        });
+                                      }}
+                                    />
+                                  </summary>
+                                  <MeerkatProjectAgents
+                                    projectRefs={project.memberProjectRefs}
+                                    visible={expanded}
+                                  />
+                                  {expanded ? (
+                                    <>
+                                      <p className="pl-6 pb-1 pt-2 text-2xs font-medium text-muted-foreground">
+                                        Threads
+                                      </p>
+                                      <ul className="flex flex-col gap-px pl-3">
+                                        <SidebarDraftBlock
+                                          key={`draft:${project.projectKey}`}
+                                          projectByKey={projectByKey}
+                                          projectDisplayNameByKey={projectDisplayNameByKey}
+                                          scopedProjectKeys={projectKeys}
+                                          routeDraftId={routeDraftIdForRows}
+                                          onNavigateToDraft={navigateToDraft}
+                                        />
+                                        {projectItems.map(({ thread, section }) =>
+                                          renderThreadRowInner(thread, section),
+                                        )}
+                                        {hiddenHistoryCount > 0 ? (
+                                          <li>
+                                            <button
+                                              type="button"
+                                              className="flex w-full items-center gap-2 rounded px-3 py-1.5 text-left text-xs text-sidebar-muted-foreground hover:bg-sidebar-row-hover hover:text-sidebar-foreground"
+                                              onClick={() =>
+                                                setMeerkatHistoryCounts((current) => ({
+                                                  ...current,
+                                                  [project.projectKey]:
+                                                    (current[project.projectKey] ??
+                                                      MEERKAT_HISTORY_INITIAL_COUNT) +
+                                                    MEERKAT_HISTORY_PAGE_COUNT,
+                                                }))
+                                              }
+                                            >
+                                              <PlusIcon className="size-3.5" />
+                                              Show{" "}
+                                              {Math.min(
+                                                hiddenHistoryCount,
+                                                MEERKAT_HISTORY_PAGE_COUNT,
+                                              )}{" "}
+                                              more threads
+                                            </button>
+                                          </li>
+                                        ) : null}
+                                        {projectItems.length === 0 ? (
+                                          <li className="px-3 py-1 text-xs text-muted-foreground">
+                                            No threads yet
+                                          </li>
+                                        ) : null}
+                                      </ul>
+                                    </>
+                                  ) : null}
+                                </details>
+                              </li>
+                            );
+                          },
+                        );
+                      }
                       const from = dragState?.activeSection ?? null;
                       const items: ReactNode[] = [
                         <SidebarDraftBlock
@@ -4915,7 +5255,7 @@ export default function Sidebar() {
                       }
                       return items;
                     })()}
-                    {settledShelfExpanded && hiddenSettledCount > 0 ? (
+                    {!meerkatProjectNavigation && settledShelfExpanded && hiddenSettledCount > 0 ? (
                       <li className="list-none">
                         <button
                           type="button"
@@ -4933,6 +5273,7 @@ export default function Sidebar() {
             </TooltipProvider>
           ) : null}
           {!isSearchingThreads &&
+          (!meerkatProjectNavigation || projects.length === 0) &&
           visibleDraftSessionCount === 0 &&
           pinnedThreads.length +
             activeThreads.length +

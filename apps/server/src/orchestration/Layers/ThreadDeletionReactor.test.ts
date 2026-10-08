@@ -82,6 +82,7 @@ describe("ThreadDeletionReactor drain", () => {
   effectIt.effect("waits for a published deletion the subscriber has not consumed yet", () =>
     Effect.gen(function* () {
       const stops: Array<number> = [];
+      const stoppedObservations: ThreadId[] = [];
       const firstCleanupDone = yield* Deferred.make<void>();
       // The engine has already committed and published sequence 2, but the
       // subscriber has not received it yet: the stream releases it on demand.
@@ -97,6 +98,10 @@ describe("ThreadDeletionReactor drain", () => {
         ),
       } as unknown as OrchestrationEngineShape;
       const providerService = {
+        stopObservingSession: (deletedThreadId: ThreadId) =>
+          Effect.sync(() => {
+            stoppedObservations.push(deletedThreadId);
+          }),
         stopSession: () =>
           Effect.gen(function* () {
             stops.push(stops.length + 1);
@@ -132,6 +137,7 @@ describe("ThreadDeletionReactor drain", () => {
           yield* Deferred.succeed(releaseSecondEvent, undefined);
           yield* Fiber.join(drained);
           expect(stops).toEqual([1, 2]);
+          expect(stoppedObservations).toEqual([threadId, threadId]);
         }),
       ).pipe(Effect.provide(layer));
     }),

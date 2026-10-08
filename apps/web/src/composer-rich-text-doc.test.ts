@@ -3,6 +3,7 @@ import StarterKit from "@tiptap/starter-kit";
 import { TaskList } from "@tiptap/extension-task-list";
 import { Node as ProseMirrorNode } from "@tiptap/pm/model";
 import { describe, expect, it } from "vite-plus/test";
+import { providerSkillReferenceMeta } from "@t3tools/client-runtime/providerSkills";
 
 import {
   buildDocJson,
@@ -47,6 +48,8 @@ const schema = getSchemaByResolvedExtensions(
       skillName: { default: "" },
       skillLabel: { default: "" },
       skillDescription: { default: null },
+      skillPath: { default: null },
+      source: { default: "" },
     }),
     stubAtom("composer-citation", {
       citation: { default: null },
@@ -97,6 +100,8 @@ const plainSchema = getSchemaByResolvedExtensions(
       skillName: { default: "" },
       skillLabel: { default: "" },
       skillDescription: { default: null },
+      skillPath: { default: null },
+      source: { default: "" },
     }),
     stubAtom("composer-citation", {
       citation: { default: null },
@@ -123,6 +128,52 @@ function roundTripPlain(value: string) {
 }
 
 describe("composer rich text document model", () => {
+  it("keeps a bare native skill unresolved while preserving a selected source in both editor modes", () => {
+    const skills = [
+      {
+        name: "review",
+        displayName: "Review first",
+        path: "meerkat-skill://b3fdcd90-cb8c-40c2-aee5-c1aba30a9b64/review",
+        description: "First body",
+      },
+      {
+        name: "review",
+        displayName: "Review second",
+        path: "meerkat-skill://4fa3e1a2-5b6c-47d8-9012-3456789abcde/review",
+        description: "Second body",
+      },
+    ];
+    const value = `Use $review or [review](${skills[1]!.path})`;
+    for (const styling of [true, false]) {
+      const json = buildDocJson(
+        value,
+        (name, path) => providerSkillReferenceMeta(skills, name, path),
+        { styling },
+      );
+      const doc = ProseMirrorNode.fromJSON(styling ? schema : plainSchema, json);
+      const attrs: Array<Record<string, unknown>> = [];
+      doc.descendants((node) => {
+        if (node.type.name === "composer-skill") attrs.push(node.attrs);
+      });
+      expect(attrs).toMatchObject([
+        { skillLabel: "Review (unselected)", skillPath: null, source: "" },
+        {
+          skillLabel: "Review second",
+          skillPath: skills[1]!.path,
+          source: `[review](${skills[1]!.path})`,
+        },
+      ]);
+      expect(attrs[0]?.skillDescription).not.toContain("body");
+      expect(serializeEditorDoc(doc).value).toBe(value);
+    }
+  });
+
+  it("retains both source-pinned skills through rich and plain document serialization", () => {
+    const value =
+      "Use [review](meerkat-skill://b3fdcd90-cb8c-40c2-aee5-c1aba30a9b64/review) with [review](meerkat-skill://4fa3e1a2-5b6c-47d8-9012-3456789abcde/review)";
+    expect(roundTrip(value).value).toBe(value);
+    expect(roundTripPlain(value).value).toBe(value);
+  });
   it.each(["€", "£", "¥", "₹", "₩", "₿", "𑿝"])(
     "canonicalizes %s skill aliases while preserving amounts",
     (prefix) => {

@@ -11,7 +11,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { ChevronDownIcon, EllipsisIcon } from "lucide-react";
+import { ChevronDownIcon, CopyIcon, EllipsisIcon } from "lucide-react";
 import {
   memo,
   useCallback,
@@ -67,8 +67,11 @@ interface ChatHeaderProps {
   keybindings: ResolvedKeybindingsConfig;
   availableEditors: ReadonlyArray<EditorId>;
   rightPanelOpen: boolean;
+  layoutControls?: React.ReactNode;
+  paneHeader?: boolean;
   gitCwd: string | null;
   readonly onOpenPullRequest?: ((number: number) => void) | undefined;
+  onCopyConversation?: (() => void) | undefined;
   onNewThreadInProject: () => void;
   onOpenProjectSettings?: (() => void) | undefined;
   onRunProjectScript: (script: ProjectScript) => void;
@@ -136,8 +139,11 @@ export const ChatHeader = memo(function ChatHeader({
   keybindings,
   availableEditors,
   rightPanelOpen,
+  layoutControls,
+  paneHeader = false,
   gitCwd,
   onOpenPullRequest,
+  onCopyConversation,
   onNewThreadInProject,
   onOpenProjectSettings,
   onRunProjectScript,
@@ -166,7 +172,7 @@ export const ChatHeader = memo(function ChatHeader({
   useEffect(() => {
     const container = headerActionsRef.current?.parentElement;
     if (!container) return;
-    const update = () => setIsNarrowHeader(container.clientWidth < 512);
+    const update = () => setIsNarrowHeader(container.clientWidth < 680);
     update();
     const observer = new ResizeObserver(update);
     observer.observe(container);
@@ -353,6 +359,21 @@ export const ChatHeader = memo(function ChatHeader({
   );
   const headerActions = (
     <>
+      {onCopyConversation && (
+        <Button
+          size={actionsCollapsed ? "sm" : "icon-sm"}
+          variant="ghost"
+          aria-label="Copy loaded conversation"
+          title="Copy loaded conversation"
+          onClick={() => {
+            onCopyConversation();
+            setActionsOpen(false);
+          }}
+        >
+          <CopyIcon className="size-4" />
+          {actionsCollapsed ? "Copy loaded conversation" : null}
+        </Button>
+      )}
       {activeProjectScripts && (
         <>
           <ProjectScriptsControl
@@ -494,7 +515,7 @@ export const ChatHeader = memo(function ChatHeader({
           "flex shrink-0 items-center justify-end gap-2 @3xl/header-actions:gap-3",
           // Reserve two panel toggles plus their 4px gaps and 1px edge inset.
           // The page header adds 8px more right padding at sm.
-          rightPanelOpen ? "pr-0" : "pr-18.25 sm:pr-14.25",
+          rightPanelOpen || paneHeader ? "pr-0" : "pr-18.25 sm:pr-14.25",
           "[[data-panel-animations=true]_&]:motion-safe:transition-[padding-right] [[data-panel-animations=true]_&]:motion-safe:duration-(--panel-animation-duration) [[data-panel-animations=true]_&]:motion-safe:ease-out",
         )}
       >
@@ -502,7 +523,10 @@ export const ChatHeader = memo(function ChatHeader({
           <MenuTrigger
             className={
               actionsCollapsed &&
-              (activeProjectScripts || showOpenInPicker || (activeProjectName && gitCwd))
+              (onCopyConversation ||
+                activeProjectScripts ||
+                showOpenInPicker ||
+                (activeProjectName && gitCwd))
                 ? undefined
                 : "hidden"
             }
@@ -523,6 +547,7 @@ export const ChatHeader = memo(function ChatHeader({
           </MenuPopup>
         </Menu>
       </div>
+      {layoutControls}
     </div>
   );
 });

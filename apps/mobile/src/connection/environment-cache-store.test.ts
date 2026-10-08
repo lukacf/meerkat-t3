@@ -10,11 +10,13 @@ import {
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import * as Schema from "effect/Schema";
 
 import { type ClientCacheKind, MobileDatabase } from "../persistence/mobile-database";
 import { make } from "./environment-cache-store";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-1");
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const REFS: VcsListRefsResult = {
   refs: [
     {
@@ -78,7 +80,7 @@ function makeDatabase() {
 
 describe("mobile SQLite environment cache store", () => {
   it.effect(
-    "invalidates pre-thinking thread caches while preserving current snapshots and other caches",
+    "invalidates legacy thread cursors while preserving current snapshots and other caches",
     () =>
       Effect.gen(function* () {
         const memory = makeDatabase();
@@ -127,26 +129,35 @@ describe("mobile SQLite environment cache store", () => {
           Option.some(snapshot),
         );
         const id = cacheId(ENVIRONMENT_ID, "thread", snapshot.thread.id);
-        memory.values.set(
-          id,
-          JSON.stringify({
+        for (const legacy of [
+          {
             schemaVersion: 3,
-            environmentId: ENVIRONMENT_ID,
-            threadId: snapshot.thread.id,
-            snapshot: {
-              ...snapshot,
-              thread: {
-                ...snapshot.thread,
-                messages: snapshot.thread.messages.map((message) => ({
-                  ...message,
-                  role: "system",
-                })),
-              },
+            thread: {
+              ...snapshot.thread,
+              messages: snapshot.thread.messages.map((message) => ({ ...message, role: "system" })),
             },
-          }),
-        );
-        expect(yield* store.loadThread(ENVIRONMENT_ID, snapshot.thread.id)).toEqual(Option.none());
-        expect(memory.removed).toEqual([id]);
+          },
+          { schemaVersion: 4, thread: snapshot.thread },
+          { schemaVersion: 4, thread: { ...snapshot.thread, preparedTurn: null } },
+        ]) {
+          memory.values.set(
+            id,
+            encodeJson({
+              schemaVersion: legacy.schemaVersion,
+              environmentId: ENVIRONMENT_ID,
+              threadId: snapshot.thread.id,
+              snapshot: { ...snapshot, snapshotSequence: 500, thread: legacy.thread },
+            }),
+          );
+          expect(yield* store.loadThread(ENVIRONMENT_ID, snapshot.thread.id)).toEqual(
+            Option.none(),
+          );
+          yield* store.saveThread(ENVIRONMENT_ID, snapshot);
+          expect(yield* store.loadThread(ENVIRONMENT_ID, snapshot.thread.id)).toEqual(
+            Option.some(snapshot),
+          );
+        }
+        expect(memory.removed).toEqual([id, id, id]);
         expect(yield* store.loadVcsRefs(ENVIRONMENT_ID, "/repo")).toEqual(Option.some(REFS));
       }),
   );

@@ -12,11 +12,17 @@ import {
   ProjectionThreadRepository,
   type ProjectionThreadRepositoryShape,
 } from "../Services/ProjectionThreads.ts";
-import { ModelSelection, ThreadLinkedPullRequest, ThreadTitleState } from "@t3tools/contracts";
+import {
+  ModelSelection,
+  ThreadLinkedPullRequest,
+  ThreadTitleState,
+  ThreadPreparedTurn,
+} from "@t3tools/contracts";
 
 const ProjectionThreadDbRow = ProjectionThread.mapFields(
   Struct.assign({
     modelSelection: Schema.fromJsonString(ModelSelection),
+    preparedTurn: Schema.NullOr(Schema.fromJsonString(ThreadPreparedTurn)),
     titleState: Schema.NullOr(Schema.fromJsonString(ThreadTitleState)),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
     branchPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
@@ -36,6 +42,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           title,
           title_state_json,
           model_selection_json,
+          prepared_turn_json,
           runtime_mode,
           interaction_mode,
           branch,
@@ -69,6 +76,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           ${row.title},
           ${row.titleState == null ? null : JSON.stringify(row.titleState)},
           ${JSON.stringify(row.modelSelection)},
+          ${row.preparedTurn == null ? null : JSON.stringify(row.preparedTurn)},
           ${row.runtimeMode},
           ${row.interactionMode},
           ${row.branch},
@@ -102,6 +110,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           title = excluded.title,
           title_state_json = excluded.title_state_json,
           model_selection_json = excluded.model_selection_json,
+          prepared_turn_json = excluded.prepared_turn_json,
           runtime_mode = excluded.runtime_mode,
           interaction_mode = excluded.interaction_mode,
           branch = excluded.branch,
@@ -142,6 +151,7 @@ const makeProjectionThreadRepository = Effect.gen(function* () {
           title,
           title_state_json AS "titleState",
           model_selection_json AS "modelSelection",
+          prepared_turn_json AS "preparedTurn",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
           branch,

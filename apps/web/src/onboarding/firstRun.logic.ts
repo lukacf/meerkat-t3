@@ -37,6 +37,7 @@ interface FirstRunDecisionInput {
   readonly enabled: boolean;
   readonly hydrated: boolean;
   readonly completed: boolean;
+  readonly progressStep?: "connection" | "agents" | "projects" | "first-task" | null | undefined;
   readonly bootstrapped: boolean;
   readonly authoritative: boolean;
   readonly workspaceAuthoritative: boolean;
@@ -52,6 +53,7 @@ interface HostedFirstRunDecisionInput {
   readonly localEnvironmentDisabled?: boolean;
   readonly hydrated: boolean;
   readonly completed: boolean;
+  readonly progressStep?: "connection" | "agents" | "projects" | "first-task" | null | undefined;
   readonly catalogReady: boolean;
   readonly environmentCount: number;
 }
@@ -135,6 +137,13 @@ export function resolveFirstRunDecision(input: FirstRunDecisionInput): {
     return { decision: "pending", persistCompletion: false };
   }
 
+  if (input.progressStep) {
+    return {
+      decision: input.progressStep === "first-task" ? "app" : "wizard",
+      persistCompletion: false,
+    };
+  }
+
   if (input.projectCount > 1 || input.threadCount > 1) {
     return {
       decision: "app",
@@ -173,6 +182,13 @@ export function resolveHostedFirstRunDecision(input: HostedFirstRunDecisionInput
 
   if (input.completed) {
     return { decision: "app", persistCompletion: false };
+  }
+
+  if (input.progressStep) {
+    return {
+      decision: input.progressStep === "first-task" ? "app" : "wizard",
+      persistCompletion: false,
+    };
   }
 
   if (!input.catalogReady) {

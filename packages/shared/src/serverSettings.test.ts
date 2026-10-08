@@ -466,6 +466,48 @@ describe("serverSettings helpers", () => {
     expect(settings.sourceControlWriterModelSelection).toBe(sourceControlWriterModelSelection);
   });
 
+  it("uses the native catalog default when all donor writers are disabled", () => {
+    const nativeId = ProviderInstanceId.make("meerkat");
+    const native = {
+      instanceId: nativeId,
+      driver: ProviderDriverKind.make("meerkat"),
+      enabled: true,
+      installed: true,
+      version: null,
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-09-28T00:00:00.000Z",
+      availability: "available",
+      supportsTextGeneration: true,
+      models: [
+        {
+          slug: "anthropic:claude-sonnet-4-6",
+          name: "Sonnet",
+          isDefault: true,
+          isCustom: false,
+          capabilities: null,
+        },
+      ],
+      slashCommands: [],
+      skills: [],
+    } satisfies ServerProvider;
+    const settings = {
+      ...DEFAULT_SERVER_SETTINGS,
+      providerInstances: {
+        codex: { driver: ProviderDriverKind.make("codex"), enabled: false, config: {} },
+        meerkat: { driver: ProviderDriverKind.make("meerkat"), enabled: true, config: {} },
+      },
+    };
+    expect(resolveSourceControlWriterModelSelection(settings, [native])).toEqual(
+      createModelSelection(nativeId, "anthropic:claude-sonnet-4-6"),
+    );
+    expect(
+      resolveSourceControlWriterModelSelection(settings, [
+        { ...native, supportsTextGeneration: false },
+      ]),
+    ).toBe(settings.textGenerationModelSelection);
+  });
+
   it("replaces providerInstances maps so omitted instance fields are cleared", () => {
     const codexId = ProviderInstanceId.make("codex");
     const current = {

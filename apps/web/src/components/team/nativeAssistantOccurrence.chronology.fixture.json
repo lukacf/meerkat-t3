@@ -1,0 +1,180 @@
+[
+  {
+    "id": "evt-agent-01a0f8d1-5d79-7480-a875-e55afedfa5ad",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8d1-5d79-7480-a875-e55afedfa5ad",
+    "timestamp_ms": 1790880865657,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8ce-318e-7053-925f-25166da7f4c0",
+    "kind": "turn_started",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "fc1cb682-82e3-50a6-8ae6-678c95317887",
+    "run_id": "01a0f8d0-76cf-7f30-8eae-39f34dc15ca1",
+    "cursor": "console:14",
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8d1-5d79-7480-a875-e55afedfa5ad"
+    },
+    "payload": {
+      "assistant_message_id": "01a0f8d1-5d72-7ef0-910d-7ee7cb6574b1",
+      "identity": {
+        "interaction_id": "fc1cb682-82e3-50a6-8ae6-678c95317887",
+        "run_id": "01a0f8d0-76cf-7f30-8eae-39f34dc15ca1"
+      },
+      "run_id": "01a0f8d0-76cf-7f30-8eae-39f34dc15ca1",
+      "session_id": "01a0f8ce-318e-7053-925f-25166da7f4c0",
+      "source_event_type": "turn_started",
+      "source_sequence": 9,
+      "turn_number": 1,
+      "type": "turn_started"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8d1-5d7d-7303-93b9-83564ceb4eb9",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8d1-5d7d-7303-93b9-83564ceb4eb9",
+    "timestamp_ms": 1790880865661,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8ce-318e-7053-925f-25166da7f4c0",
+    "kind": "text_complete",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "fc1cb682-82e3-50a6-8ae6-678c95317887",
+    "run_id": "01a0f8d0-76cf-7f30-8eae-39f34dc15ca1",
+    "cursor": "console:16",
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8d1-5d7d-7303-93b9-83564ceb4eb9"
+    },
+    "payload": {
+      "assistant_message_id": "01a0f8d1-5d72-7ef0-910d-7ee7cb6574b1",
+      "content": "UI_QUESTION_ANSWERED",
+      "identity": {
+        "interaction_id": "fc1cb682-82e3-50a6-8ae6-678c95317887",
+        "run_id": "01a0f8d0-76cf-7f30-8eae-39f34dc15ca1"
+      },
+      "run_id": "01a0f8d0-76cf-7f30-8eae-39f34dc15ca1",
+      "session_id": "01a0f8ce-318e-7053-925f-25166da7f4c0",
+      "source_event_type": "text_complete",
+      "source_sequence": 11,
+      "type": "text_complete"
+    }
+  },
+  {
+    "id": "console-frame-ceba725444e41f8a25ed2c1abf7f0a228d99b0a44445496499e1777715f51419",
+    "dedupe_key": "session-history:default:01a0f8ce-318e-7053-925f-25166da7f4c0:3:0:73b77e47604e7e7e",
+    "timestamp_ms": 1790880865649,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8ce-318e-7053-925f-25166da7f4c0",
+    "kind": "tool_execution_completed",
+    "status": "completed",
+    "frame_version": 1,
+    "cursor": "console:22",
+    "source": {
+      "kind": "session_history",
+      "source_cursor": "01a0f8ce-318e-7053-925f-25166da7f4c0:3:0"
+    },
+    "payload": {
+      "content": [
+        {
+          "data": {
+            "answers": [
+              {
+                "customText": "",
+                "questionId": "review",
+                "selectedOptionIds": ["return-review"]
+              }
+            ],
+            "dismissed": false
+          },
+          "type": "structured"
+        }
+      ],
+      "id": "manual_ui_question_call",
+      "is_error": false,
+      "result": "{\"answers\":[{\"customText\":\"\",\"questionId\":\"review\",\"selectedOptionIds\":[\"return-review\"]}],\"dismissed\":false}",
+      "source_event_type": "session_history",
+      "tool_call_id": "manual_ui_question_call",
+      "type": "session_history"
+    }
+  },
+  {
+    "id": "console-frame-179a83acd04556cea4feffd814870f90bed12543c38c0540a2980279f0ba330b",
+    "dedupe_key": "session-history:default:01a0f8ce-318e-7053-925f-25166da7f4c0:4:1ec662ee6ac8c4ff",
+    "timestamp_ms": 1790880865660,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8ce-318e-7053-925f-25166da7f4c0",
+    "kind": "text_complete",
+    "status": "completed",
+    "frame_version": 1,
+    "interaction_id": "fc1cb682-82e3-50a6-8ae6-678c95317887",
+    "run_id": "01a0f8d0-76cf-7f30-8eae-39f34dc15ca1",
+    "cursor": "console:23",
+    "source": {
+      "kind": "session_history",
+      "source_cursor": "01a0f8ce-318e-7053-925f-25166da7f4c0:4"
+    },
+    "payload": {
+      "assistant_message_id": "01a0f8d1-5d72-7ef0-910d-7ee7cb6574b1",
+      "message": {
+        "assistant_message_id": "01a0f8d1-5d72-7ef0-910d-7ee7cb6574b1",
+        "blocks": [
+          {
+            "block_type": "text",
+            "data": {
+              "meta": {
+                "id": "msg_manual_2",
+                "provider": "open_ai_assistant_message",
+                "response_id": "resp_manual_2"
+              },
+              "text": "UI_QUESTION_ANSWERED"
+            }
+          }
+        ],
+        "created_at": "2026-10-01T18:54:25.660821Z",
+        "identity": {
+          "interaction_id": "fc1cb682-82e3-50a6-8ae6-678c95317887",
+          "run_id": "01a0f8d0-76cf-7f30-8eae-39f34dc15ca1"
+        },
+        "role": "block_assistant",
+        "stop_reason": "end_turn"
+      },
+      "result": "UI_QUESTION_ANSWERED",
+      "source_event_type": "session_history",
+      "text": "UI_QUESTION_ANSWERED",
+      "type": "session_history"
+    }
+  },
+  {
+    "id": "console-frame-193d6b7737a001d4341a0c5ac6c7c5371a05a3a8d9f903ee59dfd82218d36fb6",
+    "dedupe_key": "send:default:reviewer:meerkat-app:df828721-753b-4a4b-966f-cc8282c784a5",
+    "timestamp_ms": 1790880890734,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8ce-318e-7053-925f-25166da7f4c0",
+    "kind": "user_input",
+    "status": "delivered",
+    "frame_version": 3,
+    "updated_at_ms": 1790880890740,
+    "interaction_id": "c5f99391-acc8-52f8-b7b5-fe99f2abacfb",
+    "cursor": "console:27",
+    "source": {
+      "kind": "send",
+      "source_cursor": "605cc108136c9c23"
+    },
+    "payload": {
+      "content": "UI_QUEUE_HOLD",
+      "handling_mode": "queue",
+      "idempotency_key": "df828721-753b-4a4b-966f-cc8282c784a5",
+      "origin": "meerkat-app"
+    }
+  }
+]

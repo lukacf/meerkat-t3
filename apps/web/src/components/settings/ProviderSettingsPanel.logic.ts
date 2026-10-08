@@ -1,9 +1,79 @@
 import type { EnvironmentConnectionPhase } from "@t3tools/client-runtime/connection";
+import type { ProviderSettingsIntent } from "@t3tools/client-runtime/state/server";
 import {
   AuthOrchestrationOperateScope,
   type AuthSessionState,
   type EnvironmentId,
+  type ProviderInstanceId,
+  type ProviderInstanceConfig,
+  resolveProviderInstanceEnabled,
 } from "@t3tools/contracts";
+
+/** Capture only the fields changed by this editor, not its settings snapshot. */
+export function buildProviderSettingsEdit(
+  instanceId: ProviderInstanceId,
+  previous: ProviderInstanceConfig,
+  next: ProviderInstanceConfig,
+): ProviderSettingsIntent {
+  const previousConfig =
+    previous.config !== null && typeof previous.config === "object"
+      ? (previous.config as Record<string, unknown>)
+      : {};
+  const nextConfig =
+    next.config !== null && typeof next.config === "object"
+      ? (next.config as Record<string, unknown>)
+      : {};
+  const set = Object.fromEntries(
+    Object.entries(nextConfig).filter(([key, value]) => !Object.is(previousConfig[key], value)),
+  );
+  const remove = Object.keys(previousConfig).filter((key) => !Object.hasOwn(nextConfig, key));
+  return {
+    kind: "edit",
+    instanceId,
+    driver: previous.driver,
+    changes: {
+      ...(next.enabled !== previous.enabled && next.enabled !== undefined
+        ? { enabled: next.enabled }
+        : {}),
+      ...(next.displayName !== previous.displayName
+        ? { displayName: next.displayName ?? null }
+        : {}),
+      ...(next.accentColor !== previous.accentColor
+        ? { accentColor: next.accentColor ?? null }
+        : {}),
+      ...(next.environment !== previous.environment
+        ? { environment: next.environment ?? null }
+        : {}),
+      ...(Object.keys(set).length > 0 || remove.length > 0 ? { config: { set, remove } } : {}),
+    },
+  };
+}
+
+/** Keep configured alternatives visible after the enabled native runtime. */
+export function orderProviderSettingsRows<
+  T extends { readonly instance: Pick<ProviderInstanceConfig, "driver" | "enabled" | "config"> },
+>(rows: readonly T[]): T[] {
+  const priority = (row: T) =>
+    resolveProviderInstanceEnabled(row.instance) ? (row.instance.driver === "meerkat" ? 0 : 1) : 2;
+  return rows.toSorted((left, right) => priority(left) - priority(right));
+}
+
+/** Keep explicit choices, but begin setup with a provider that is actually enabled. */
+export function selectProviderSettingsRow<
+  T extends {
+    readonly instanceId: ProviderInstanceId;
+    readonly instance: Pick<ProviderInstanceConfig, "driver" | "enabled" | "config">;
+  },
+>(
+  rows: readonly T[],
+  selectedInstanceId: ProviderInstanceId | null,
+  targetInstanceId?: ProviderInstanceId,
+): T | null {
+  const selected = rows.find((row) => row.instanceId === selectedInstanceId);
+  if (selected) return selected;
+  if (targetInstanceId !== undefined && selectedInstanceId === targetInstanceId) return null;
+  return rows.find((row) => resolveProviderInstanceEnabled(row.instance)) ?? rows[0] ?? null;
+}
 
 export interface ProviderEnvironmentOptionLike {
   readonly environmentId: EnvironmentId;

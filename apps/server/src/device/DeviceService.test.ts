@@ -144,6 +144,7 @@ const fixture = Effect.fn("fixture")(function* (
         start: Effect.void,
         ready: Effect.void,
         getSettings: Ref.get(settings),
+        updateProviderSettings: () => Effect.die("Unexpected provider settings mutation"),
         updateSettings: (patch) =>
           Ref.updateAndGet(settings, (current) => ({
             ...current,

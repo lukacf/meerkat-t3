@@ -16,6 +16,7 @@
  * Polling is reference-counted via scoped `retain`. A single layer-scoped fiber
  * polls forever, but each tick is a no-op when the retain count is zero.
  */
+import { isProjectTerminalOwner } from "../terminal/terminalOwner.ts";
 import {
   CONFIGURED_LOCAL_SERVER_URLS_MAX_ITEMS,
   PREVIEW_URL_MAX_LENGTH,
@@ -624,6 +625,8 @@ export const make = Effect.gen(function* PortDiscoveryMake() {
 
   const registerTerminalProcesses: PortDiscovery["Service"]["registerTerminalProcesses"] =
     Effect.fn("PortDiscovery.registerTerminalProcesses")(function* (input) {
+      // Project shells still appear as local servers, without a fabricated thread association.
+      if (isProjectTerminalOwner(input.threadId)) return;
       const owner = {
         threadId: ThreadId.make(input.threadId),
         terminalId: input.terminalId,

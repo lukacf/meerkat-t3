@@ -15,6 +15,7 @@ import { appAtomRegistry } from "~/rpc/atomRegistry";
 import { projectEnvironment } from "~/state/projects";
 import { useProjectPathSearch } from "~/state/queries";
 import { executeAtomQuery } from "@t3tools/client-runtime/state/runtime";
+import { fileEditRecoveryStore, type FileEditRecoveryWrite } from "./fileEditRecoveryStore";
 
 const EMPTY_PROJECT_FILE_PATH = "";
 const EMPTY_PROJECT_FILE_QUERY_ATOM = Atom.make(
@@ -29,6 +30,17 @@ export function optimisticFileAtom(
   return projectEnvironment.optimisticFile({ environmentId, cwd, relativePath });
 }
 
+// Only unconfirmed edits outlive their last view. Confirmed and clean files
+// retain the registry's normal disposal policy.
+const pendingFileLeases = new WeakMap<ReturnType<typeof optimisticFileAtom>, () => void>();
+const recoveryWrites = new WeakMap<ProjectReadFileResult, FileEditRecoveryWrite>();
+
+function releasePendingFile(atom: ReturnType<typeof optimisticFileAtom>): void {
+  const release = pendingFileLeases.get(atom);
+  pendingFileLeases.delete(atom);
+  release?.();
+}
+
 interface ProjectQueryState<A> {
   readonly data: A | null;
   readonly error: string | null;
@@ -39,6 +51,7 @@ interface ProjectQueryState<A> {
 interface ProjectFileQueryState extends ProjectQueryState<ProjectReadFileResult> {
   /** The path exists but is not a regular file, typically a directory. */
   readonly isNotFile: boolean;
+  readonly saveFailed: boolean;
 }
 
 function getProjectEntriesQueryAtom(
@@ -69,15 +82,36 @@ export function setProjectFileQueryData(
   relativePath: string,
   contents: string,
 ): void {
-  appAtomRegistry.set(optimisticFileAtom(environmentId, cwd, relativePath), {
+  const atom = optimisticFileAtom(environmentId, cwd, relativePath);
+  if (!pendingFileLeases.has(atom)) {
+    pendingFileLeases.set(atom, appAtomRegistry.mount(atom));
+  }
+  const data = {
+    relativePath,
+    contents,
+    byteLength: new TextEncoder().encode(contents).byteLength,
+    truncated: false,
+  };
+  recoveryWrites.set(
+    data,
+    fileEditRecoveryStore.capture({ environmentId, cwd, relativePath }, contents),
+  );
+  appAtomRegistry.set(atom, {
     confirmedAgainst: undefined,
-    data: {
-      relativePath,
-      contents,
-      byteLength: new TextEncoder().encode(contents).byteLength,
-      truncated: false,
-    },
+    data,
   });
+}
+
+export function markProjectFileSaveFailed(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string,
+  contents: string,
+): void {
+  const atom = optimisticFileAtom(environmentId, cwd, relativePath);
+  const optimistic = appAtomRegistry.get(atom);
+  if (optimistic?.data.contents !== contents || optimistic.confirmedAgainst !== undefined) return;
+  appAtomRegistry.set(atom, { ...optimistic, saveFailed: true });
 }
 
 export function getOptimisticProjectFileQueryData(
@@ -86,6 +120,41 @@ export function getOptimisticProjectFileQueryData(
   relativePath: string,
 ): ProjectReadFileResult | null {
   return appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath))?.data ?? null;
+}
+
+export function hasPendingProjectFileEdit(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string,
+): boolean {
+  const optimistic = appAtomRegistry.get(optimisticFileAtom(environmentId, cwd, relativePath));
+  return optimistic !== null && optimistic.confirmedAgainst === undefined;
+}
+
+/** Await a new disk read before a restored file becomes editable again. */
+export async function refreshRestoredProjectFile(
+  environmentId: EnvironmentId,
+  cwd: string,
+  relativePath: string,
+): Promise<void> {
+  const optimisticAtom = optimisticFileAtom(environmentId, cwd, relativePath);
+  const previousOptimistic = appAtomRegistry.get(optimisticAtom);
+  const queryAtom = getProjectFileQueryAtom(environmentId, cwd, relativePath);
+  // Also replace an in-flight read that began before the restore RPC completed.
+  appAtomRegistry.refresh(queryAtom);
+  await executeAtomQuery(appAtomRegistry, queryAtom, {
+    reportDefect: false,
+    reportFailure: false,
+  });
+  // A restore may supersede the confirming read from an earlier successful
+  // save. Its old overlay must not mask the new disk contents or a deletion.
+  if (
+    previousOptimistic !== null &&
+    previousOptimistic.confirmedAgainst !== undefined &&
+    appAtomRegistry.get(optimisticAtom) === previousOptimistic
+  ) {
+    appAtomRegistry.set(optimisticAtom, null);
+  }
 }
 
 export function confirmProjectFileQueryData(
@@ -98,12 +167,17 @@ export function confirmProjectFileQueryData(
   const optimisticFile = appAtomRegistry.get(atom);
   if (optimisticFile?.data.contents !== contents) return false;
 
+  const recoveryWrite = recoveryWrites.get(optimisticFile.data);
+  if (recoveryWrite) fileEditRecoveryStore.confirm(recoveryWrite);
+
   const queryAtom = getProjectFileQueryAtom(environmentId, cwd, relativePath);
   const confirmed = {
     ...optimisticFile,
     confirmedAgainst: appAtomRegistry.get(queryAtom),
+    saveFailed: false,
   };
   appAtomRegistry.set(atom, confirmed);
+  releasePendingFile(atom);
   appAtomRegistry.refresh(queryAtom);
   void executeAtomQuery(appAtomRegistry, queryAtom, {
     reportDefect: false,
@@ -131,7 +205,9 @@ export function clearProjectFileQueryData(
   cwd: string,
   relativePath: string,
 ): void {
-  appAtomRegistry.set(optimisticFileAtom(environmentId, cwd, relativePath), null);
+  const atom = optimisticFileAtom(environmentId, cwd, relativePath);
+  appAtomRegistry.set(atom, null);
+  releasePendingFile(atom);
 }
 
 function failureCause<A>(result: AsyncResult.AsyncResult<A, unknown>): unknown {
@@ -222,6 +298,7 @@ export function useProjectFileQuery(
     data: optimisticFile?.data ?? data,
     error: errorMessage(cause),
     isNotFile: isProjectReadFileError(cause) && cause.failure === "path_not_file",
+    saveFailed: optimisticFile?.saveFailed === true,
     isPending: result.waiting,
     refresh,
   };

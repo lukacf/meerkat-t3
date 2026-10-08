@@ -1,16 +1,43 @@
-import type { VcsStatusResult } from "@t3tools/contracts";
+import type { GitRunStackedActionResult, VcsStatusResult } from "@t3tools/contracts";
 import { assert, describe, it } from "vite-plus/test";
 import {
   buildGitActionProgressStages,
   buildMenuItems,
+  canContinueOnFeatureBranch,
+  captureGitActionFollowupIntent,
+  captureGitActionIntent,
+  clearCommittedMessageDraft,
+  isGitActionIntentCurrent,
+  manualPrSubmissionBlocker,
   requiresDefaultBranchConfirmation,
   resolveAutoFeatureBranchName,
   resolveDefaultBranchActionDialogCopy,
+  resolveGeneratedDraftAction,
   resolveLiveThreadBranchUpdate,
+  resolvePublishRepositoryEntry,
   resolveQuickAction,
   resolveThreadBranchUpdate,
   resolveThreadBranchMetadataPatch,
+  snapshotCommitFilePaths,
 } from "./GitActionsControl.logic";
+
+describe("delayed commit file selection", () => {
+  it("freezes explicit and quick-action paths before later changes appear", () => {
+    const files = [{ path: "selected.ts" }];
+    const selected = ["selected.ts"];
+    const quickSnapshot = snapshotCommitFilePaths(undefined, files);
+    const dialogSnapshot = snapshotCommitFilePaths(selected, files);
+    files.push({ path: "late-secret.ts" });
+    selected.push("late-secret.ts");
+    assert.deepEqual(quickSnapshot, ["selected.ts"]);
+    assert.deepEqual(dialogSnapshot, ["selected.ts"]);
+  });
+
+  it("blocks empty selection rather than using the server's stage-everything semantics", () => {
+    assert.isNull(snapshotCommitFilePaths([], [{ path: "unselected.ts" }]));
+    assert.isNull(snapshotCommitFilePaths(undefined, []));
+  });
+});
 
 function status(overrides: Partial<VcsStatusResult> = {}): VcsStatusResult {
   return {
@@ -31,6 +58,412 @@ function status(overrides: Partial<VcsStatusResult> = {}): VcsStatusResult {
     ...overrides,
   };
 }
+
+describe("Git success-toast continuation", () => {
+  const scope = ["server-a", "/checkout", "thread-a", null];
+  const owner = JSON.stringify(scope);
+  const original = () =>
+    captureGitActionIntent({
+      action: "commit",
+      owner,
+      status: status({ hasWorkingTreeChanges: true }),
+      filePaths: ["committed.txt"],
+    })!;
+  const result = (
+    overrides: Partial<GitRunStackedActionResult> = {},
+  ): GitRunStackedActionResult => ({
+    action: "commit",
+    branch: { status: "skipped_not_requested" },
+    commit: { status: "created", commitSha: "abc1234" },
+    push: { status: "skipped_not_requested" },
+    pr: { status: "skipped_not_requested" },
+    toast: {
+      title: "Committed abc1234",
+      cta: { kind: "run_action", label: "Push", action: { kind: "push" } },
+    },
+    ...overrides,
+  });
+
+  it("keeps the committed branch's Push usable without committing later edits", () => {
+    const followup = captureGitActionFollowupIntent(original(), result());
+    assert.isNotNull(followup);
+    assert.isTrue(
+      isGitActionIntentCurrent(followup!, owner, status({ hasWorkingTreeChanges: true })),
+    );
+    assert.equal(followup!.action, "push");
+    assert.isFalse(followup!.includesCommit);
+    assert.isUndefined(followup!.filePaths);
+  });
+
+  it("rejects the old toast after branch or action context changes", () => {
+    const followup = captureGitActionFollowupIntent(original(), result())!;
+    assert.isFalse(isGitActionIntentCurrent(followup, owner, status({ refName: "feature/other" })));
+    for (let field = 0; field < scope.length; field++) {
+      const changed = [...scope];
+      changed[field] = "different";
+      assert.isFalse(isGitActionIntentCurrent(followup, JSON.stringify(changed), status()));
+    }
+    assert.isFalse(isGitActionIntentCurrent(followup, owner, null));
+    assert.isFalse(isGitActionIntentCurrent(followup, owner, status({ refName: null })));
+  });
+
+  it("binds Create PR after Push to the successful push's original context", () => {
+    const push = captureGitActionIntent({ action: "push", owner, status: status() })!;
+    const followup = captureGitActionFollowupIntent(
+      push,
+      result({
+        action: "push",
+        commit: { status: "skipped_not_requested" },
+        push: { status: "pushed", branch: "feature/test" },
+        toast: {
+          title: "Pushed feature/test",
+          cta: { kind: "run_action", label: "Create PR", action: { kind: "create_pr" } },
+        },
+      }),
+    )!;
+    assert.equal(followup.action, "create_pr");
+    assert.isTrue(isGitActionIntentCurrent(followup, owner, status()));
+    assert.isFalse(isGitActionIntentCurrent(followup, owner, status({ refName: "feature/other" })));
+  });
+
+  it("uses the deliberately created feature branch instead of the original branch", () => {
+    const followup = captureGitActionFollowupIntent(
+      original(),
+      result({ branch: { status: "created", name: "feature/new" } }),
+    )!;
+    assert.isTrue(isGitActionIntentCurrent(followup, owner, status({ refName: "feature/new" })));
+    assert.isFalse(isGitActionIntentCurrent(followup, owner, status()));
+  });
+
+  it("does not invent a branch when the original or created identity is missing", () => {
+    assert.isNull(
+      captureGitActionFollowupIntent({ ...original(), branchName: undefined }, result()),
+    );
+    assert.isNull(captureGitActionFollowupIntent({ ...original(), branchName: null }, result()));
+    assert.isNull(
+      captureGitActionFollowupIntent(original(), result({ branch: { status: "created" } })),
+    );
+  });
+
+  it("refuses conflicting completed branch identities", () => {
+    assert.isNull(
+      captureGitActionFollowupIntent(
+        original(),
+        result({ push: { status: "pushed", branch: "feature/other" } }),
+      ),
+    );
+    assert.isNull(
+      captureGitActionFollowupIntent(
+        original(),
+        result({
+          branch: { status: "created", name: "feature/new" },
+          push: { status: "pushed", branch: "feature/other" },
+        }),
+      ),
+    );
+  });
+
+  it("does not turn an Open PR link or a commit-bearing suggestion into a continuation", () => {
+    assert.isNull(
+      captureGitActionFollowupIntent(
+        original(),
+        result({
+          toast: {
+            title: "Created PR",
+            cta: { kind: "open_pr", label: "View PR", url: "https://github.com/owner/repo/pull/1" },
+          },
+        }),
+      ),
+    );
+    assert.isNull(
+      captureGitActionFollowupIntent(
+        original(),
+        result({
+          toast: {
+            title: "Suggestion",
+            cta: { kind: "run_action", label: "Commit and push", action: { kind: "commit_push" } },
+          },
+        }),
+      ),
+    );
+  });
+});
+
+describe("frozen Git action intent", () => {
+  const scope = ["server-a", "/checkout", "thread-a", null];
+  const owner = JSON.stringify(scope);
+
+  it("keeps a clean primary Push push-only when files appear before confirmation", () => {
+    const clean = status({ refName: "main", isDefaultRef: true, aheadCount: 1 });
+    const quick = resolveQuickAction(clean, false, true, true);
+    assert.equal(quick.action, "commit_push");
+    const intent = captureGitActionIntent({ action: quick.action!, owner, status: clean });
+    assert.isNotNull(intent);
+    const changed = status({
+      ...clean,
+      hasWorkingTreeChanges: true,
+      workingTree: {
+        files: [{ path: "late.txt", insertions: 1, deletions: 0 }],
+        insertions: 1,
+        deletions: 0,
+      },
+    });
+    assert.isTrue(isGitActionIntentCurrent(intent!, owner, changed));
+    assert.equal(intent!.action, "push");
+    assert.isFalse(intent!.includesCommit);
+    assert.isUndefined(intent!.filePaths);
+  });
+
+  it("keeps clean push-and-PR intent without admitting a later commit", () => {
+    const intent = captureGitActionIntent({ action: "commit_push_pr", owner, status: status() });
+    assert.equal(intent?.action, "create_pr");
+    assert.isFalse(intent?.includesCommit);
+    assert.isUndefined(intent?.filePaths);
+  });
+
+  it("preserves selected commit paths through confirmation and author setup", () => {
+    const selected = ["selected.txt"];
+    const dirty = status({ hasWorkingTreeChanges: true });
+    const intent = captureGitActionIntent({
+      action: "commit_push_pr",
+      owner,
+      status: dirty,
+      filePaths: selected,
+    });
+    selected.push("later.txt");
+    assert.isNotNull(intent);
+    assert.isTrue(isGitActionIntentCurrent(intent!, owner, { ...dirty }));
+    assert.equal(intent!.action, "commit_push_pr");
+    assert.deepEqual(intent!.filePaths, ["selected.txt"]);
+    assert.isTrue(
+      intent!.action !== "commit" &&
+        canContinueOnFeatureBranch(intent!.action, intent!.includesCommit),
+    );
+  });
+
+  it("rejects a changed environment, checkout, thread, draft or observed branch", () => {
+    const original = status({ refName: "main" });
+    const intent = captureGitActionIntent({ action: "push", owner, status: original })!;
+    assert.isTrue(isGitActionIntentCurrent(intent, owner, original));
+    for (let field = 0; field < scope.length; field++) {
+      const changed = [...scope];
+      changed[field] = "different";
+      assert.isFalse(isGitActionIntentCurrent(intent, JSON.stringify(changed), original));
+    }
+    assert.isFalse(isGitActionIntentCurrent(intent, owner, status({ refName: "feature/other" })));
+    assert.isFalse(isGitActionIntentCurrent(intent, owner, status({ refName: null })));
+    assert.isFalse(isGitActionIntentCurrent(intent, owner, null));
+  });
+
+  it("keeps an explicit commit and feature-branch intent, but refuses an empty selection", () => {
+    const dirty = status({ hasWorkingTreeChanges: true });
+    const intent = captureGitActionIntent({
+      action: "commit_push",
+      owner,
+      status: dirty,
+      featureBranch: true,
+      filePaths: ["selected.txt"],
+    });
+    assert.equal(intent?.action, "commit_push");
+    assert.isTrue(intent?.includesCommit);
+    assert.isNull(
+      captureGitActionIntent({ action: "commit", owner, status: dirty, filePaths: [] }),
+    );
+  });
+
+  it("does not infer a clean checkout or invent a branch when status is unavailable", () => {
+    for (const action of ["commit", "commit_push", "commit_push_pr"] as const) {
+      const intent = captureGitActionIntent({
+        action,
+        owner,
+        status: null,
+        filePaths: ["selected.txt"],
+      });
+      assert.equal(intent?.action, action);
+      assert.isTrue(intent?.includesCommit);
+      assert.isUndefined(intent?.branchName);
+      assert.deepEqual(intent?.filePaths, ["selected.txt"]);
+    }
+  });
+});
+
+describe("publish recovery entry", () => {
+  const scope = { environmentId: "server-a", cwd: "/exact-checkout" };
+
+  it("keeps a created repository recoverable after status fails or the checkout changes", () => {
+    const initial = {
+      ...scope,
+      gitStatus: status({ hasPrimaryRemote: false }),
+      pendingRecoveryCount: 0,
+      recoveryReadable: true,
+    };
+    assert.equal(resolvePublishRepositoryEntry(initial), "create");
+    for (const gitStatus of [null, status(), status({ isRepo: false })]) {
+      assert.equal(
+        resolvePublishRepositoryEntry({ ...initial, gitStatus, pendingRecoveryCount: 1 }),
+        "resume",
+      );
+    }
+  });
+
+  it("keeps unreadable saved recovery accessible without offering a new creation", () => {
+    assert.equal(
+      resolvePublishRepositoryEntry({
+        ...scope,
+        gitStatus: null,
+        pendingRecoveryCount: 0,
+        recoveryReadable: false,
+      }),
+      "resume",
+    );
+  });
+
+  it("requires exact scope for recovery and preserves fresh publish prerequisites", () => {
+    const recovery = {
+      ...scope,
+      gitStatus: null,
+      pendingRecoveryCount: 1,
+      recoveryReadable: true,
+    };
+    assert.isNull(resolvePublishRepositoryEntry({ ...recovery, environmentId: null }));
+    assert.isNull(resolvePublishRepositoryEntry({ ...recovery, cwd: null }));
+    assert.isNull(resolvePublishRepositoryEntry({ ...recovery, cwd: "" }));
+    for (const gitStatus of [null, status(), status({ isRepo: false, hasPrimaryRemote: false })]) {
+      assert.isNull(
+        resolvePublishRepositoryEntry({ ...recovery, gitStatus, pendingRecoveryCount: 0 }),
+      );
+    }
+  });
+});
+
+describe("manual pull request prerequisites", () => {
+  it("blocks a dirty checkout before the authored request is submitted", () => {
+    assert.match(
+      manualPrSubmissionBlocker(status({ hasWorkingTreeChanges: true })) ?? "",
+      /Commit or stash local changes/,
+    );
+  });
+
+  it("allows a clean branch with a remote", () => {
+    assert.isNull(manualPrSubmissionBlocker(status({ aheadCount: 2 })));
+  });
+
+  it("waits for status and blocks a missing remote or detached checkout", () => {
+    assert.isString(manualPrSubmissionBlocker(null));
+    assert.isString(manualPrSubmissionBlocker(status({ isRepo: false })));
+    assert.isString(manualPrSubmissionBlocker(status({ hasPrimaryRemote: false })));
+    assert.isString(manualPrSubmissionBlocker(status({ refName: null })));
+  });
+});
+
+describe("generated draft pull requests", () => {
+  const github = { kind: "github", name: "GitHub", baseUrl: "https://github.com" } as const;
+
+  it("includes dirty changes in the commit and push action", () => {
+    assert.deepEqual(
+      resolveGeneratedDraftAction(
+        status({ sourceControlProvider: github, hasWorkingTreeChanges: true }),
+        false,
+      ),
+      {
+        action: "commit_push_pr",
+        label: "Commit, push & create draft PR",
+        disabled: false,
+      },
+    );
+  });
+
+  it("offers a generated draft for a clean branch with committed changes", () => {
+    assert.deepEqual(
+      resolveGeneratedDraftAction(
+        status({ sourceControlProvider: github, aheadOfDefaultCount: 2 }),
+        true,
+      ),
+      { action: "create_pr", label: "Create draft PR", disabled: true },
+    );
+  });
+
+  it("keeps default-ref confirmation for changes that can create a feature branch", () => {
+    const action = resolveGeneratedDraftAction(
+      status({ sourceControlProvider: github, isDefaultRef: true, hasWorkingTreeChanges: true }),
+      false,
+    );
+    assert.isNotNull(action);
+    assert.isTrue(requiresDefaultBranchConfirmation(action!.action, true));
+    assert.isNull(
+      resolveGeneratedDraftAction(
+        status({ sourceControlProvider: github, isDefaultRef: true, aheadCount: 2 }),
+        false,
+      ),
+    );
+  });
+
+  it("keeps existing PRs and ineligible checkouts out of the creation flow", () => {
+    const eligible = status({ sourceControlProvider: github, hasWorkingTreeChanges: true });
+    for (const candidate of [
+      null,
+      { ...eligible, sourceControlProvider: undefined },
+      { ...eligible, sourceControlProvider: { ...github, kind: "gitlab" as const } },
+      { ...eligible, isRepo: false },
+      { ...eligible, hasPrimaryRemote: false },
+      { ...eligible, refName: null },
+      { ...eligible, behindCount: 1 },
+      { ...eligible, hasWorkingTreeChanges: false },
+      {
+        ...eligible,
+        pr: {
+          number: 10,
+          title: "Existing PR",
+          url: "https://example.com/pr/10",
+          baseRef: "main",
+          headRef: "feature/test",
+          state: "open" as const,
+        },
+      },
+    ]) {
+      assert.isNull(resolveGeneratedDraftAction(candidate, false));
+    }
+  });
+});
+
+describe("manual commit message drafts", () => {
+  it("keeps the authored message when Git does not create a commit", () => {
+    const drafts = { checkout: "Fix the broken review receipt" };
+    assert.strictEqual(
+      clearCommittedMessageDraft(drafts, "checkout", drafts.checkout, "skipped_no_changes"),
+      drafts,
+    );
+    assert.strictEqual(
+      clearCommittedMessageDraft(drafts, "checkout", drafts.checkout, "skipped_not_requested"),
+      drafts,
+    );
+  });
+
+  it("clears only the submitted checkout draft after a commit is created", () => {
+    const drafts = { checkout: "  Fix the review receipt\n", otherCheckout: "Ship documentation" };
+    assert.deepEqual(
+      clearCommittedMessageDraft(drafts, "checkout", "Fix the review receipt", "created"),
+      { otherCheckout: "Ship documentation" },
+    );
+    assert.equal(drafts.checkout, "  Fix the review receipt\n");
+  });
+
+  it("preserves a newer message when an earlier commit finishes", () => {
+    const drafts = { checkout: "Explain the follow-up change" };
+    assert.strictEqual(
+      clearCommittedMessageDraft(drafts, "checkout", "Fix the review receipt", "created"),
+      drafts,
+    );
+  });
+
+  it("ignores completion for a checkout without an authored draft", () => {
+    const drafts = { otherCheckout: "Ship documentation" };
+    assert.strictEqual(
+      clearCommittedMessageDraft(drafts, "checkout", "Generated subject", "created"),
+      drafts,
+    );
+  });
+});
 
 describe("when: ref is clean and has an open PR", () => {
   it("resolveQuickAction opens the existing PR", () => {
@@ -886,6 +1319,49 @@ describe("requiresDefaultBranchConfirmation", () => {
   });
 });
 
+describe("default-branch feature continuation", () => {
+  it("routes an already committed default branch through the branch selector", () => {
+    const checkout = status({
+      isDefaultRef: true,
+      refName: "main",
+      hasUpstream: false,
+      aheadCount: 2,
+    });
+    assert.deepEqual(resolveQuickAction(checkout, false, true, true), {
+      label: "Push",
+      disabled: false,
+      kind: "run_action",
+      action: "commit_push",
+    });
+    for (const action of ["push", "create_pr"] as const) {
+      assert.isTrue(requiresDefaultBranchConfirmation(action, true));
+      assert.isFalse(canContinueOnFeatureBranch(action, false));
+      assert.isFalse(canContinueOnFeatureBranch(action, true));
+      const copy = resolveDefaultBranchActionDialogCopy({
+        action,
+        branchName: "main",
+        includesCommit: false,
+      });
+      assert.include(copy.description, "cancel and create it with the branch selector first");
+      assert.notInclude(copy.description, "run the same action there");
+    }
+  });
+
+  it.each(["commit_push", "commit_push_pr"] as const)(
+    "keeps %s feature continuation only while it includes a commit",
+    (action) => {
+      assert.isTrue(canContinueOnFeatureBranch(action, true));
+      assert.isFalse(canContinueOnFeatureBranch(action, false));
+      const copy = resolveDefaultBranchActionDialogCopy({
+        action,
+        branchName: "main",
+        includesCommit: true,
+      });
+      assert.include(copy.description, "create a feature ref and run the same action there");
+    },
+  );
+});
+
 describe("resolveDefaultBranchActionDialogCopy", () => {
   it("uses push-only copy when pushing without a commit", () => {
     const copy = resolveDefaultBranchActionDialogCopy({
@@ -897,7 +1373,7 @@ describe("resolveDefaultBranchActionDialogCopy", () => {
     assert.deepEqual(copy, {
       title: "Push to default ref?",
       description:
-        'This action will push local commits on "main". You can continue on this ref or create a feature ref and run the same action there.',
+        'This action will push local commits on "main". To use a feature branch, cancel and create it with the branch selector first.',
       continueLabel: "Push to main",
     });
   });
@@ -912,7 +1388,7 @@ describe("resolveDefaultBranchActionDialogCopy", () => {
     assert.deepEqual(copy, {
       title: "Push & create PR from default ref?",
       description:
-        'This action will push local commits and create a pull request on "main". You can continue on this ref or create a feature ref and run the same action there.',
+        'This action will push local commits and create a pull request on "main". To use a feature branch, cancel and create it with the branch selector first.',
       continueLabel: "Push & create PR",
     });
   });

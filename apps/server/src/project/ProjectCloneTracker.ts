@@ -5,6 +5,7 @@ import type {
   ProjectCloneStartInput,
   ProjectCloneStartResult,
   ProjectId,
+  ThreadId,
   SourceControlRepositoryInfo,
 } from "@t3tools/contracts";
 import {
@@ -29,6 +30,11 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as SourceControlRepositoryService from "../sourceControl/SourceControlRepositoryService.ts";
+import {
+  makeProjectCloneIntent,
+  ProjectCloneIntentStore,
+  type ProjectCloneIntent,
+} from "./ProjectCloneIntentStore.ts";
 
 /**
  * Runs repository clones that back newly added projects and tracks their
@@ -37,10 +43,9 @@ import * as SourceControlRepositoryService from "../sourceControl/SourceControlR
  *
  * The clone is detached from the request that started it: the palette closes
  * immediately, the project already exists (pointing at the empty destination),
- * and the composer can hold a draft for it. Snapshots are memory only. A done
- * clone is dropped after a short grace window; a failed one stays until it is
- * retried or the server restarts, since the empty project is the durable
- * record the user can act on.
+ * and the composer can hold a draft for it. Unresolved ownership is durable:
+ * an empty or partial checkout remains blocked after restart. Progress is
+ * transient, and a done clone is dropped after a short grace window.
  */
 export class ProjectCloneTracker extends Context.Service<
   ProjectCloneTracker,
@@ -60,12 +65,15 @@ export class ProjectCloneTracker extends Context.Service<
     /** Interrupts a running clone and deletes the partial checkout. */
     readonly cancel: (projectId: ProjectId) => Effect.Effect<boolean>;
     /** Restarts a failed or cancelled clone into the same destination. */
-    readonly retry: (projectId: ProjectId) => Effect.Effect<boolean, SourceControlRepositoryError>;
+    readonly retry: (
+      projectId: ProjectId,
+      onCloned?: ProjectCloneHooks["onCloned"],
+    ) => Effect.Effect<boolean, SourceControlRepositoryError>;
     /**
      * Stops tracking a project's clone, interrupting it if it still runs and
      * removing an unfinished checkout. Called when the project is deleted.
      */
-    readonly discard: (projectId: ProjectId) => Effect.Effect<void>;
+    readonly discard: (projectId: ProjectId) => Effect.Effect<void, SourceControlRepositoryError>;
     readonly get: (projectId: ProjectId) => Effect.Effect<ProjectCloneSnapshot | null>;
     /** Emits every tracked clone first, then the full list after each change. */
     readonly stream: Stream.Stream<ReadonlyArray<ProjectCloneSnapshot>>;
@@ -102,11 +110,16 @@ const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
 interface TrackedClone {
   readonly snapshot: ProjectCloneSnapshot;
+  readonly intent: ProjectCloneIntent;
   readonly fiber: Fiber.Fiber<unknown, unknown> | null;
-  readonly hooks: ProjectCloneHooks;
+  readonly onCloned: ProjectCloneHooks["onCloned"] | null;
+  /** Files may have changed while the server was down; never delete them automatically. */
+  readonly restored: boolean;
+  /** Git finished, even if removing its durable recovery record failed. */
+  readonly completed: boolean;
   readonly input: {
     /** What git is given; may carry credentials and never leaves the server. */
-    readonly cloneUrl: string;
+    readonly cloneUrl: string | null;
     readonly destinationPath: string;
     readonly repository: SourceControlRepositoryInfo | null;
   };
@@ -115,10 +128,48 @@ interface TrackedClone {
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const repositories = yield* SourceControlRepositoryService.SourceControlRepositoryService;
-  const clones = yield* Ref.make(new Map<ProjectId, TrackedClone>());
+  const intents = yield* ProjectCloneIntentStore;
+  const restoredIntents = yield* intents.list;
+  const restoredAt = yield* nowIso;
+  let sequence = 0;
+  const clones = yield* Ref.make(
+    new Map<ProjectId, TrackedClone>(
+      restoredIntents.map((intent): [ProjectId, TrackedClone] => [
+        intent.projectId,
+        {
+          intent,
+          snapshot: {
+            projectId: intent.projectId,
+            destinationPath: intent.destinationPath,
+            remoteUrl: intent.remoteUrl,
+            repository: null,
+            phase: intent.phase === "cancelled" ? "cancelled" : "failed",
+            stage: "connecting",
+            percent: null,
+            detail: null,
+            error:
+              intent.retryInput === null
+                ? "The clone did not finish. Its original clone URL was not saved. Remove this project and add it again with a new clone URL. Existing files will be kept."
+                : "The clone did not finish before the server stopped. Retry to continue. Any files left in the destination will be kept.",
+            startedAt: intent.startedAt,
+            endedAt: intent.endedAt ?? restoredAt,
+            sequence: ++sequence,
+          },
+          fiber: null,
+          onCloned: null,
+          restored: true,
+          completed: false,
+          input: {
+            cloneUrl: null,
+            destinationPath: intent.destinationPath,
+            repository: null,
+          },
+        },
+      ]),
+    ),
+  );
   const changes = yield* PubSub.unbounded<ReadonlyArray<ProjectCloneSnapshot>>();
   const retentionFibers = new Map<ProjectId, Fiber.Fiber<unknown, never>>();
-  let sequence = 0;
   // Clone fibers outlive the RPC that started them but not the server.
   const cloneScope = yield* Scope.make("parallel");
   yield* Effect.addFinalizer(() => Scope.close(cloneScope, Exit.void));
@@ -201,18 +252,38 @@ export const make = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       const endedAt = yield* nowIso;
+      const current = (yield* Ref.get(clones)).get(projectId);
+      if (!current) return;
+      let visiblePhase = phase;
+      let visibleError = error;
+      if (phase === "done") {
+        const removed = yield* intents.remove(projectId).pipe(Effect.exit);
+        if (Exit.isFailure(removed)) {
+          visiblePhase = "failed";
+          visibleError =
+            "The repository was cloned, but its recovery state could not be saved. Your files are safe. Retry to finish recording this clone.";
+        }
+      } else {
+        yield* intents.put({ ...current.intent, phase, endedAt }).pipe(
+          // The original unresolved intent still blocks admission after restart.
+          Effect.ignoreCause({ log: true }),
+        );
+      }
       yield* modify(projectId, (tracked) => ({
         ...tracked,
         fiber: null,
+        completed: phase === "done",
+        intent: phase === "done" ? tracked.intent : { ...tracked.intent, phase, endedAt },
         snapshot: {
           ...tracked.snapshot,
-          phase,
+          phase: visiblePhase,
           endedAt,
           percent: phase === "done" ? 100 : tracked.snapshot.percent,
-          error: error === null ? null : clampText(error, PROJECT_CLONE_ERROR_MAX_LENGTH),
+          error:
+            visibleError === null ? null : clampText(visibleError, PROJECT_CLONE_ERROR_MAX_LENGTH),
         },
       }));
-      if (phase === "done") yield* scheduleRemoval(projectId);
+      if (visiblePhase === "done") yield* scheduleRemoval(projectId);
     });
 
   /**
@@ -225,7 +296,7 @@ export const make = Effect.gen(function* () {
   const runClone = (projectId: ProjectId, tracked: TrackedClone) =>
     repositories
       .cloneRepository(
-        { remoteUrl: tracked.input.cloneUrl, destinationPath: tracked.input.destinationPath },
+        { remoteUrl: tracked.input.cloneUrl!, destinationPath: tracked.input.destinationPath },
         { onProgress: (update) => progress(projectId, update), timeoutMs: null },
       )
       .pipe(
@@ -237,9 +308,11 @@ export const make = Effect.gen(function* () {
               : finish(projectId, "failed", describeCloneFailure(exit.cause)),
         ),
         Effect.flatMap(() =>
-          tracked.hooks
-            .onCloned({ projectId, workspaceRoot: tracked.input.destinationPath })
-            .pipe(Effect.ignoreCause({ log: true })),
+          tracked.onCloned
+            ? tracked
+                .onCloned({ projectId, workspaceRoot: tracked.input.destinationPath })
+                .pipe(Effect.ignoreCause({ log: true }))
+            : Effect.void,
         ),
         Effect.ignoreCause(),
       );
@@ -263,6 +336,7 @@ export const make = Effect.gen(function* () {
     function* (input, hooks) {
       const prepared = yield* repositories.prepareClone(input);
       const startedAt = yield* nowIso;
+      const intent = makeProjectCloneIntent(input, prepared, startedAt);
       const snapshot: ProjectCloneSnapshot = {
         projectId: input.projectId,
         remoteUrl: prepared.remoteUrl,
@@ -289,8 +363,11 @@ export const make = Effect.gen(function* () {
         const next = new Map(current);
         next.set(input.projectId, {
           snapshot,
+          intent,
           fiber: null,
-          hooks,
+          onCloned: hooks.onCloned,
+          restored: false,
+          completed: false,
           input: {
             cloneUrl: prepared.cloneUrl,
             destinationPath: prepared.destinationPath,
@@ -312,6 +389,7 @@ export const make = Effect.gen(function* () {
       yield* Effect.uninterruptible(
         Effect.gen(function* () {
           yield* clearRetention(input.projectId);
+          yield* intents.put(intent);
           // The entry is registered before the project exists so a
           // thread.create or project.delete racing this call already sees it.
           yield* hooks.createProject({
@@ -322,7 +400,11 @@ export const make = Effect.gen(function* () {
           });
           yield* publish;
           yield* launch(input.projectId);
-        }).pipe(Effect.tapError(() => remove(input.projectId))),
+        }).pipe(
+          Effect.tapError(() =>
+            intents.remove(input.projectId).pipe(Effect.ensuring(remove(input.projectId))),
+          ),
+        ),
       );
       return {
         projectId: input.projectId,
@@ -346,10 +428,10 @@ export const make = Effect.gen(function* () {
       yield* Effect.uninterruptible(
         Effect.gen(function* () {
           yield* Fiber.interrupt(tracked.fiber!);
-          const after = yield* get(projectId);
+          const after = (yield* Ref.get(clones)).get(projectId);
           // Git finished in the window before the interrupt landed: keep it.
-          if (after?.phase === "done") return;
-          if (after?.phase === "running") yield* finish(projectId, "cancelled", null);
+          if (after?.completed) return;
+          if (after?.snapshot.phase === "running") yield* finish(projectId, "cancelled", null);
           // The partial checkout goes so a retry starts from an empty destination.
           yield* repositories.discardClone(tracked.input.destinationPath).pipe(Effect.ignore);
         }),
@@ -357,7 +439,7 @@ export const make = Effect.gen(function* () {
       return true;
     });
 
-  const retry: ProjectCloneTracker["Service"]["retry"] = (projectId) =>
+  const retry: ProjectCloneTracker["Service"]["retry"] = (projectId, onCloned) =>
     Effect.gen(function* () {
       const current = yield* Ref.get(clones);
       const tracked = current.get(projectId);
@@ -367,24 +449,84 @@ export const make = Effect.gen(function* () {
       ) {
         return false;
       }
-      // A retry into leftover files would fail on the non-empty destination
-      // with a less useful message, so a cleanup failure is the error here.
-      yield* repositories.discardClone(tracked.input.destinationPath);
+      if (tracked.completed) {
+        yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            yield* intents.remove(projectId);
+            yield* modify(projectId, (entry) => ({
+              ...entry,
+              snapshot: { ...entry.snapshot, phase: "done", error: null },
+            }));
+            yield* scheduleRemoval(projectId);
+          }),
+        );
+        return true;
+      }
+      let prepared: SourceControlRepositoryService.SourceControlPreparedClone | null = null;
+      if (tracked.restored) {
+        if (tracked.intent.retryInput === null) {
+          return yield* new SourceControlRepositoryError({
+            operation: "retryClone",
+            provider: "unknown",
+            detail:
+              "The original clone URL was not saved. Remove this project and add it again with a new URL. Existing files will be kept.",
+          });
+        }
+        // prepareClone rejects nonempty destinations. After a restart there is
+        // no proof that their files belong to this attempt, so never discard them.
+        prepared = yield* repositories.prepareClone(tracked.intent.retryInput).pipe(
+          Effect.mapError(
+            (cause) =>
+              new SourceControlRepositoryError({
+                operation: "retryClone",
+                provider: tracked.intent.retryInput?.provider ?? "unknown",
+                detail: `${cause.detail} Existing files were kept. If the destination contains files, move that folder aside before retrying.`,
+                cause,
+              }),
+          ),
+        );
+      } else {
+        // A retry into leftover files would fail on the non-empty destination
+        // with a less useful message, so a cleanup failure is the error here.
+        yield* repositories.discardClone(tracked.input.destinationPath);
+      }
       const startedAt = yield* nowIso;
-      yield* modify(projectId, (entry) => ({
-        ...entry,
-        snapshot: {
-          ...entry.snapshot,
-          phase: "running",
-          stage: "connecting",
-          percent: null,
-          detail: null,
-          error: null,
-          startedAt,
-          endedAt: null,
-        },
-      }));
-      yield* launch(projectId);
+      const intent: ProjectCloneIntent = {
+        ...tracked.intent,
+        phase: "running",
+        startedAt,
+        endedAt: null,
+      };
+      yield* Effect.uninterruptible(
+        Effect.gen(function* () {
+          yield* intents.put(intent);
+          yield* modify(projectId, (entry) => ({
+            ...entry,
+            intent,
+            restored: false,
+            onCloned: onCloned ?? entry.onCloned,
+            input:
+              prepared === null
+                ? entry.input
+                : {
+                    cloneUrl: prepared.cloneUrl,
+                    destinationPath: prepared.destinationPath,
+                    repository: prepared.repository,
+                  },
+            snapshot: {
+              ...entry.snapshot,
+              phase: "running",
+              stage: "connecting",
+              percent: null,
+              detail: null,
+              error: null,
+              startedAt,
+              endedAt: null,
+            },
+          }));
+          yield* launch(projectId);
+        }),
+      );
       return true;
     });
 
@@ -396,10 +538,11 @@ export const make = Effect.gen(function* () {
       if (tracked.fiber) yield* Fiber.interrupt(tracked.fiber);
       // Git may have finished while the interrupt was landing; the project
       // is going away either way, but a complete checkout is the user's.
-      const after = yield* get(projectId);
-      if (after?.phase !== "done") {
+      const after = (yield* Ref.get(clones)).get(projectId);
+      if (after?.snapshot.phase !== "done" && !tracked.restored && !after?.completed) {
         yield* repositories.discardClone(tracked.input.destinationPath).pipe(Effect.ignore);
       }
+      yield* intents.remove(projectId);
       yield* clearRetention(projectId);
       yield* remove(projectId);
     });
@@ -426,7 +569,7 @@ export const make = Effect.gen(function* () {
   return ProjectCloneTracker.of({
     start: (input, hooks) => locked(start(input, hooks)),
     cancel: (projectId) => locked(cancel(projectId)),
-    retry: (projectId) => locked(retry(projectId)),
+    retry: (projectId, onCloned) => locked(retry(projectId, onCloned)),
     discard: (projectId) => locked(discard(projectId)),
     get,
     stream,
@@ -435,24 +578,11 @@ export const make = Effect.gen(function* () {
 
 const isSourceControlRepositoryError = Schema.is(SourceControlRepositoryError);
 
-/**
- * A project whose clone has not landed has no files to work in. Every
- * dispatch transport (WebSocket, HTTP) runs this before normalizing so no
- * client can start a thread on an empty tree, and no attachment copies are
- * made for a command that is about to be refused.
- */
-export const rejectCommandsDuringClone = (
-  tracker: ProjectCloneTracker["Service"],
-  command: { readonly type: string; readonly projectId?: ProjectId; readonly bootstrap?: unknown },
+export const requireProjectCloneReady = (
+  tracker: Pick<ProjectCloneTracker["Service"], "get">,
+  projectId: ProjectId,
 ): Effect.Effect<void, OrchestrationDispatchCommandError> =>
   Effect.gen(function* () {
-    const projectId =
-      command.type === "thread.create"
-        ? (command.projectId ?? null)
-        : command.type === "thread.turn.start"
-          ? bootstrapProjectId(command.bootstrap)
-          : null;
-    if (projectId === null) return;
     const clone = yield* tracker.get(projectId);
     if (clone === null || clone.phase === "done") return;
     return yield* new OrchestrationDispatchCommandError({
@@ -461,6 +591,36 @@ export const rejectCommandsDuringClone = (
           ? "The repository is still being cloned."
           : "The repository was not cloned. Retry the clone first.",
     });
+  });
+
+/**
+ * A project whose clone has not landed has no files to work in. Every
+ * dispatch transport (WebSocket, HTTP) runs this before normalizing so no
+ * client can start a thread on an empty tree, and no attachment copies are
+ * made for a command that is about to be refused.
+ */
+export const rejectCommandsDuringClone = (
+  tracker: Pick<ProjectCloneTracker["Service"], "get">,
+  command: {
+    readonly type: string;
+    readonly projectId?: ProjectId;
+    readonly threadId?: ThreadId;
+    readonly bootstrap?: unknown;
+  },
+  lookupThreadProject: (
+    threadId: ThreadId,
+  ) => Effect.Effect<ProjectId | null, OrchestrationDispatchCommandError>,
+): Effect.Effect<void, OrchestrationDispatchCommandError> =>
+  Effect.gen(function* () {
+    const projectId =
+      command.type === "thread.create"
+        ? (command.projectId ?? null)
+        : command.type === "thread.turn.start"
+          ? ((command.threadId ? yield* lookupThreadProject(command.threadId) : null) ??
+            bootstrapProjectId(command.bootstrap))
+          : null;
+    if (projectId === null) return;
+    yield* requireProjectCloneReady(tracker, projectId);
   });
 
 function bootstrapProjectId(bootstrap: unknown): ProjectId | null {
@@ -473,8 +633,16 @@ function bootstrapProjectId(bootstrap: unknown): ProjectId | null {
 export const discardCloneForDeletedProject = (
   tracker: ProjectCloneTracker["Service"],
   command: OrchestrationCommand,
-): Effect.Effect<void> =>
-  command.type === "project.delete" ? tracker.discard(command.projectId) : Effect.void;
+): Effect.Effect<void, OrchestrationDispatchCommandError> =>
+  command.type === "project.delete"
+    ? tracker
+        .discard(command.projectId)
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestrationDispatchCommandError({ message: cause.detail }),
+          ),
+        )
+    : Effect.void;
 
 function describeCloneFailure(cause: Cause.Cause<unknown>): string {
   const error = Cause.squash(cause);

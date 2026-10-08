@@ -29,6 +29,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { makeDrainableWorker } from "@t3tools/shared/DrainableWorker";
 import { formatTokens } from "@t3tools/shared/usageFormat";
@@ -489,6 +490,18 @@ function taskLinkageActivityFields(payload: Record<string, unknown>): Record<str
   return fields;
 }
 
+// This is only a display projection. The complete native envelope below
+// remains the authority, including failure variants unknown to this client.
+const isSkillNativePayload = Schema.is(Schema.Record(Schema.String, Schema.Unknown));
+const decodeSkillDisplayKeys = Schema.decodeUnknownOption(
+  Schema.Array(
+    Schema.Struct({
+      source_uuid: Schema.String,
+      skill_name: Schema.String,
+    }),
+  ),
+);
+
 export function runtimeEventToActivities(
   event: ProviderRuntimeEvent,
   taskTitle?: string,
@@ -500,6 +513,57 @@ export function runtimeEventToActivities(
       : {};
   })();
   switch (event.type) {
+    case "skills.resolved":
+    case "skills.resolution-failed": {
+      const resolved = event.type === "skills.resolved";
+      const nativePayload = isSkillNativePayload(event.payload.nativeEvent.payload)
+        ? event.payload.nativeEvent.payload
+        : {};
+      const keys = Option.getOrElse(
+        decodeSkillDisplayKeys(
+          resolved
+            ? nativePayload.skills
+            : nativePayload.skill_key
+              ? [nativePayload.skill_key]
+              : [],
+        ),
+        () => [],
+      );
+      const exactKeys = keys.map((key) => `${key.source_uuid}/${key.skill_name}`);
+      const detail = resolved
+        ? [
+            ...exactKeys,
+            ...(typeof nativePayload.injection_bytes === "number"
+              ? [`Injected bytes: ${nativePayload.injection_bytes}`]
+              : []),
+          ].join("\n")
+        : [
+            ...(exactKeys.length > 0 ? exactKeys : ["No skill key was supplied by the runtime."]),
+            "Reason:",
+            typeof nativePayload.reason === "string"
+              ? nativePayload.reason
+              : (JSON.stringify(nativePayload.reason, null, 2) ??
+                "No reason was supplied by the runtime."),
+          ].join("\n");
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          tone: resolved ? "info" : "error",
+          kind: event.type,
+          summary: resolved
+            ? truncateDetail(
+                `Skills resolved${keys.length > 0 ? `: ${keys.map((key) => key.skill_name).join(", ")}` : ""}`,
+                120,
+              )
+            : "Skill resolution failed",
+          payload: { ...event.payload, detail },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
     case "request.opened": {
       if (event.payload.requestType === "tool_user_input") {
         return [];
@@ -1053,9 +1117,20 @@ const make = Effect.gen(function* () {
   const serverSettingsService = yield* ServerSettingsService;
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const providerCommandId = (event: ProviderRuntimeEvent, tag: string) =>
-    crypto.randomUUIDv4.pipe(
-      Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
-    );
+    event.provider === "meerkat" &&
+    // Native skill receipts and peer finals are immutable deliveries. Retried
+    // persistence must reuse the command receipt, including after restart.
+    // Mutable provider updates still require a fresh command per update.
+    (event.type === "skills.resolved" ||
+      event.type === "skills.resolution-failed" ||
+      (event.type === "item.completed" &&
+        event.turnId === undefined &&
+        event.payload.itemType === "assistant_message" &&
+        event.payload.authoritativeText !== undefined))
+      ? Effect.succeed(CommandId.make(`provider:${event.eventId}:${tag}`))
+      : crypto.randomUUIDv4.pipe(
+          Effect.map((uuid) => CommandId.make(`provider:${event.eventId}:${tag}:${uuid}`)),
+        );
 
   const turnMessageIdsByTurnKey = yield* Cache.make<string, Set<MessageId>>({
     capacity: TURN_MESSAGE_IDS_BY_TURN_CACHE_CAPACITY,
@@ -1502,6 +1577,7 @@ const make = Effect.gen(function* () {
     commandTag: string;
     finalDeltaCommandTag: string;
     fallbackText?: string;
+    authoritativeText?: string;
     hasProjectedMessage?: boolean;
   }) =>
     Effect.gen(function* () {
@@ -1516,7 +1592,7 @@ const make = Effect.gen(function* () {
 
       const isReasoning = messageStreamRoleOf(input.messageId) === "reasoning";
 
-      if (hasRenderableText) {
+      if (hasRenderableText && input.authoritativeText === undefined) {
         yield* orchestrationEngine.dispatch({
           type: isReasoning ? "thread.message.reasoning.delta" : "thread.message.assistant.delta",
           commandId: yield* providerCommandId(input.event, input.finalDeltaCommandTag),
@@ -1530,7 +1606,7 @@ const make = Effect.gen(function* () {
         });
       }
 
-      if (input.hasProjectedMessage || hasRenderableText) {
+      if (input.hasProjectedMessage || hasRenderableText || input.authoritativeText !== undefined) {
         yield* orchestrationEngine.dispatch({
           type: isReasoning
             ? "thread.message.reasoning.complete"
@@ -1538,6 +1614,9 @@ const make = Effect.gen(function* () {
           commandId: yield* providerCommandId(input.event, input.commandTag),
           threadId: input.threadId,
           messageId: input.messageId,
+          ...(!isReasoning && input.authoritativeText !== undefined
+            ? { authoritativeText: input.authoritativeText }
+            : {}),
           ...(input.turnId ? { turnId: input.turnId } : {}),
           createdAt: input.createdAt,
         });
@@ -1790,7 +1869,18 @@ const make = Effect.gen(function* () {
       }
 
       const thread = yield* resolveThreadRuntimeContext(event.threadId);
-      if (!thread) return;
+      if (!thread) {
+        // Runtime context omits archived threads as well as deleted ones.
+        // Archiving must not discard a pending native response.
+        const snapshot = yield* projectionSnapshotQuery.getCommandReadModel();
+        const exists = snapshot.threads.some(
+          (entry) => entry.id === event.threadId && entry.deletedAt === null,
+        );
+        if (!exists && providerService.stopObservingSession) {
+          yield* providerService.stopObservingSession(event.threadId);
+        }
+        return;
+      }
 
       const now = event.createdAt;
       const eventTurnId = toTurnId(event.turnId);
@@ -1850,6 +1940,31 @@ const make = Effect.gen(function* () {
             if (activeTurnId !== null && eventTurnId !== undefined) {
               return sameId(activeTurnId, eventTurnId);
             }
+            // A receipt older than queued input cannot settle that new input,
+            // including the interval before the provider reports turn.started.
+            if (
+              event.provider === "meerkat" &&
+              Option.isSome(pendingTurnStart) &&
+              DateTime.isLessThan(
+                DateTime.makeUnsafe(event.createdAt),
+                DateTime.makeUnsafe(pendingTurnStart.value.requestedAt),
+              )
+            ) {
+              return false;
+            }
+            // Native delivery replay may finish an older turn after a gateway
+            // exit or reconnection. Reconcile its output below without replacing
+            // the newer recovery error or ready session with an old terminal.
+            if (
+              event.provider === "meerkat" &&
+              (thread.session?.status === "error" || thread.session?.status === "ready") &&
+              DateTime.isLessThanOrEqualTo(
+                DateTime.makeUnsafe(event.createdAt),
+                DateTime.makeUnsafe(thread.session.updatedAt),
+              )
+            ) {
+              return false;
+            }
             // A named completion can recover a lost turn.started event.
             // An abort needs an active turn so a delayed stop cannot replace
             // a ready session or clear a newer pending start.
@@ -1880,10 +1995,16 @@ const make = Effect.gen(function* () {
             case "turn.started":
               return "running";
             case "session.exited":
-              return "stopped";
+              return event.payload.exitKind === "error" ? "error" : "stopped";
             case "turn.aborted":
               return "interrupted";
             case "turn.completed":
+              if (
+                event.provider === "meerkat" &&
+                (event.payload.state === "cancelled" || event.payload.state === "interrupted")
+              ) {
+                return "interrupted";
+              }
               return normalizeRuntimeTurnState(event.payload.state) === "failed"
                 ? "error"
                 : "ready";
@@ -1906,14 +2027,18 @@ const make = Effect.gen(function* () {
                 ? null
                 : activeTurnId;
         const lastError =
-          event.type === "session.state.changed" && event.payload.state === "error"
-            ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
-            : event.type === "turn.completed" &&
-                normalizeRuntimeTurnState(event.payload.state) === "failed"
-              ? (event.payload.errorMessage ?? thread.session?.lastError ?? "Turn failed")
-              : status === "ready" || status === "interrupted"
-                ? null
-                : (thread.session?.lastError ?? null);
+          event.type === "session.exited" && event.payload.exitKind === "error"
+            ? (event.payload.reason ??
+              thread.session?.lastError ??
+              "Provider session exited unexpectedly")
+            : event.type === "session.state.changed" && event.payload.state === "error"
+              ? (event.payload.reason ?? thread.session?.lastError ?? "Provider session error")
+              : event.type === "turn.completed" &&
+                  normalizeRuntimeTurnState(event.payload.state) === "failed"
+                ? (event.payload.errorMessage ?? thread.session?.lastError ?? "Turn failed")
+                : status === "ready" || status === "interrupted"
+                  ? null
+                  : (thread.session?.lastError ?? null);
 
         if (shouldApplyThreadLifecycle) {
           if (event.type === "turn.started" && acceptedTurnStartedSourcePlan !== null) {
@@ -2255,6 +2380,7 @@ const make = Effect.gen(function* () {
                 `assistant:${event.itemId ?? event.turnId ?? event.eventId}`,
               ),
               fallbackText: event.payload.detail,
+              authoritativeText: event.payload.authoritativeText,
             }
           : undefined;
       const proposedPlanCompletion =
@@ -2268,7 +2394,21 @@ const make = Effect.gen(function* () {
 
       if (assistantCompletion) {
         const turnId = toTurnId(event.turnId);
-        if (turnId) {
+        const activeAssistantMessageId = turnId
+          ? yield* getActiveAssistantMessageIdForTurn(thread.id, turnId)
+          : Option.none<MessageId>();
+        // Native outbox delivery can replay an older segment while a newer
+        // segment of the same steered turn is streaming. Its exact item owns
+        // the final text; it must not settle the currently visible segment.
+        const exactNativeCompletion =
+          event.provider === "meerkat" &&
+          event.itemId !== undefined &&
+          assistantCompletion.authoritativeText !== undefined;
+        const differentActiveSegment =
+          exactNativeCompletion &&
+          Option.isSome(activeAssistantMessageId) &&
+          activeAssistantMessageId.value !== assistantCompletion.messageId;
+        if (turnId && !differentActiveSegment) {
           yield* finalizeActiveSegmentForTurn({
             event,
             threadId: thread.id,
@@ -2280,13 +2420,9 @@ const make = Effect.gen(function* () {
             role: "reasoning",
           });
         }
-        const activeAssistantMessageId = turnId
-          ? yield* getActiveAssistantMessageIdForTurn(thread.id, turnId)
-          : Option.none<MessageId>();
-        const assistantMessageId = Option.getOrElse(
-          activeAssistantMessageId,
-          () => assistantCompletion.messageId,
-        );
+        const assistantMessageId = exactNativeCompletion
+          ? assistantCompletion.messageId
+          : Option.getOrElse(activeAssistantMessageId, () => assistantCompletion.messageId);
         const [existingAssistantMessage, hasAssistantMessagesForTurn] = yield* Effect.all([
           getThreadMessageById(thread.id, assistantMessageId),
           turnId === undefined
@@ -2304,6 +2440,7 @@ const make = Effect.gen(function* () {
           Option.isNone(activeAssistantMessageId) &&
           turnId !== undefined &&
           hasAssistantMessagesForTurn &&
+          assistantCompletion.authoritativeText === undefined &&
           (assistantCompletion.fallbackText?.trim().length ?? 0) === 0;
 
         if (!shouldSkipRedundantCompletion) {
@@ -2320,6 +2457,9 @@ const make = Effect.gen(function* () {
             commandTag: "assistant-complete",
             finalDeltaCommandTag: "assistant-delta-finalize",
             hasProjectedMessage: existingAssistantMessage !== undefined,
+            ...(assistantCompletion.authoritativeText !== undefined
+              ? { authoritativeText: assistantCompletion.authoritativeText }
+              : {}),
             ...(assistantCompletion.fallbackText !== undefined && shouldApplyFallbackCompletionText
               ? { fallbackText: assistantCompletion.fallbackText }
               : {}),
@@ -2330,7 +2470,7 @@ const make = Effect.gen(function* () {
           }
         }
 
-        if (turnId) {
+        if (turnId && !differentActiveSegment) {
           yield* clearAssistantSegmentStateForTurn(thread.id, turnId);
         }
       }
@@ -2615,6 +2755,9 @@ const make = Effect.gen(function* () {
           ),
         ),
       ).pipe(Effect.asVoid);
+      if (providerService.acknowledgeEvent) {
+        yield* providerService.acknowledgeEvent(event);
+      }
     });
 
   const processDomainEvent = (_event: TurnStartRequestedDomainEvent) => Effect.void;
@@ -2708,11 +2851,20 @@ const make = Effect.gen(function* () {
   const start: ProviderRuntimeIngestionShape["start"] = () =>
     Effect.gen(function* () {
       yield* forkParked(
-        Stream.runForEach(providerService.streamEvents, (event) =>
-          event.type === "turn.diff.updated"
-            ? diffWorker.enqueue(event)
-            : worker.enqueue({ source: "runtime", event }),
-        ),
+        Effect.gen(function* () {
+          // Subscribe before replay starts, and only after server activation.
+          const events = providerService.subscribeEvents
+            ? yield* providerService.subscribeEvents
+            : providerService.streamEvents;
+          if (providerService.observePersistedSessions) {
+            yield* providerService.observePersistedSessions();
+          }
+          yield* Stream.runForEach(events, (event) =>
+            event.type === "turn.diff.updated"
+              ? diffWorker.enqueue(event)
+              : worker.enqueue({ source: "runtime", event }),
+          );
+        }),
       );
       yield* forkParked(
         Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {

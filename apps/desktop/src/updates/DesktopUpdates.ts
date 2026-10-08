@@ -7,6 +7,8 @@ import {
   type DesktopUpdateCheckResult,
   type DesktopUpdateState,
 } from "@t3tools/contracts";
+import { fromYaml } from "@t3tools/shared/schemaYaml";
+import { resolveMeerkatReleaseRepository } from "@t3tools/shared/meerkatDistribution";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -57,7 +59,13 @@ interface DesktopPreparedUpdateInstallResult extends DesktopUpdateActionResult {
   readonly failed: boolean;
 }
 
-const AppUpdateYmlConfig = Schema.Record(Schema.String, Schema.String);
+const AppUpdateYmlConfig = Schema.Struct({
+  provider: Schema.Literal("github"),
+  owner: Schema.String,
+  repo: Schema.String,
+  host: Schema.optional(Schema.String),
+  protocol: Schema.optional(Schema.String),
+});
 type AppUpdateYmlConfig = typeof AppUpdateYmlConfig.Type;
 
 const UpdateInfo = Schema.Struct({
@@ -71,7 +79,7 @@ const UpdateInfo = Schema.Struct({
 const DownloadProgressInfo = Schema.Struct({
   percent: Schema.Number,
 });
-const decodeAppUpdateYmlConfig = Schema.decodeUnknownEffect(AppUpdateYmlConfig);
+const decodeAppUpdateYmlConfig = Schema.decodeUnknownEffect(fromYaml(AppUpdateYmlConfig));
 const decodeUpdateInfo = Schema.decodeUnknownEffect(UpdateInfo);
 const decodeDownloadProgressInfo = Schema.decodeUnknownEffect(DownloadProgressInfo);
 
@@ -197,16 +205,14 @@ const {
 } = DesktopObservability.makeComponentLogger("desktop-updater");
 
 function parseAppUpdateYml(raw: string): Effect.Effect<Option.Option<AppUpdateYmlConfig>> {
-  const entries: Record<string, string> = {};
-  for (const line of raw.split("\n")) {
-    const match = line.match(/^(\w+):\s*(.+)$/);
-    if (match?.[1] && match[2]) {
-      entries[match[1]] = match[2].trim();
-    }
-  }
-
-  return decodeAppUpdateYmlConfig(entries).pipe(
-    Effect.map((config) => (config.provider ? Option.some(config) : Option.none())),
+  return decodeAppUpdateYmlConfig(raw).pipe(
+    Effect.map((config) =>
+      resolveMeerkatReleaseRepository(`${config.owner}/${config.repo}`) &&
+      (!config.host || config.host === "github.com") &&
+      (!config.protocol || config.protocol === "https")
+        ? Option.some(config)
+        : Option.none(),
+    ),
     Effect.orElseSucceed(() => Option.none<AppUpdateYmlConfig>()),
   );
 }
@@ -255,7 +261,7 @@ function getAutoUpdateDisabledReason(args: {
   hasUpdateFeedConfig: boolean;
 }): string | null {
   if (!args.hasUpdateFeedConfig) {
-    return "Automatic updates are not available because no update feed is configured.";
+    return "Automatic updates are not available because no valid Meerkat update feed is configured. Ask your prototype distributor for the next build.";
   }
   if (args.isDevelopment || !args.isPackaged) {
     return "Automatic updates are only available in packaged production builds.";
@@ -635,14 +641,12 @@ export const make = Effect.gen(function* () {
           // means quitAndInstall's app.quit() exits before the pool's
           // scope cascade has a chance to run its stop finalizer, so the
           // WSL child gets hard-killed by the OS instead of receiving
-          // SIGTERM + grace. Stops run concurrently with the same 5s
-          // budget the primary had on its own.
+          // SIGTERM + grace. The manager bounds each stop, including native
+          // provider cleanup, before update installation can exit Electron.
           const instances = yield* pool.list;
-          yield* Effect.forEach(
-            instances,
-            (instance) => instance.stop({ timeout: Duration.seconds(5) }),
-            { concurrency: "unbounded" },
-          );
+          yield* Effect.forEach(instances, (instance) => instance.stop(), {
+            concurrency: "unbounded",
+          });
           yield* electronUpdater.quitAndInstall({
             isSilent: true,
             isForceRunAfter: true,
@@ -915,6 +919,10 @@ export const make = Effect.gen(function* () {
       const appUpdateYmlConfig = yield* readAppUpdateYml;
       yield* Ref.set(appUpdateYmlConfigRef, appUpdateYmlConfig);
 
+      // Disable implicit installs even when the packaged feed is absent or rejected.
+      yield* electronUpdater.setAutoDownload(false);
+      yield* electronUpdater.setAutoInstallOnAppQuit(false);
+
       if (config.mockUpdates) {
         yield* electronUpdater.setFeedURL({
           provider: "generic",
@@ -930,8 +938,6 @@ export const make = Effect.gen(function* () {
       }
       yield* Ref.set(updaterConfiguredRef, true);
 
-      yield* electronUpdater.setAutoDownload(false);
-      yield* electronUpdater.setAutoInstallOnAppQuit(false);
       yield* applyAutoUpdaterChannel(settings.updateChannel);
       yield* electronUpdater.setDisableDifferentialDownload(
         isArm64HostRunningIntelBuild(environment.runtimeInfo),

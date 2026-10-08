@@ -81,22 +81,46 @@ export function isModelSelectionProviderEnabled(
   );
 }
 
+/** Resolve against live driver capabilities so disabled harnesses never become a writer fallback. */
+export function resolveTextGenerationModelSelection(
+  settings: ServerSettings,
+  providers?: ReadonlyArray<ServerProvider>,
+  preferred: ModelSelection = settings.textGenerationModelSelection,
+): ModelSelection {
+  if (providers === undefined) return preferred;
+  const eligible = providers.filter(
+    (provider) =>
+      provider.enabled &&
+      isProviderAvailable(provider) &&
+      provider.supportsTextGeneration !== false,
+  );
+  const selected = eligible.find((provider) => provider.instanceId === preferred.instanceId);
+  if (selected) return preferred;
+  const defaultProvider = eligible.find(
+    (provider) => provider.instanceId === settings.textGenerationModelSelection.instanceId,
+  );
+  if (defaultProvider) return settings.textGenerationModelSelection;
+  const fallback = eligible.find((provider) => provider.models.length > 0);
+  const model = fallback?.models.find((model) => model.isDefault) ?? fallback?.models[0];
+  // Preserve the invalid preference only when no eligible model exists. The
+  // generation service then returns the precise setup error without a call.
+  return fallback && model
+    ? createModelSelection(fallback.instanceId, model.slug)
+    : settings.textGenerationModelSelection;
+}
+
 export function resolveSourceControlWriterModelSelection(
   settings: ServerSettings,
   providers?: ReadonlyArray<ServerProvider>,
 ): ModelSelection {
   const selection = settings.sourceControlWriterModelSelection;
-  if (!selection || !isModelSelectionProviderEnabled(settings, selection)) {
-    return settings.textGenerationModelSelection;
-  }
-  if (providers === undefined) {
-    return selection;
-  }
-
-  const provider = providers.find((candidate) => candidate.instanceId === selection.instanceId);
-  return provider?.enabled === true && isProviderAvailable(provider)
-    ? selection
-    : settings.textGenerationModelSelection;
+  return resolveTextGenerationModelSelection(
+    settings,
+    providers,
+    selection && isModelSelectionProviderEnabled(settings, selection)
+      ? selection
+      : settings.textGenerationModelSelection,
+  );
 }
 
 export interface PersistedServerObservabilitySettings {

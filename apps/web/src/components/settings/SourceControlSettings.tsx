@@ -241,9 +241,21 @@ function itemSummary({
     if (auth.status === "unauthenticated") {
       return (
         <span>
-          {item.label} is not authenticated on this server. Sign in or configure credentials using
-          the <code className="rounded bg-muted px-1 py-px text-2xs">{item.executable}</code> tool
-          on the server host to enable change request features.
+          {item.label} is not authenticated on this server.{" "}
+          {optionLabel(auth.detail) ? `${optionLabel(auth.detail)} ` : null}
+          {item.kind === "github" ? (
+            <>
+              In a terminal on the selected server, run{" "}
+              <code className="rounded bg-muted px-1 py-px text-2xs">gh auth login</code>, then
+              rescan here and retry your action. Model account setup does not sign in to GitHub.
+            </>
+          ) : (
+            <>
+              Sign in or configure credentials using the{" "}
+              <code className="rounded bg-muted px-1 py-px text-2xs">{item.executable}</code> tool
+              on the server host, then rescan and retry.
+            </>
+          )}
         </span>
       );
     }

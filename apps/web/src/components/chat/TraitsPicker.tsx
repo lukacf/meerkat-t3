@@ -9,10 +9,12 @@ import {
 import {
   applyClaudePromptEffortPrefix,
   buildProviderOptionSelectionsFromDescriptors,
+  getMeerkatReasoningSelection,
   getProviderOptionCurrentLabel,
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
   isClaudeUltrathinkPrompt,
+  isMeerkatReasoningOption,
   normalizeModelSlug,
 } from "@t3tools/shared/model";
 import { memo, useCallback } from "react";
@@ -119,6 +121,24 @@ function replaceDescriptorCurrentValue(
   );
 }
 
+export function buildTraitsOptionSelections(
+  provider: ProviderDriverKind,
+  descriptors: ReadonlyArray<ProviderOptionDescriptor>,
+  previous: ProviderOptions | null | undefined,
+): ProviderOptions | undefined {
+  const selected = buildProviderOptionSelectionsFromDescriptors(descriptors);
+  if (provider !== "meerkat") return selected;
+  // Hidden native options still describe the active turn. Keep them while
+  // editing reasoning so returning to the active level can steer again.
+  // Fresh-turn dispatch separately projects only current controls.
+  const visibleIds = new Set(descriptors.map((descriptor) => descriptor.id));
+  const next = [
+    ...(previous ?? []).filter((option) => !visibleIds.has(option.id)),
+    ...(selected ?? []),
+  ];
+  return next.length ? next : undefined;
+}
+
 function getDescriptorStringValue(
   descriptor: Extract<ProviderOptionDescriptor, { type: "select" }> | null,
 ): string | null {
@@ -139,19 +159,30 @@ function getSelectedTraits(
   planModeEnabled: boolean,
 ) {
   const caps = getProviderModelCapabilities(models, model, provider, planModeEnabled);
+  const nativeReasoning =
+    provider === "meerkat"
+      ? getMeerkatReasoningSelection(
+          models.find((candidate) => candidate.slug === model)?.capabilities,
+          modelOptions,
+        )
+      : null;
   const modelIsUnavailable =
     provider === "opencode" &&
     !models.some((candidate) => candidate.slug === normalizeModelSlug(model, provider));
-  const descriptors = modelIsUnavailable
-    ? buildUnavailableModelOptionDescriptors(
-        planModeEnabled
-          ? modelOptions
-          : modelOptions?.filter((option) => option.id !== "agent" || option.value !== "plan"),
-      )
-    : getProviderOptionDescriptors({
-        caps,
-        selections: modelOptions,
-      });
+  const descriptors = nativeReasoning
+    ? nativeReasoning.descriptor
+      ? [nativeReasoning.descriptor]
+      : []
+    : modelIsUnavailable
+      ? buildUnavailableModelOptionDescriptors(
+          planModeEnabled
+            ? modelOptions
+            : modelOptions?.filter((option) => option.id !== "agent" || option.value !== "plan"),
+        )
+      : getProviderOptionDescriptors({
+          caps,
+          selections: modelOptions,
+        });
   const selectDescriptors = descriptors.filter(
     (descriptor): descriptor is Extract<ProviderOptionDescriptor, { type: "select" }> =>
       descriptor.type === "select",
@@ -208,6 +239,7 @@ function getSelectedTraits(
     selectedAgent,
     selectedAgentLabel,
     modelIsUnavailable,
+    nativeReasoning,
   };
 }
 
@@ -249,6 +281,7 @@ function getTraitsSectionVisibility(input: {
       showFastMode ||
       showContextWindow ||
       showAgent ||
+      selected.nativeReasoning?.unavailable === true ||
       (selected.modelIsUnavailable && selected.descriptors.length > 0),
   };
 }
@@ -319,6 +352,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     ultrathinkInBodyText,
     hasAnyControls,
     modelIsUnavailable,
+    nativeReasoning,
   } = getTraitsSectionVisibility({
     provider,
     models,
@@ -329,7 +363,7 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
     planModeEnabled,
   });
   const updateDescriptors = (nextDescriptors: ReadonlyArray<ProviderOptionDescriptor>) => {
-    updateModelOptions(buildProviderOptionSelectionsFromDescriptors(nextDescriptors));
+    updateModelOptions(buildTraitsOptionSelections(provider, nextDescriptors, modelOptions));
   };
 
   const handleSelectChange = (
@@ -355,6 +389,59 @@ export const TraitsMenuContent = memo(function TraitsMenuContentImpl({
 
   if (!hasAnyControls) {
     return null;
+  }
+
+  if (nativeReasoning) {
+    const descriptor = nativeReasoning.descriptor;
+    const selected = nativeReasoning.options?.[0];
+    const value = nativeReasoning.unavailable
+      ? "unavailable"
+      : selected
+        ? `level:${String(selected.value)}`
+        : "model-default";
+    return (
+      <MenuGroup>
+        <div className="px-2 pt-1.5 pb-1 font-medium text-muted-foreground text-xs">
+          Reasoning level
+        </div>
+        <MenuRadioGroup
+          value={value}
+          onValueChange={(next) => {
+            const id = descriptor?.id ?? selected?.id;
+            const option = descriptor?.options.find((entry) => `level:${entry.id}` === next);
+            const selectedValue = next === "model-default" ? "default" : option?.id;
+            if (!id || selectedValue === undefined) return;
+            updateModelOptions([
+              ...(modelOptions ?? []).filter((entry) => !isMeerkatReasoningOption(entry.id)),
+              // Keep explicit default intent in the draft so inherited thread
+              // options cannot restore the unavailable level after a reload.
+              { id, value: selectedValue },
+            ]);
+          }}
+        >
+          {nativeReasoning.unavailable && (
+            <MenuRadioItem value="unavailable" disabled hideIndicator>
+              {nativeReasoning.label}
+            </MenuRadioItem>
+          )}
+          <MenuRadioItem value="model-default" hideIndicator closeOnClick>
+            Model default
+          </MenuRadioItem>
+          {descriptor?.options
+            .filter((option) => option.id !== "default")
+            .map((option) => (
+              <MenuRadioItem
+                key={option.id}
+                value={`level:${option.id}`}
+                hideIndicator
+                closeOnClick
+              >
+                {option.label}
+              </MenuRadioItem>
+            ))}
+        </MenuRadioGroup>
+      </MenuGroup>
+    );
   }
 
   if (modelIsUnavailable) {
@@ -528,6 +615,11 @@ export function buildTraitsTriggerDisplay(input: {
   if (labels.length === 0 && fastModeFallbackLabel !== null) {
     return { label: fastModeFallbackLabel, showFastModeIcon: false };
   }
+  // Native Meerkat options may be unset without declaring a concrete default.
+  // Name the control without inventing a selected effort or thinking value.
+  if (labels.length === 0 && input.provider === "meerkat" && input.descriptors.length > 0) {
+    return { label: "Reasoning level", showFastModeIcon: false };
+  }
   return { label: labels.join(" · "), showFastModeIcon: fastModeEnabled };
 }
 
@@ -553,7 +645,7 @@ export const TraitsPicker = memo(function TraitsPicker({
   }) {
   const composerFloatingLayerProps = useComposerMenuProps();
   const [isMenuOpen, setIsMenuOpen] = useComposerMenuState(hidden);
-  const { descriptors, primarySelectDescriptor, ultrathinkPromptControlled } =
+  const { descriptors, primarySelectDescriptor, ultrathinkPromptControlled, nativeReasoning } =
     getTraitsSectionVisibility({
       provider,
       models,
@@ -577,12 +669,13 @@ export const TraitsPicker = memo(function TraitsPicker({
     return null;
   }
 
-  const { label: triggerLabel, showFastModeIcon } = buildTraitsTriggerDisplay({
+  const { label, showFastModeIcon } = buildTraitsTriggerDisplay({
     provider,
     descriptors,
     primarySelectDescriptorId: primarySelectDescriptor?.id ?? null,
     ultrathinkPromptControlled,
   });
+  const triggerLabel = nativeReasoning?.label ?? label;
   const accessibleLabel = showFastModeIcon ? `${triggerLabel}, Fast mode on` : triggerLabel;
   const fastModeIcon = showFastModeIcon ? (
     <>

@@ -22,7 +22,7 @@ import {
 } from "./versionSkew";
 
 const MISMATCH_HINT =
-  "Version mismatch. Try syncing the client and server to the same T3 Code version.";
+  "Version mismatch. Ask your distributor or server operator for compatible client and server builds.";
 
 describe("versionSkew", () => {
   beforeEach(() => {

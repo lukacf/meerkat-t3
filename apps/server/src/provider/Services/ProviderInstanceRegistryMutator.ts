@@ -12,19 +12,19 @@
  * The mutator exposes a single entry point, `reconcile(configMap)`, which:
  *
  *   1. Diffs the incoming map against the live one keyed by instance id.
- *   2. Closes the per-instance `Scope` of every removed or replaced entry
- *      (tearing down adapter processes, refresh fibres, temp files) BEFORE
- *      creating the replacement — `reconcile` guarantees "at most one live
- *      instance per id" at all times.
- *   3. Opens a fresh child `Scope` for every added or replaced entry, runs
- *      the driver's `create`, and stores the resulting `ProviderInstance`
- *      plus its scope.
- *   4. Publishes one `void` tick on the registry's `streamChanges` PubSub at
- *      the end of the batch — consumers re-pull `listInstances` /
- *      `listUnavailable`.
+ *   2. Removes every closing entry from routing, publishes the change, and
+ *      settles each child `Scope` close before creating any replacements.
+ *      A failed close does not prevent siblings from closing. Its outcome
+ *      is retained for the registry's lifetime, including across removal
+ *      and readdition of the same settings id.
+ *   3. Creates added entries and successfully closed replacements. A failed
+ *      disposal remains unavailable and cannot be replaced automatically.
+ *   4. Publishes `void` ticks when disposal outcomes or newly built entries
+ *      change the registry. Consumers re-pull `listInstances` and
+ *      `listUnavailable` together.
  *
- * `reconcile` is idempotent: calling it with an unchanged config map is a
- * no-op (no scope churn, no pubsub emission).
+ * Unchanged live entries and retained disposal failures do not cause scope
+ * churn or change notifications. Reconciliation calls are serialized.
  *
  * @module provider/Services/ProviderInstanceRegistryMutator
  */
@@ -37,11 +37,10 @@ export interface ProviderInstanceRegistryMutatorShape {
    * Bring the live registry in line with the supplied config map. See
    * module docs for the add / remove / replace semantics.
    *
-   * The effect never fails: individual driver `create` failures are
-   * captured as "unavailable" shadow snapshots inside the registry, the
-   * same way boot-time failures are handled by
-   * `makeProviderInstanceRegistry`. This keeps settings-watcher loops from
-   * erroring out on a single bad entry.
+   * Typed driver `create` failures and all removed/replaced scope-close
+   * failures become unavailable snapshots. Disposal outcomes are recorded
+   * before honoring interruption. Unexpected defects elsewhere can still
+   * propagate to the settings watcher's error handler.
    */
   readonly reconcile: (configMap: ProviderInstanceConfigMap) => Effect.Effect<void>;
 }

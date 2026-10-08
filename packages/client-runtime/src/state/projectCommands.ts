@@ -27,6 +27,7 @@ export type {
 export interface OptimisticProjectFile {
   readonly data: ProjectReadFileResult;
   readonly confirmedAgainst: object | null | undefined;
+  readonly saveFailed?: boolean;
 }
 
 export interface OptimisticProjectFileTarget {

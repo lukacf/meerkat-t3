@@ -1649,11 +1649,13 @@ export async function mergeComposerDraftContent(
 export async function restoreComposerDraftSnapshot(
   draftKey: string,
   snapshot: ComposerDraft,
+  validate?: () => void,
 ): Promise<void> {
   ensureComposerDraftsLoaded();
   if (loadPromise !== null) {
     await loadPromise;
   }
+  validate?.();
   if (persistTimer !== null) {
     clearTimeout(persistTimer);
     persistTimer = null;

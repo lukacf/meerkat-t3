@@ -9,6 +9,9 @@ import {
 export const Route = createFileRoute("/pair")({
   beforeLoad: async ({ context }) => {
     const { authGateState } = context;
+    if (authGateState.status === "local-help") {
+      throw redirect({ to: "/help", search: { topic: "start" }, replace: true });
+    }
     if (authGateState.status === "hosted-pairing") {
       return {
         authGateState,

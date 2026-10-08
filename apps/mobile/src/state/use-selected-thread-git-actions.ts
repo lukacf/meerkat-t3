@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo } from "react";
+import { Alert } from "react-native";
 
 import { EnvironmentProject, EnvironmentThreadShell } from "@t3tools/client-runtime/state/shell";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
@@ -19,6 +20,8 @@ import { useBranches } from "../state/queries";
 import { threadEnvironment } from "../state/threads";
 import { vcsActionManager, vcsEnvironment } from "../state/vcs";
 import { uuidv4 } from "../lib/uuid";
+import { tryCopyTextWithHaptic } from "../lib/copyTextWithHaptic";
+import { tryOpenExternalUrl } from "../lib/openExternalUrl";
 import { appAtomRegistry } from "./atom-registry";
 import { setPendingConnectionError } from "./use-remote-environment-registry";
 import { useAtomCommand } from "./use-atom-command";
@@ -337,13 +340,66 @@ export function useSelectedThreadGitActions() {
             return result;
           }
 
-          showGitActionResult({
-            type: "success",
-            title: result.value.toast.title,
-            description: result.value.toast.description,
-            prUrl:
-              result.value.toast.cta.kind === "open_pr" ? result.value.toast.cta.url : undefined,
-          });
+          const prLinkStatus = result.value.pr.linkStatus;
+          if (prLinkStatus === "pending" || prLinkStatus === "not_saved") {
+            const toastCta = result.value.toast.cta;
+            const prUrl =
+              result.value.pr.url ?? (toastCta.kind === "open_pr" ? toastCta.url : null);
+            const title =
+              prLinkStatus === "pending"
+                ? "Pull request link pending"
+                : "Pull request link not saved";
+            const guidance =
+              prLinkStatus === "pending"
+                ? "The pull request is available. Saving its link to this thread is pending; the server will retry automatically. Keep the URL."
+                : "The pull request is available, but its link could not be saved to this thread. Keep the URL and use Link pull request in the web or desktop app.";
+            const message = prUrl ? `${guidance}\n\n${prUrl}` : guidance;
+            const showWarning = (feedback?: string) => {
+              Alert.alert(
+                title,
+                feedback ? `${message}\n\n${feedback}` : message,
+                [
+                  { text: "Done", style: "cancel" },
+                  ...(prUrl
+                    ? [
+                        {
+                          text: "Copy PR URL",
+                          onPress: async () => {
+                            const copied = await tryCopyTextWithHaptic(prUrl, {
+                              target: "pull request URL",
+                            });
+                            showWarning(
+                              copied
+                                ? "PR URL copied."
+                                : "Could not copy the URL. Try again or open the pull request.",
+                            );
+                          },
+                        },
+                        {
+                          text: toastCta.kind === "open_pr" ? toastCta.label : "Open PR",
+                          onPress: async () => {
+                            const opened = await tryOpenExternalUrl(prUrl, "pull-request");
+                            if (!opened) {
+                              showWarning("Could not open the pull request. Keep the URL.");
+                            }
+                          },
+                        },
+                      ]
+                    : []),
+                ],
+                { cancelable: false },
+              );
+            };
+            showWarning();
+          } else {
+            showGitActionResult({
+              type: "success",
+              title: result.value.toast.title,
+              description: result.value.toast.description,
+              prUrl:
+                result.value.toast.cta.kind === "open_pr" ? result.value.toast.cta.url : undefined,
+            });
+          }
 
           if (result.value.branch.status === "created" && result.value.branch.name) {
             const syncResult = await syncSelectedThreadBranchState({

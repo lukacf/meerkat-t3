@@ -81,14 +81,28 @@ clone runs in the background: you can write your first prompt, and sending waits
 are in place. A toast tracks progress and lets you cancel; if the clone fails, retry it from the
 toast or from the banner above the composer.
 
+An unfinished clone remains blocked after the server restarts. Retry rechecks the source and destination. If the destination contains files, move that folder aside before retrying; the app preserves those files. Removing a restored failed-clone project removes its listing without deleting that folder. A source URL that contained credentials must be entered again by adding the project afresh, because those credentials are not saved in clone recovery state.
+
 For a local Git repository without a remote, **Publish Repository** creates a hosted repository,
 adds it as `origin`, and pushes your commits. If there are no commits yet, it creates the remote;
 make your first commit before pushing.
 
+If repository creation succeeds but connecting or pushing fails, **Finish publishing** keeps the
+created repository and checkout available on this device. Fix the reported Git setup or connection
+problem, then retry there. Retrying uses that same repository and refuses a changed remote
+destination. It does not create another repository. A failed creation itself is not treated as
+success; check the hosting service before starting another creation attempt if the connection was lost.
+
 ## Create a pull request
 
-Use a thread's Git actions to commit, push, and create a pull request. T3 Code can generate commit
-messages, review titles, and descriptions from your changes.
+Use a thread's Git actions to commit, push, and create a pull request. To write everything yourself,
+choose **Commit**, select the intended files with **Edit**, and enter a commit message. Use
+**Commit on new branch** when the change should leave the default branch. Once the checkout is clean,
+choose **Write pull request...**, enter a title and description, and choose **Create pull request**.
+This pushes committed changes if needed and does not call a writing model. Review the project and
+branch before publishing.
+
+T3 Code can also generate commit messages, review titles, and descriptions from your changes.
 
 Choose the writing style and model in **Settings → Source Control**. **Repository conventions**
 uses the project's instructions and recent commit subjects.
@@ -137,6 +151,8 @@ does not show its diff, so marks are made and read on web and desktop.
 
 ## Troubleshooting
 
+- **Expired GitHub credentials or Bad credentials:** run `gh auth login` in a terminal on the computer running this project, open **Settings > Source Control** for that computer, rescan, and retry. Model API keys do not sign in to GitHub.
+
 - **Not authenticated:** run the provider's login command on the server, then rescan. For Bitbucket,
   confirm the running server received the environment variables.
 - **GitHub sign-in cannot be verified:** update GitHub CLI to at least 2.81.0.
@@ -149,7 +165,10 @@ does not show its diff, so marks are made and read on web and desktop.
 
 A thread can hold several pull requests, including reviews from another repository on the same host.
 Use **Link pull request** in the command palette or **Linked pull requests** panel, or right-click a
-pull request link in the conversation. Creating a pull request from Git actions links it automatically.
+pull request link in the conversation. Creating a pull request from Git actions beside an existing
+saved thread links it automatically. A new, unsent draft has no saved thread to link to; keep the PR
+URL and link it after the thread is saved. After restarting, reopen the same project and saved thread,
+then use **Linked pull requests** to return to the review. Do not create another PR to recover a link.
 Agents can link their pull requests with the `link_pull_request` tool.
 
 Use **Link this PR** in a branch-detected badge's tooltip to keep it with the thread. From a review

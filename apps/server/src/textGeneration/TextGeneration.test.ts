@@ -40,7 +40,9 @@ const makeStubInstance = (
     },
     displayName: undefined,
     enabled: true,
-    snapshot: {} as ProviderInstance["snapshot"],
+    snapshot: {
+      getSnapshot: Effect.succeed({ supportsTextGeneration: true }),
+    } as ProviderInstance["snapshot"],
     adapter: {} as ProviderInstance["adapter"],
     textGeneration,
   }) satisfies ProviderInstance;
@@ -176,4 +178,45 @@ describe("TextGeneration.make", () => {
       }
     }),
   );
+  for (const kind of ["disabled", "unsupported"] as const) {
+    it.effect(`never dispatches to a ${kind} provider`, () =>
+      Effect.gen(function* () {
+        const instance = {
+          ...makeStubInstance(
+            ProviderInstanceId.make("codex"),
+            makeStubTextGeneration({
+              generateBranchName: () => Effect.die("Ineligible provider must not execute"),
+            }),
+          ),
+          enabled: kind !== "disabled",
+          snapshot: {
+            getSnapshot: Effect.succeed({ supportsTextGeneration: kind !== "unsupported" }),
+          } as ProviderInstance["snapshot"],
+        };
+        const tg = yield* TextGeneration.make.pipe(
+          Effect.provideService(
+            ProviderInstanceRegistry.ProviderInstanceRegistry,
+            makeStubRegistry([instance]),
+          ),
+          Effect.provide(
+            Layer.mock(SourceControlProviderRegistry.SourceControlProviderRegistry)({
+              resolveLink: () => Effect.die("No link lookup expected"),
+            }),
+          ),
+        );
+        const result = yield* tg
+          .generateBranchName({
+            cwd: process.cwd(),
+            message: "Update",
+            modelSelection: createModelSelection(instance.instanceId, "gpt-5"),
+          })
+          .pipe(Effect.result);
+        expect(Result.isFailure(result)).toBe(true);
+        if (Result.isFailure(result))
+          expect(result.failure.detail).toContain(
+            kind === "disabled" ? "disabled" : "does not support",
+          );
+      }),
+    );
+  }
 });

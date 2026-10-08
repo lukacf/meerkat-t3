@@ -759,6 +759,38 @@ export function projectEvent(
         })),
       );
 
+    case "thread.prepared-turn-changed": {
+      const payload = event.payload;
+      const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+      if (!thread) return Effect.succeed(nextBase);
+      return Effect.succeed({
+        ...nextBase,
+        threads: updateThread(nextBase.threads, payload.threadId, {
+          preparedTurn: payload.preparedTurn,
+          ...(payload.preparedTurn.phase === "released"
+            ? {
+                messages: thread.messages.filter(
+                  (message) => message.id !== payload.preparedTurn.command.message.messageId,
+                ),
+              }
+            : {}),
+          updatedAt: payload.preparedTurn.updatedAt,
+        }),
+      });
+    }
+
+    case "thread.turn-start-requested": {
+      const thread = nextBase.threads.find((entry) => entry.id === event.payload.threadId);
+      if (thread?.preparedTurn == null) return Effect.succeed(nextBase);
+      return Effect.succeed({
+        ...nextBase,
+        threads: updateThread(nextBase.threads, event.payload.threadId, {
+          preparedTurn: null,
+          updatedAt: event.occurredAt,
+        }),
+      });
+    }
+
     case "thread.message-sent":
       return Effect.gen(function* () {
         const payload = yield* decodeForEvent(
@@ -797,7 +829,7 @@ export function projectEvent(
                     ...entry,
                     text: message.streaming
                       ? `${entry.text}${message.text}`
-                      : message.text.length > 0
+                      : payload.replaceText || message.text.length > 0
                         ? message.text
                         : entry.text,
                     streaming: message.streaming,

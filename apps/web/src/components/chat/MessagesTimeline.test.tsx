@@ -375,7 +375,33 @@ describe("MessagesTimeline", () => {
         expect(markup).toContain("Provide a screenshot");
         expect(markup).toContain("shot.png");
         for (const answer of Object.values(answers)) expect(markup).toContain(answer);
-        await act(() => questionToggle.props.onClick());
+        const attachment = renderer!.root
+          .findAllByType("a")
+          .find((node) => node.children.includes("spec.txt"))!;
+        for (const key of ["Enter", " "]) {
+          const preventDefault = vi.fn();
+          await act(() =>
+            questionToggle.props.onKeyDown({
+              key,
+              target: attachment,
+              currentTarget: questionToggle,
+              preventDefault,
+            }),
+          );
+          expect(preventDefault).not.toHaveBeenCalled();
+          expect(questionToggle.props["aria-expanded"]).toBe(true);
+        }
+        const preventDefault = vi.fn();
+        await act(() =>
+          questionToggle.props.onKeyDown({
+            key: "Enter",
+            target: questionToggle,
+            currentTarget: questionToggle,
+            preventDefault,
+          }),
+        );
+        expect(preventDefault).toHaveBeenCalledOnce();
+        expect(questionToggle.props["aria-expanded"]).toBe(false);
         expect(JSON.stringify(renderer!.toJSON())).not.toContain("Provide a spec");
       } finally {
         await act(() => renderer?.unmount());

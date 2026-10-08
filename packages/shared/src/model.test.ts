@@ -9,7 +9,9 @@ import {
   createModelSelection,
   getModelSelectionBooleanOptionValue,
   getModelSelectionStringOptionValue,
+  getMeerkatReasoningSelection,
   getProviderOptionDescriptors,
+  getProviderModelControlCapabilities,
   readCustomModelEntries,
   toCustomModelSetting,
   getProviderOptionBooleanSelectionValue,
@@ -61,6 +63,149 @@ const claudeCaps: ModelCapabilities = createModelCapabilities({
       currentValue: "1m",
     },
   ],
+});
+
+describe("native model controls", () => {
+  it.each(["level", "control"] as const)(
+    "retains explicit reasoning after its %s disappears without replacing it with a default",
+    (removed) => {
+      const capabilities: ModelCapabilities = {
+        optionDescriptors:
+          removed === "control"
+            ? []
+            : [
+                {
+                  id: "reasoning_effort",
+                  label: "Reasoning",
+                  type: "select",
+                  currentValue: "low",
+                  options: [{ id: "low", label: "Low", isDefault: true }],
+                },
+              ],
+      };
+      const selection = getMeerkatReasoningSelection(capabilities, [
+        { id: "prompt_cache_enabled", value: false },
+        { id: "reasoning_effort", value: "high" },
+        { id: "reasoning_context", value: "all" },
+      ]);
+      expect(selection).toMatchObject({
+        options: [{ id: "reasoning_effort", value: "high" }],
+        unavailable: true,
+        label: "high (unavailable)",
+      });
+      expect(
+        getMeerkatReasoningSelection(capabilities, [
+          { id: "prompt_cache_enabled", value: false },
+          { id: "reasoning_effort", value: "default" },
+        ]),
+      ).toMatchObject({ options: undefined, unavailable: false, label: "Model default" });
+    },
+  );
+
+  it("does not reinterpret a saved reasoning key when the native control changes", () => {
+    const selected = getMeerkatReasoningSelection(
+      {
+        optionDescriptors: [
+          {
+            id: "thinking_level",
+            label: "Thinking",
+            type: "select",
+            options: [{ id: "high", label: "High" }],
+          },
+        ],
+      },
+      [{ id: "reasoning_effort", value: "high" }],
+    );
+    expect(selected.unavailable).toBe(true);
+    expect(selected.options).toEqual([{ id: "reasoning_effort", value: "high" }]);
+  });
+
+  it("keeps only the declared reasoning choice when an older catalog exposes cache and other parameters", () => {
+    const nativeCaps: ModelCapabilities = {
+      optionDescriptors: [
+        { id: "prompt_cache_enabled", label: "Prompt caching", type: "boolean" },
+        {
+          id: "text_verbosity",
+          label: "Detail",
+          type: "select",
+          options: [{ id: "short", label: "Short" }],
+        },
+        {
+          id: "thinking",
+          label: "Thinking",
+          type: "select",
+          options: [{ id: "adaptive", label: "Adaptive" }],
+        },
+        {
+          id: "effort",
+          label: "Effort",
+          type: "select",
+          options: [
+            { id: "low", label: "Low" },
+            { id: "high", label: "High" },
+          ],
+        },
+      ],
+    };
+    const caps = getProviderModelControlCapabilities("meerkat", nativeCaps);
+    const selections = [
+      { id: "prompt_cache_enabled", value: false },
+      { id: "effort", value: "high" },
+    ];
+    const descriptors = getProviderOptionDescriptors({ caps, selections });
+    expect(descriptors).toEqual([
+      {
+        id: "effort",
+        label: "Reasoning level",
+        type: "select",
+        options: [
+          { id: "low", label: "Low" },
+          { id: "high", label: "High" },
+        ],
+        currentValue: "high",
+      },
+    ]);
+    expect(buildExplicitProviderOptionSelectionsFromDescriptors(descriptors, selections)).toEqual([
+      { id: "effort", value: "high" },
+    ]);
+    expect(nativeCaps.optionDescriptors).toHaveLength(4);
+    expect(selections[0]).toEqual({ id: "prompt_cache_enabled", value: false });
+  });
+
+  it("does not manufacture levels for a model without a declared reasoning select", () => {
+    expect(
+      getProviderModelControlCapabilities("meerkat", {
+        optionDescriptors: [
+          { id: "prompt_cache_enabled", label: "Prompt caching", type: "boolean" },
+        ],
+      }).optionDescriptors,
+    ).toEqual([]);
+    expect(getProviderModelControlCapabilities("meerkat", null).optionDescriptors).toEqual([]);
+  });
+
+  it("preserves declared budget-only choices and donor controls", () => {
+    const budgetCaps: ModelCapabilities = {
+      optionDescriptors: [
+        {
+          id: "thinking_budget",
+          label: "Thinking budget",
+          type: "select",
+          options: [
+            { id: "default", label: "Default" },
+            { id: "2048", label: "2,048 tokens" },
+          ],
+        },
+      ],
+    };
+    expect(
+      getProviderModelControlCapabilities("meerkat", budgetCaps).optionDescriptors?.[0],
+    ).toEqual({
+      ...budgetCaps.optionDescriptors?.[0],
+      label: "Reasoning level",
+    });
+    expect(getProviderModelControlCapabilities("codex", codexCaps)).toBe(codexCaps);
+    expect(getProviderModelControlCapabilities("claudeAgent", claudeCaps)).toBe(claudeCaps);
+  });
 });
 
 describe("descriptor helpers", () => {

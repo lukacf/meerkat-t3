@@ -90,7 +90,7 @@ export type DesktopUpdateStatus =
 export type DesktopRuntimeArch = "arm64" | "x64" | "other";
 export type DesktopTheme = "light" | "dark" | "system";
 export type DesktopUpdateChannel = "latest" | "nightly";
-export type DesktopAppStageLabel = "Alpha" | "Dev" | "Nightly";
+export type DesktopAppStageLabel = "Alpha" | "Prototype" | "Dev" | "Nightly";
 
 export const DesktopUpdateStatusSchema = Schema.Literals([
   "disabled",
@@ -105,18 +105,20 @@ export const DesktopUpdateStatusSchema = Schema.Literals([
 export const DesktopRuntimeArchSchema = Schema.Literals(["arm64", "x64", "other"]);
 export const DesktopThemeSchema = Schema.Literals(["light", "dark", "system"]);
 export const DesktopUpdateChannelSchema = Schema.Literals(["latest", "nightly"]);
-export const DesktopAppStageLabelSchema = Schema.Literals(["Alpha", "Dev", "Nightly"]);
+export const DesktopAppStageLabelSchema = Schema.Literals(["Alpha", "Prototype", "Dev", "Nightly"]);
 
 export interface DesktopAppBranding {
   baseName: string;
   stageLabel: DesktopAppStageLabel;
   displayName: string;
+  appVersion?: string;
 }
 
 export const DesktopAppBrandingSchema = Schema.Struct({
   baseName: Schema.String,
   stageLabel: DesktopAppStageLabelSchema,
   displayName: Schema.String,
+  appVersion: Schema.optionalKey(Schema.String),
 });
 
 export const DesktopSnapShotMode = Schema.Literals(["direct", "portal", "unavailable"]);
@@ -515,6 +517,15 @@ export interface PickFolderOptions {
   // behavior so non-WSL users never see a different picker.
   targetEnvironmentId?: string;
 }
+
+export const DesktopDiagnosticsExportResultSchema = Schema.Struct({
+  status: Schema.Literals(["saved", "cancelled", "failed"]),
+  filePath: Schema.NullOr(Schema.String),
+  errorCategory: Schema.NullOr(
+    Schema.Literals(["picker-failed", "save-failed", "report-unavailable"]),
+  ),
+});
+export type DesktopDiagnosticsExportResult = typeof DesktopDiagnosticsExportResultSchema.Type;
 
 export const PickFolderOptionsSchema = Schema.Struct({
   initialPath: Schema.optionalKey(Schema.NullOr(Schema.String)),
@@ -1199,6 +1210,8 @@ export interface DesktopBridge {
   setWslDistro: (distro: string | null) => Promise<DesktopWslState>;
   setWslOnly: (enabled: boolean) => Promise<DesktopWslState>;
   pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
+  /** Saves an allowlisted desktop support report without querying a server or opening an editor. */
+  exportDiagnostics?: () => Promise<DesktopDiagnosticsExportResult>;
   /** Optional while older desktop shells can host a newer web client. */
   pickProjectFavicon?: (initialPath?: string) => Promise<string | null>;
   /**

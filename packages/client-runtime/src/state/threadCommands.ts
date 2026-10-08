@@ -2,6 +2,7 @@ import * as Crypto from "effect/Crypto";
 import { Atom } from "effect/unstable/reactivity";
 import {
   WS_METHODS,
+  ORCHESTRATION_WS_METHODS,
   type EnvironmentId,
   type OrchestrationShellSnapshot,
 } from "@t3tools/contracts";
@@ -33,6 +34,8 @@ import {
   type SettleThreadInput,
   type SnoozeThreadInput,
   type StartThreadTurnInput,
+  type ReleasePreparedThreadTurnInput,
+  releasePreparedThreadTurn,
   type StopThreadSessionInput,
   type UnarchiveThreadInput,
   type UnlinkThreadPullRequestInput,
@@ -87,6 +90,7 @@ export type {
   SettleThreadInput,
   SnoozeThreadInput,
   StartThreadTurnInput,
+  ReleasePreparedThreadTurnInput,
   StopThreadSessionInput,
   UnarchiveThreadInput,
   UnlinkThreadPullRequestInput,
@@ -218,6 +222,18 @@ export function createThreadEnvironmentAtoms<R, E>(
     startTurn: createEnvironmentCommand(runtime, {
       label: "environment-data:commands:thread:start-turn",
       execute: (input: StartThreadTurnInput) => startThreadTurn(input),
+      scheduler,
+      concurrency,
+    }),
+    retryPreparedTurn: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:commands:thread:retry-prepared-turn",
+      tag: ORCHESTRATION_WS_METHODS.retryPreparedTurn,
+      scheduler,
+      concurrency,
+    }),
+    releasePreparedTurn: createEnvironmentCommand(runtime, {
+      label: "environment-data:commands:thread:release-prepared-turn",
+      execute: (input: ReleasePreparedThreadTurnInput) => releasePreparedThreadTurn(input),
       scheduler,
       concurrency,
     }),

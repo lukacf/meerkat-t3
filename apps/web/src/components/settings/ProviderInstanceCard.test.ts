@@ -11,6 +11,20 @@ import {
 import { deriveProviderModelsForDisplay, ProviderInstanceCard } from "./ProviderInstanceCard";
 
 describe("deriveProviderModelsForDisplay", () => {
+  it("preserves the complete native model catalog and ignores unsupported donor custom config", () => {
+    const liveModels: ReadonlyArray<ServerProviderModel> = [
+      { slug: "openai:gpt-5.6-sol", name: "GPT 5.6 Sol", isCustom: false, capabilities: null },
+      { slug: "local:project-model", name: "Project model", isCustom: true, capabilities: null },
+    ];
+    const input = {
+      modelsManagedByRuntime: true,
+      customModels: [{ slug: "stale-donor-model", name: "Stale", capabilities: null }],
+    };
+
+    expect(deriveProviderModelsForDisplay({ ...input, liveModels })).toEqual(liveModels);
+    expect(deriveProviderModelsForDisplay({ ...input, liveModels: undefined })).toEqual([]);
+  });
+
   it("uses current config custom models instead of stale live custom rows", () => {
     const liveModels: ReadonlyArray<ServerProviderModel> = [
       {

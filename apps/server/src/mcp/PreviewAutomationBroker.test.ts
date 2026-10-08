@@ -1485,3 +1485,51 @@ it.effect("keeps a host that responds with an operation timeout", () =>
     }),
   ),
 );
+
+it.effect("pins an explicit native grant to a desktop connection and rejects its replacement", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const broker = yield* makeBroker;
+      const seen: string[] = [];
+      const serve = (clientId: string) =>
+        Effect.gen(function* () {
+          const events = requestsFrom(yield* broker.connect(makeHost({ clientId })));
+          return yield* Stream.runForEach(events, (request) => {
+            seen.push(`${clientId}:${request.operation}`);
+            return broker.respond({
+              clientId,
+              connectionId: request.connectionId,
+              requestId: request.requestId,
+              ok: true,
+              result: { available: false, hostConnectionId: "guest-forgery" },
+            });
+          }).pipe(Effect.forkScoped);
+        });
+      const original = yield* serve("first");
+      yield* Effect.yieldNow;
+      const initial = yield* broker.invoke<{ hostConnectionId: string }>({
+        scope,
+        operation: "status",
+        input: {},
+      });
+      expect(initial.hostConnectionId).not.toBe("guest-forgery");
+      const pinned = { ...scope, previewHostConnectionId: initial.hostConnectionId };
+      yield* serve("replacement");
+      yield* Effect.yieldNow;
+      yield* broker.invoke({ scope: pinned, operation: "click", input: { selector: "button" } });
+      expect(seen.at(-1)).toBe("first:click");
+      yield* Fiber.interrupt(original);
+      const result = yield* broker
+        .invoke({ scope: pinned, operation: "click", input: { selector: "button" } })
+        .pipe(Effect.result);
+      expect(result._tag).toBe("Failure");
+      expect(seen).not.toContain("replacement:click");
+      const renewed = yield* broker.invoke<{ hostConnectionId: string }>({
+        scope,
+        operation: "status",
+        input: {},
+      });
+      expect(renewed.hostConnectionId).not.toBe(initial.hostConnectionId);
+    }),
+  ),
+);

@@ -15,6 +15,9 @@ export interface SourceControlLinkSubject {
   readonly body: string | null;
 }
 
+/** Identity returned by a successful creation, without another provider lookup. */
+export type CreatedChangeRequest = Pick<ChangeRequest, "url" | "number">;
+
 /** Return undefined synchronously for unsupported URLs, without starting a lookup. */
 export type ResolveSourceControlLink = (input: {
   readonly cwd: string;
@@ -120,7 +123,8 @@ export class SourceControlProvider extends Context.Service<
       readonly headSelector: string;
       readonly title: string;
       readonly bodyFile: string;
-    }) => Effect.Effect<void, SourceControlProviderError>;
+      readonly draft?: boolean;
+    }) => Effect.Effect<CreatedChangeRequest | void, SourceControlProviderError>;
     readonly getRepositoryCloneUrls: (input: {
       readonly cwd: string;
       readonly context?: SourceControlProviderContext;

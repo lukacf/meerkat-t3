@@ -1,6 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 import { ProviderDriverKind, type ProviderOptionDescriptor } from "@t3tools/contracts";
-import { buildTraitsTriggerDisplay, buildUnavailableModelOptionDescriptors } from "./TraitsPicker";
+import { buildProviderOptionSelectionsFromDescriptors } from "@t3tools/shared/model";
+import {
+  buildTraitsOptionSelections,
+  buildTraitsTriggerDisplay,
+  buildUnavailableModelOptionDescriptors,
+  shouldRenderTraitsControls,
+} from "./TraitsPicker";
 
 function selectDescriptor(
   id: string,
@@ -50,6 +56,21 @@ const CONTEXT_WINDOW = selectDescriptor(
 );
 
 const CODEX = ProviderDriverKind.make("codex");
+
+describe("buildTraitsOptionSelections", () => {
+  it("continues replacing donor options with the model's declared controls", () => {
+    expect(
+      buildTraitsOptionSelections(
+        CODEX,
+        [EFFORT],
+        [
+          { id: "removedOption", value: true },
+          { id: "reasoningEffort", value: "max" },
+        ],
+      ),
+    ).toEqual([{ id: "reasoningEffort", value: "high" }]);
+  });
+});
 
 function display(descriptors: ReadonlyArray<ProviderOptionDescriptor>) {
   return buildTraitsTriggerDisplay({
@@ -153,6 +174,65 @@ describe("buildTraitsTriggerDisplay", () => {
         ultrathinkPromptControlled: true,
       }),
     ).toEqual({ label: "Ultrathink", showFastModeIcon: true });
+  });
+
+  it("names unset native Meerkat options without selecting an invented default", () => {
+    const descriptors: ReadonlyArray<ProviderOptionDescriptor> = [
+      {
+        id: "effort",
+        label: "Effort",
+        type: "select",
+        options: [
+          { id: "low", label: "Low" },
+          { id: "high", label: "High" },
+        ],
+      },
+      {
+        id: "thinking",
+        label: "Thinking",
+        type: "select",
+        options: [
+          { id: "default", label: "Default" },
+          { id: "adaptive", label: "Adaptive" },
+        ],
+      },
+    ];
+    expect(
+      buildTraitsTriggerDisplay({
+        provider: ProviderDriverKind.make("meerkat"),
+        descriptors,
+        primarySelectDescriptorId: "effort",
+        ultrathinkPromptControlled: false,
+      }),
+    ).toEqual({ label: "Reasoning level", showFastModeIcon: false });
+    expect(buildProviderOptionSelectionsFromDescriptors(descriptors)).toBeUndefined();
+  });
+
+  it("keeps explicitly selected native values visible", () => {
+    expect(
+      buildTraitsTriggerDisplay({
+        provider: ProviderDriverKind.make("meerkat"),
+        descriptors: [
+          selectDescriptor("effort", [{ id: "high", label: "High" }], "high"),
+          selectDescriptor("thinking", [{ id: "adaptive", label: "Adaptive" }], "adaptive"),
+        ],
+        primarySelectDescriptorId: "effort",
+        ultrathinkPromptControlled: false,
+      }),
+    ).toEqual({ label: "High · Adaptive", showFastModeIcon: false });
+  });
+
+  it("does not offer model options when Meerkat has no capability descriptors", () => {
+    expect(
+      shouldRenderTraitsControls({
+        provider: ProviderDriverKind.make("meerkat"),
+        models: [],
+        model: "self_hosted:local",
+        modelOptions: undefined,
+        prompt: "",
+        planModeEnabled: true,
+      }),
+    ).toBe(false);
   });
 });
 

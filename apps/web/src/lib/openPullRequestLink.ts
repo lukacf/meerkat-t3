@@ -18,6 +18,7 @@ import type { EnvironmentProject } from "@t3tools/client-runtime/state/shell";
 import { useProjects, useServerConfigs } from "../state/entities";
 import { serverEnvironment } from "../state/server";
 import { usePrimaryEnvironmentId } from "../state/environments";
+import type { PullRequestListPreferences } from "../components/pullRequest/pullRequestListPreferences";
 
 export {
   parseChangeRequestUrl,
@@ -286,7 +287,7 @@ export function useOpenChangeRequestLink(
         if (!resolvedThreadRef) {
           void navigate({
             to: "/pull-requests",
-            search: (previous) => ({
+            search: (previous: Partial<PullRequestListPreferences>) => ({
               ...previous,
               involvement: previous.involvement ?? "all",
               state: previous.state ?? "all",

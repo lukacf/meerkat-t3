@@ -8,6 +8,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import packageJson from "../../package.json" with { type: "json" };
 
 import { DEFAULT_SIGNAL_EXPORT } from "@t3tools/shared/observability";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
@@ -80,6 +81,41 @@ const makeServerConfig = Effect.fn(function* (baseDir: string) {
 });
 
 it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
+  it.effect("reports the owned desktop release version without relabeling standalone servers", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-server-environment-version-test-",
+      });
+      const serverConfig = yield* makeServerConfig(baseDir);
+      yield* fileSystem.makeDirectory(serverConfig.stateDir, { recursive: true });
+      const describeWith = (overrides: Partial<ServerConfig.ServerConfig["Service"]>) =>
+        Effect.gen(function* () {
+          const environment = yield* ServerEnvironment.ServerEnvironment;
+          return yield* environment.getDescriptor;
+        }).pipe(
+          Effect.provide(
+            ServerEnvironment.layer.pipe(
+              Layer.provide(emptySecretStoreLayer),
+              Layer.provide(ServerConfig.layer({ ...serverConfig, ...overrides })),
+            ),
+          ),
+        );
+
+      const desktop = yield* describeWith({ mode: "desktop", desktopAppVersion: "0.0.56" });
+      expect(desktop.serverVersion).toBe("0.0.56");
+      const olderDesktop = yield* describeWith({ mode: "desktop" });
+      expect(olderDesktop.serverVersion).toBe(packageJson.version);
+      const standalone = yield* describeWith({ mode: "web" });
+      expect(standalone.serverVersion).toBe(packageJson.version);
+      const standaloneWithDesktopMetadata = yield* describeWith({
+        mode: "web",
+        desktopAppVersion: "0.0.56",
+      });
+      expect(standaloneWithDesktopMetadata.serverVersion).toBe(packageJson.version);
+    }),
+  );
+
   it.effect.each([
     { name: "missing", content: undefined },
     { name: "empty", content: "" },

@@ -78,6 +78,10 @@ import {
   editingQueuedMessageIdsAtom,
   useThreadOutboxMessages,
   useThreadOutboxShellStatuses,
+  useThreadOutboxPreparedState,
+  isPreparedRecoveryBlockingMessage,
+  readPreparedTurnForQueuedMessage,
+  nextPreparedRecoveryMessage,
 } from "./use-thread-outbox";
 import {
   setPendingConnectionError,
@@ -435,6 +439,7 @@ export async function recoverEditedCreationAfterDelivery(
 export async function restoreRejectedQueuedMessage(
   queuedMessage: QueuedThreadMessage,
   message: string,
+  options?: { readonly preparedRecovery?: boolean },
 ): Promise<"restored" | "deferred" | "blocked" | "retry"> {
   const draftKey = recoveryDraftKey(queuedMessage);
   // Set once the merge publishes, cleared once the queued message is removed.
@@ -537,7 +542,7 @@ export async function restoreRejectedQueuedMessage(
     // The queued message is gone; from here the draft owns the content and
     // must never be rolled back.
     rollback = null;
-    if (queuedMessage.creation) {
+    if (queuedMessage.creation && !options?.preparedRecovery) {
       // The thread screen for this creation is likely open; it reads the
       // outcome to offer reopening the restored draft.
       recordPendingThreadCreationOutcome({
@@ -644,6 +649,7 @@ export function useThreadOutboxDrain(): void {
   const editingQueuedMessageIds = useAtomValue(editingQueuedMessageIdsAtom);
   const queuedMessagesByThreadKey = useThreadOutboxMessages();
   const shellStatuses = useThreadOutboxShellStatuses();
+  const preparedRecoveryBlocks = useThreadOutboxPreparedState();
   const threads = useThreadShells();
   const creationOutcomes = useAtomValue(pendingThreadCreationOutcomesAtom);
   const projects = useProjects();
@@ -678,8 +684,14 @@ export function useThreadOutboxDrain(): void {
   }, []);
 
   const restoreQueuedMessage = useCallback(
-    async (queuedMessage: QueuedThreadMessage, message: string): Promise<boolean> => {
-      const result = await restoreRejectedQueuedMessage(queuedMessage, message);
+    async (
+      queuedMessage: QueuedThreadMessage,
+      message: string,
+      preparedRecovery = false,
+    ): Promise<boolean> => {
+      const result = await restoreRejectedQueuedMessage(queuedMessage, message, {
+        preparedRecovery,
+      });
       if (result !== "blocked") {
         return result !== "retry";
       }
@@ -775,6 +787,7 @@ export function useThreadOutboxDrain(): void {
 
   const sendQueuedMessage = useCallback(
     async (queuedMessage: QueuedThreadMessage, thread: EnvironmentThreadShell) => {
+      if (isPreparedRecoveryBlockingMessage(queuedMessage)) return true;
       const serverConfig = appAtomRegistry.get(
         serverEnvironment.configValueAtom(queuedMessage.environmentId),
       );
@@ -804,6 +817,7 @@ export function useThreadOutboxDrain(): void {
       }
 
       if (settings.runtimeMode !== thread.runtimeMode) {
+        if (isPreparedRecoveryBlockingMessage(queuedMessage)) return true;
         const runtimeResult = await setThreadRuntimeMode({
           environmentId: queuedMessage.environmentId,
           input: {
@@ -820,6 +834,7 @@ export function useThreadOutboxDrain(): void {
       }
 
       if (settings.interactionMode !== thread.interactionMode) {
+        if (isPreparedRecoveryBlockingMessage(queuedMessage)) return true;
         const interactionResult = await setThreadInteractionMode({
           environmentId: queuedMessage.environmentId,
           input: {
@@ -884,6 +899,7 @@ export function useThreadOutboxDrain(): void {
         settings,
         currentConfig.providers,
       );
+      if (isPreparedRecoveryBlockingMessage(queuedMessage)) return true;
       const deliveryResult = await startTurn({
         environmentId: queuedMessage.environmentId,
         input: {
@@ -909,6 +925,8 @@ export function useThreadOutboxDrain(): void {
           createdAt: queuedMessage.createdAt,
         },
       });
+      if (AsyncResult.isFailure(deliveryResult) && isPreparedRecoveryBlockingMessage(queuedMessage))
+        return true;
       const failure = reportFailure(deliveryResult, "start-turn");
       if (failure?.action === "retry") {
         return false;
@@ -940,6 +958,7 @@ export function useThreadOutboxDrain(): void {
       creation: QueuedThreadCreation,
       projectCwd: string,
     ) => {
+      if (isPreparedRecoveryBlockingMessage(queuedMessage)) return true;
       const modelSelection = queuedMessage.modelSelection;
       if (modelSelection === undefined) {
         return false;
@@ -985,6 +1004,12 @@ export function useThreadOutboxDrain(): void {
           return true;
         }
       } catch (error) {
+        const released = readPreparedTurnForQueuedMessage(queuedMessage);
+        if (
+          released?.phase === "released" &&
+          released.command.commandId === queuedMessage.commandId
+        )
+          return true;
         logThreadOutboxUploadFailure(queuedMessage, error);
         if (!shouldRetryThreadOutboxDelivery(error)) {
           return restoreQueuedMessage(
@@ -997,6 +1022,16 @@ export function useThreadOutboxDrain(): void {
       if (!isQueuedMessagePayloadCurrent(persistedMessage, deliveryRevision)) {
         return true;
       }
+      const released = readPreparedTurnForQueuedMessage(persistedMessage);
+      if (
+        released?.phase === "released" &&
+        released.command.commandId === persistedMessage.commandId
+      )
+        return restoreQueuedMessage(
+          persistedMessage,
+          "The saved request was released. Its queued copy is kept separately in Drafts for review and will not send automatically.",
+          true,
+        );
       const currentConfig = appAtomRegistry.get(
         serverEnvironment.configValueAtom(queuedMessage.environmentId),
       );
@@ -1012,6 +1047,7 @@ export function useThreadOutboxDrain(): void {
         settings,
         currentConfig.providers,
       );
+      if (isPreparedRecoveryBlockingMessage(queuedMessage)) return true;
       const deliveryResult = await startTurn({
         environmentId: queuedMessage.environmentId,
         input: buildProjectThreadStartTurnInput({
@@ -1042,6 +1078,19 @@ export function useThreadOutboxDrain(): void {
         }),
       });
       const { reportFailure } = makeDeliveryHelpers(queuedMessage);
+      const currentPrepared = readPreparedTurnForQueuedMessage(persistedMessage);
+      if (
+        AsyncResult.isFailure(deliveryResult) &&
+        currentPrepared?.phase === "released" &&
+        currentPrepared.command.commandId === persistedMessage.commandId
+      )
+        return restoreQueuedMessage(
+          persistedMessage,
+          "The saved request was released. Its queued copy is kept separately in Drafts for review and will not send automatically.",
+          true,
+        );
+      if (AsyncResult.isFailure(deliveryResult) && isPreparedRecoveryBlockingMessage(queuedMessage))
+        return true;
       const failure = reportFailure(deliveryResult, "start-turn");
       if (failure?.action === "retry") {
         return false;
@@ -1110,7 +1159,11 @@ export function useThreadOutboxDrain(): void {
     }
 
     for (const [threadKey, queuedMessages] of Object.entries(queuedMessagesByThreadKey)) {
-      const nextQueuedMessage = queuedMessages[0];
+      const first = queuedMessages[0];
+      const nextQueuedMessage = nextPreparedRecoveryMessage(
+        queuedMessages,
+        first ? readPreparedTurnForQueuedMessage(first) : undefined,
+      );
       if (!nextQueuedMessage) {
         continue;
       }
@@ -1145,6 +1198,11 @@ export function useThreadOutboxDrain(): void {
       if (editingQueuedMessageIds[nextQueuedMessage.messageId]) {
         continue;
       }
+      if (
+        preparedRecoveryBlocks.has(threadKey) ||
+        isPreparedRecoveryBlockingMessage(nextQueuedMessage)
+      )
+        continue;
       const blockedRecovery = blockedRecoverySubscriptionsRef.current.get(
         nextQueuedMessage.messageId,
       );
@@ -1213,6 +1271,7 @@ export function useThreadOutboxDrain(): void {
             ) {
               return true;
             }
+            if (isPreparedRecoveryBlockingMessage(nextQueuedMessage)) return true;
             return restoreQueuedMessage(nextQueuedMessage, attachmentError);
           })
           .then((restored) => {
@@ -1271,6 +1330,21 @@ export function useThreadOutboxDrain(): void {
         // failure/backoff path) rather than sending a payload being edited.
         if (appAtomRegistry.get(editingQueuedMessageIdsAtom)[nextQueuedMessage.messageId]) {
           return true;
+        }
+        if (isPreparedRecoveryBlockingMessage(nextQueuedMessage)) return true;
+        const preparedRecovery = readPreparedTurnForQueuedMessage(nextQueuedMessage);
+        if (
+          creation !== undefined &&
+          preparedRecovery?.phase === "released" &&
+          preparedRecovery.command.commandId === nextQueuedMessage.commandId
+        ) {
+          // A queued task can retain this ID after edits. Keep its whole payload
+          // in a separate draft; neither resend nor merge it into the open composer.
+          return restoreQueuedMessage(
+            nextQueuedMessage,
+            "The saved request was released. Its queued copy is kept separately in Drafts for review and will not send automatically.",
+            true,
+          );
         }
         // The shell state is equally stale. Re-run the same delivery policy
         // against the live thread snapshot so a vanished thread or newly
@@ -1335,6 +1409,7 @@ export function useThreadOutboxDrain(): void {
     dispatchingQueuedMessageId,
     editingQueuedMessageIds,
     projects,
+    preparedRecoveryBlocks,
     queuedMessagesByThreadKey,
     retryTick,
     restoreQueuedMessage,

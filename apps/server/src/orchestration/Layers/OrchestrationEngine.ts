@@ -1,11 +1,13 @@
 import type {
   OrchestrationClientOrigin,
+  CommandId,
   OrchestrationEvent,
   OrchestrationReadModel,
   ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
 import { OrchestrationCommand } from "@t3tools/contracts";
+import { commandStartsRestoredWork, requireRestoreReviewReleased } from "../../restoreReview.ts";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Crypto from "effect/Crypto";
@@ -37,10 +39,12 @@ import {
   OrchestrationCommandIdConflictError,
   OrchestrationCommandInvariantError,
   OrchestrationCommandPreviouslyRejectedError,
+  OrchestrationPreparedTurnBlockedError,
   type OrchestrationDispatchError,
   type OrchestrationProjectorDecodeError,
 } from "../Errors.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
+import { preparedTurnStartBlock } from "../PreparedTurnState.ts";
 import { createEmptyReadModel, projectEvent } from "../projector.ts";
 import { OrchestrationProjectionPipeline } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
@@ -57,6 +61,8 @@ const isOrchestrationCommandIdConflictError = Schema.is(OrchestrationCommandIdCo
 interface CommandEnvelope {
   command: OrchestrationCommand;
   origin: OrchestrationClientOrigin | undefined;
+  preparedTurnRecoveryId: CommandId | undefined;
+  continueAfterInterruptedSetup: boolean | undefined;
   result: Deferred.Deferred<{ sequence: number }, OrchestrationDispatchError>;
   startedAtMs: number;
 }
@@ -169,6 +175,46 @@ const makeOrchestrationEngine = Effect.gen(function* () {
             commandId: envelope.command.commandId,
             detail: existingReceipt.value.error ?? "Previously rejected.",
           });
+        }
+
+        const preparedBlock = preparedTurnStartBlock(commandReadModel, envelope.command, {
+          ...(envelope.preparedTurnRecoveryId !== undefined
+            ? { preparedTurnRecoveryId: envelope.preparedTurnRecoveryId }
+            : {}),
+          ...(envelope.continueAfterInterruptedSetup !== undefined
+            ? { continueAfterInterruptedSetup: envelope.continueAfterInterruptedSetup }
+            : {}),
+        });
+        if (preparedBlock)
+          return yield* new OrchestrationPreparedTurnBlockedError({ detail: preparedBlock });
+
+        if (
+          envelope.command.type === "thread.prepared-turn.set" ||
+          envelope.command.type === "thread.prepared-turn.release"
+        ) {
+          const recoveryId =
+            envelope.command.type === "thread.prepared-turn.set"
+              ? envelope.command.preparedTurn.recoveryId
+              : envelope.command.recoveryId;
+          if (envelope.command.commandId === recoveryId) {
+            return yield* new OrchestrationPreparedTurnBlockedError({
+              detail:
+                "Preparation and editing require a separate command identity from the original turn.",
+            });
+          }
+          const receipt = yield* commandReceiptRepository.getByCommandId({ commandId: recoveryId });
+          if (
+            Option.isSome(receipt) &&
+            (receipt.value.aggregateKind !== "thread" ||
+              receipt.value.aggregateId !== envelope.command.threadId ||
+              receipt.value.status === "accepted" ||
+              envelope.command.type === "thread.prepared-turn.set")
+          ) {
+            return yield* new OrchestrationPreparedTurnBlockedError({
+              detail:
+                "The original turn has already been admitted or retired. Its preparation cannot be changed.",
+            });
+          }
         }
 
         if (
@@ -290,6 +336,20 @@ const makeOrchestrationEngine = Effect.gen(function* () {
                 return yield* new OrchestrationCommandInvariantError({
                   commandType: envelope.command.type,
                   detail: "Command produced no events.",
+                });
+              }
+
+              if (envelope.command.type === "thread.prepared-turn.release") {
+                // Serialized with every start, and committed with withdrawal.
+                // A retry queued after release can never revive this identity.
+                yield* commandReceiptRepository.upsert({
+                  commandId: envelope.command.recoveryId,
+                  aggregateKind: "thread",
+                  aggregateId: envelope.command.threadId,
+                  acceptedAt: lastSavedEvent.occurredAt,
+                  resultSequence: lastSavedEvent.sequence,
+                  status: "rejected",
+                  error: "The prepared message was released for editing and will not be sent.",
                 });
               }
 
@@ -437,10 +497,22 @@ const makeOrchestrationEngine = Effect.gen(function* () {
 
   const dispatch: OrchestrationEngineShape["dispatch"] = (command, options) =>
     Effect.gen(function* () {
+      if (commandStartsRestoredWork(command))
+        yield* requireRestoreReviewReleased.pipe(
+          Effect.mapError(
+            (cause) =>
+              new OrchestrationCommandInvariantError({
+                commandType: command.type,
+                detail: cause.message,
+              }),
+          ),
+        );
       const result = yield* Deferred.make<{ sequence: number }, OrchestrationDispatchError>();
       yield* Queue.offer(commandQueue, {
         command,
         origin: options?.origin,
+        preparedTurnRecoveryId: options?.preparedTurnRecoveryId,
+        continueAfterInterruptedSetup: options?.continueAfterInterruptedSetup,
         result,
         startedAtMs: yield* Clock.currentTimeMillis,
       });

@@ -28,6 +28,9 @@ import * as VcsStatusBroadcaster from "./VcsStatusBroadcaster.ts";
 import * as BackgroundPolicy from "../background/BackgroundPolicy.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import { ProfileRestoreReview } from "../restoreReview.ts";
+import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
 
 const TEST_EPOCH = DateTime.makeUnsafe("1970-01-01T00:00:00.000Z");
 
@@ -145,6 +148,44 @@ function makeBackgroundPolicyLayer(shouldRunScopeWork: (scope: BackgroundScope) 
 }
 
 describe("VcsStatusBroadcaster", () => {
+  it.effect("disables automatic pulls before project lookup while restore review is held", () =>
+    Effect.gen(function* () {
+      const policy = yield* VcsStatusBroadcaster.VcsAutoPullPolicy;
+      assert.equal(yield* policy.isEnabled("/restored/project"), false);
+    }).pipe(
+      Effect.provide(
+        VcsStatusBroadcaster.autoPullPolicyLayer.pipe(
+          Layer.provide(
+            Layer.mock(ProjectionSnapshotQuery)({
+              getActiveProjectByWorkspaceRoot: () =>
+                Effect.die("Held profile must not resolve auto-pull work"),
+            }),
+          ),
+          Layer.provide(
+            Layer.mock(ServerSettingsService)({
+              getSettings: Effect.die("Held profile must not resolve auto-pull settings"),
+            }),
+          ),
+          Layer.provide(
+            Layer.succeed(ProfileRestoreReview, {
+              held: true,
+              status: () => ({
+                status: "restart-required",
+                restoreId: "restore",
+                restoredAt: null,
+                backupCreatedAt: null,
+                message: "Restart required",
+              }),
+              consent: async () => {
+                throw new Error("Unused consent");
+              },
+            }),
+          ),
+        ),
+      ),
+    ),
+  );
+
   it.effect.skipIf(!symlinksSupported)(
     "automatically pulls an enabled clean default branch when status detects it is behind",
     () => {

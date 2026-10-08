@@ -121,6 +121,32 @@ describe("ProviderSessionStartInput", () => {
 });
 
 describe("ProviderSendTurnInput", () => {
+  it("preserves explicit queue and steer intent and rejects unknown modes", () => {
+    for (const handlingMode of ["queue", "steer"]) {
+      expect(
+        decodeProviderSendTurnInput({ threadId: "thread-1", input: "message", handlingMode })
+          .handlingMode,
+      ).toBe(handlingMode);
+    }
+    expect(
+      decodeProviderSendTurnInput({ threadId: "thread-1", input: "message" }).handlingMode,
+    ).toBeUndefined();
+    expect(
+      decodeProviderSendTurnInput({
+        threadId: "thread-1",
+        input: "correction",
+        handlingMode: "steer",
+        steeringTurnId: "run-1",
+      }).steeringTurnId,
+    ).toBe("run-1");
+    expect(() =>
+      decodeProviderSendTurnInput({
+        threadId: "thread-1",
+        input: "message",
+        handlingMode: "interrupt",
+      }),
+    ).toThrow();
+  });
   it("accepts 100 attachments and rejects 101", () => {
     const attachments = Array.from({ length: 100 }, (_, index) => ({
       type: "image",

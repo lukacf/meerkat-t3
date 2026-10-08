@@ -35,6 +35,16 @@ export const OrchestrationCommandRejection = Schema.Union([
 export type OrchestrationCommandRejection = typeof OrchestrationCommandRejection.Type;
 export const isOrchestrationCommandRejection = Schema.is(OrchestrationCommandRejection);
 
+/** A temporary admission fence must not consume the saved command identity. */
+export class OrchestrationPreparedTurnBlockedError extends Schema.TaggedError<OrchestrationPreparedTurnBlockedError>()(
+  "OrchestrationPreparedTurnBlockedError",
+  { detail: Schema.String },
+) {
+  override get message(): string {
+    return this.detail;
+  }
+}
+
 export class OrchestrationCommandPreviouslyRejectedError extends Schema.TaggedError<OrchestrationCommandPreviouslyRejectedError>()(
   "OrchestrationCommandPreviouslyRejectedError",
   {
@@ -77,6 +87,7 @@ export class OrchestrationProjectorDecodeError extends Schema.TaggedError<Orches
 }
 
 export type OrchestrationDispatchError =
+  | OrchestrationPreparedTurnBlockedError
   | ProjectionRepositoryError
   | OrchestrationCommandRejection
   | OrchestrationCommandIdConflictError

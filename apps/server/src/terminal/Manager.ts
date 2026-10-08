@@ -20,6 +20,7 @@ import {
   TerminalProviderEnvironmentError,
   TerminalResizeError,
   TerminalSessionLookupError,
+  TerminalWorkspaceChangedError,
   TerminalWriteError,
   type TerminalAttachInput,
   type TerminalAttachStreamEvent,
@@ -87,6 +88,7 @@ export {
   TerminalProviderEnvironmentError,
   TerminalResizeError,
   TerminalSessionLookupError,
+  TerminalWorkspaceChangedError,
   TerminalWriteError,
 };
 
@@ -141,6 +143,14 @@ class TerminalProcessSignalError extends Schema.TaggedError<TerminalProcessSigna
   }
 }
 
+/** Server-derived scope, never supplied by the terminal RPC input contract. */
+export interface TerminalExecutionScope {
+  readonly executionScope?: {
+    readonly cwd: string;
+    readonly worktreePath: string | null;
+  };
+}
+
 /**
  * TerminalManager - Service tag for terminal session orchestration.
  */
@@ -154,7 +164,7 @@ export class TerminalManager extends Context.Service<
      * persisted history on first open.
      */
     readonly open: (
-      input: TerminalOpenInput,
+      input: TerminalOpenInput & TerminalExecutionScope,
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
     /**
@@ -163,14 +173,16 @@ export class TerminalManager extends Context.Service<
      * Returns an unsubscribe function.
      */
     readonly attachStream: (
-      input: TerminalAttachInput,
+      input: TerminalAttachInput & TerminalExecutionScope,
       listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
     ) => Effect.Effect<() => void, TerminalError>;
 
     /**
      * Write input bytes to a terminal session.
      */
-    readonly write: (input: TerminalWriteInput) => Effect.Effect<void, TerminalError>;
+    readonly write: (
+      input: TerminalWriteInput & TerminalExecutionScope,
+    ) => Effect.Effect<void, TerminalError>;
 
     /**
      * Resize the PTY backing a terminal session.
@@ -2508,8 +2520,30 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }).pipe(Effect.ignoreCause({ log: true })),
   );
 
+  const workspaceChanged = (session: TerminalSessionState, input: TerminalExecutionScope) => {
+    const scope = input.executionScope;
+    return (
+      scope !== undefined &&
+      (path.resolve(session.cwd) !== path.resolve(scope.cwd) ||
+        (session.worktreePath === null ? null : path.resolve(session.worktreePath)) !==
+          (scope.worktreePath === null ? null : path.resolve(scope.worktreePath)))
+    );
+  };
+
+  const assertCurrentWorkspace = (session: TerminalSessionState, input: TerminalExecutionScope) =>
+    workspaceChanged(session, input)
+      ? Effect.fail(
+          new TerminalWorkspaceChangedError({
+            threadId: session.threadId,
+            terminalId: session.terminalId,
+            terminalCwd: session.cwd,
+            currentCwd: input.executionScope!.cwd,
+          }),
+        )
+      : Effect.void;
+
   const openWithWorkspaceLease = Effect.fn("terminal.openLocked")(function* (
-    input: TerminalOpenInput,
+    input: TerminalOpenInput & TerminalExecutionScope,
   ) {
     const terminalId = input.terminalId;
     yield* assertValidCwd(input.cwd);
@@ -2572,6 +2606,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }
 
     const liveSession = existing.value;
+    yield* assertCurrentWorkspace(liveSession, input);
     const nextRuntimeEnv = normalizedRuntimeEnv(input.env);
     const currentRuntimeEnv = liveSession.runtimeEnv;
     const targetCols = input.cols ?? liveSession.cols;
@@ -2633,7 +2668,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     return snapshot(liveSession);
   });
 
-  const openLocked = (input: TerminalOpenInput) =>
+  const openLocked = (input: TerminalOpenInput & TerminalExecutionScope) =>
     withWorkspaceLease(
       path.resolve(input.worktreePath ?? input.cwd),
       openWithWorkspaceLease(input),
@@ -2645,7 +2680,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       resolveLaunchInputEnvironment(input).pipe(Effect.flatMap(openLocked)),
     );
 
-  const openOrAttachForStream = (input: TerminalAttachInput) =>
+  const openOrAttachForStream = (input: TerminalAttachInput & TerminalExecutionScope) =>
     withThreadLock(
       input.threadId,
       Effect.gen(function* () {
@@ -2672,7 +2707,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         const targetCols = input.cols ?? session.cols;
         const targetRows = input.rows ?? session.rows;
 
-        if (!session.process && input.cwd && input.restartIfNotRunning === true) {
+        // A changed checkout leaves the old process and transcript available to readers.
+        // Only an explicit restart or a new terminal id may launch in the new workspace.
+        if (
+          !session.process &&
+          input.cwd &&
+          input.restartIfNotRunning === true &&
+          !workspaceChanged(session, input)
+        ) {
           const resolvedInput = yield* resolveLaunchInputEnvironment({
             ...input,
             terminalId,
@@ -2866,9 +2908,12 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     );
   };
 
-  const write: TerminalManager["Service"]["write"] = Effect.fn("terminal.write")(function* (input) {
+  const writeLocked = Effect.fn("terminal.write")(function* (
+    input: TerminalWriteInput & TerminalExecutionScope,
+  ) {
     const terminalId = input.terminalId;
     const session = yield* requireSession(input.threadId, terminalId);
+    yield* assertCurrentWorkspace(session, input);
     const process = session.process;
     if (!process || session.status !== "running") {
       if (session.status === "exited") return;
@@ -2888,6 +2933,9 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         }),
     });
   });
+
+  const write: TerminalManager["Service"]["write"] = (input) =>
+    input.executionScope ? withThreadLock(input.threadId, writeLocked(input)) : writeLocked(input);
 
   const resizeLocked = Effect.fn("terminal.resize")(function* (input: TerminalResizeInput) {
     const session = yield* getSession(input.threadId, input.terminalId);

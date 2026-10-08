@@ -43,6 +43,7 @@ import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
 import { Button } from "~/components/ui/button";
 import { PanelTabCloseButton } from "~/components/ui/panel-tab-close-button";
 import { stackedThreadToast, toastManager } from "~/components/ui/toast";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { readTextFromClipboard, writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { cn } from "~/lib/utils";
 import { type TerminalContextSelection } from "~/lib/terminalContext";
@@ -263,13 +264,14 @@ export function terminalSelectionMenuItems(options?: {
 
 /**
  * Right-click menu for the terminal canvas: the selection actions (disabled
- * until a selection exists) plus Paste. Paste is always offered: the browser
+ * until a selection exists) plus Paste. Paste is offered for writable terminals: the browser
  * (and Electron's default editing menu) can only paste into an editable
  * element, so a canvas terminal never gets a usable entry from them.
  */
 export function terminalContextMenuItems(options: {
   hasSelection: boolean;
   canAddToChat?: boolean;
+  canPaste?: boolean;
 }): ContextMenuItem<TerminalContextMenuAction>[] {
   const { hasSelection, canAddToChat = true } = options;
   return [
@@ -277,7 +279,7 @@ export function terminalContextMenuItems(options: {
       ...item,
       disabled: !hasSelection,
     })),
-    { id: "paste", label: "Paste" },
+    { id: "paste", label: "Paste", ...(options.canPaste === false ? { disabled: true } : {}) },
   ];
 }
 
@@ -302,8 +304,39 @@ export function shouldHandleTerminalExit(
   alreadyHandled: boolean,
 ): boolean {
   return (
-    (current === "closed" || current === "exited") && current !== synchronized && !alreadyHandled
+    current !== synchronized && (current === "closed" || (current === "exited" && !alreadyHandled))
   );
+}
+
+export function shouldCloseTerminalAfterExit(
+  status: TerminalSessionState["status"],
+  preserveExitedSession: boolean,
+): boolean {
+  return status === "exited" && !preserveExitedSession;
+}
+
+export interface NativeTerminalWorkspace {
+  readonly cwd: string;
+  readonly worktreePath: string | null;
+}
+
+export function nativeTerminalScopeChanged(
+  workspace: NativeTerminalWorkspace | undefined,
+  summary: TerminalSessionState["summary"],
+): boolean {
+  return (
+    workspace !== undefined &&
+    summary !== null &&
+    (workspace.cwd !== summary.cwd || workspace.worktreePath !== summary.worktreePath)
+  );
+}
+
+export function terminalInteractionCwd(
+  nativeWorkspace: NativeTerminalWorkspace | undefined,
+  summary: TerminalSessionState["summary"],
+  launchCwd: string,
+): string | null {
+  return nativeWorkspace === undefined ? launchCwd : (summary?.cwd ?? null);
 }
 
 interface TerminalViewportProps {
@@ -317,6 +350,7 @@ interface TerminalViewportProps {
   runtimeEnv?: Record<string, string>;
   providerInstanceId?: ProviderInstanceId;
   onSessionExited: () => void;
+  onSessionClosed: () => void;
   onAddTerminalContext?: (selection: TerminalContextSelection) => void;
   focusRequestId: number;
   autoFocus: boolean;
@@ -324,6 +358,9 @@ interface TerminalViewportProps {
   resizeEpoch: number;
   drawerHeight: number;
   keybindings: ResolvedKeybindingsConfig;
+  mayAutoFocus?: (() => boolean) | undefined;
+  nativeWorkspace?: NativeTerminalWorkspace | undefined;
+  onNewTerminal?: (() => void) | undefined;
 }
 
 interface TerminalLaunchLocation {
@@ -343,6 +380,7 @@ export function TerminalViewport({
   runtimeEnv,
   providerInstanceId,
   onSessionExited,
+  onSessionClosed,
   onAddTerminalContext,
   focusRequestId,
   autoFocus,
@@ -350,6 +388,9 @@ export function TerminalViewport({
   resizeEpoch,
   drawerHeight,
   keybindings,
+  mayAutoFocus,
+  nativeWorkspace,
+  onNewTerminal,
 }: TerminalViewportProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<GhosttyTerminalSurface | null>(null);
@@ -371,6 +412,7 @@ export function TerminalViewport({
     reportFailure: false,
   });
   const hasHandledExitRef = useRef(false);
+  const statusTransitionRef = useRef(0);
   const selectionActionRequestIdRef = useRef(0);
   // Holds the request id of the selection popup currently on screen, so a
   // popup that was superseded (but whose menu promise has not settled yet)
@@ -378,14 +420,13 @@ export function TerminalViewport({
   const openSelectionMenuRequestIdRef = useRef<number | null>(null);
   const keybindingsRef = useRef(keybindings);
   const runtimeEnvKey = useMemo(() => runtimeEnvSignature(runtimeEnv), [runtimeEnv]);
-  const handleSessionExited = useEffectEvent(() => {
-    onSessionExited();
+  const handleSessionExited = useEffectEvent((status: TerminalSessionState["status"]) => {
+    if (status === "closed") onSessionClosed();
+    else if (shouldCloseTerminalAfterExit(status, nativeWorkspace !== undefined)) onSessionExited();
   });
   const handleAddTerminalContext = useEffectEvent((selection: TerminalContextSelection) => {
     onAddTerminalContext?.(selection);
   });
-  const canAddSelectionToChat = useEffectEvent(() => onAddTerminalContext !== undefined);
-  const readTerminalLabel = useEffectEvent(() => terminalLabel);
   const terminalFontFamily = useClientSettings((settings) =>
     resolveTerminalFontPreference({
       advanced: advancedTypography,
@@ -412,12 +453,28 @@ export function TerminalViewport({
       ...(providerInstanceId ? { providerInstanceId } : {}),
     },
   });
-  const writeTerminal = useEffectEvent((data: string) =>
-    runTerminalWrite({
+  const workspaceChanged = nativeTerminalScopeChanged(nativeWorkspace, terminalSession.summary);
+  const interactionCwd = terminalInteractionCwd(nativeWorkspace, terminalSession.summary, cwd);
+  const readInteractionCwd = useEffectEvent(() => interactionCwd);
+  const canAddSelectionToChat = useEffectEvent(
+    () => onAddTerminalContext !== undefined && interactionCwd !== null,
+  );
+  const readTerminalLabel = useEffectEvent(() =>
+    nativeWorkspace !== undefined && interactionCwd !== null
+      ? `${terminalLabel} (${interactionCwd})`
+      : terminalLabel,
+  );
+  const readOnly =
+    nativeWorkspace !== undefined &&
+    (terminalSession.summary === null || workspaceChanged || terminalSession.status === "exited");
+  const canWriteTerminal = useEffectEvent(() => !readOnly);
+  const writeTerminal = useEffectEvent(async (data: string) => {
+    if (readOnly) return;
+    return runTerminalWrite({
       environmentId,
       input: { threadId, terminalId, data },
-    }),
-  );
+    });
+  });
   const resizeTerminal = useEffectEvent((cols: number, rows: number) =>
     runTerminalResize({
       environmentId,
@@ -432,14 +489,16 @@ export function TerminalViewport({
   const synchronizeTerminalStatus = useEffectEvent(
     (terminal: GhosttyTerminalSurface, status: TerminalSessionState["status"]) => {
       const synchronized = synchronizedStatusRef.current;
+      if (status !== synchronized) statusTransitionRef.current += 1;
       if (status === "running") {
         hasHandledExitRef.current = false;
       } else if (shouldHandleTerminalExit(status, synchronized, hasHandledExitRef.current)) {
         hasHandledExitRef.current = true;
+        const transition = statusTransitionRef.current;
         writeSystemMessage(terminal, status === "closed" ? "Terminal closed" : "Process exited");
         window.setTimeout(() => {
-          if (hasHandledExitRef.current) {
-            handleSessionExited();
+          if (hasHandledExitRef.current && transition === statusTransitionRef.current) {
+            handleSessionExited(status);
           }
         }, 0);
       }
@@ -633,14 +692,14 @@ export function TerminalViewport({
 
       const pasteFromClipboard = async (requestId: number) => {
         const activeTerminal = terminalRef.current;
-        if (!activeTerminal) return;
+        if (!activeTerminal || !canWriteTerminal()) return;
         try {
           // The surface owns the read so it can claim the paste race before it
           // starts: a paste shortcut fired while the menu read is in flight
           // supersedes this paste instead of landing alongside it.
           await activeTerminal.pasteFromClipboard(
             () => readTextFromClipboard("terminal input"),
-            () => requestId === selectionActionRequestIdRef.current,
+            () => requestId === selectionActionRequestIdRef.current && canWriteTerminal(),
           );
         } catch (error) {
           reportIfCurrent(requestId, error, "Unable to read the clipboard");
@@ -665,6 +724,7 @@ export function TerminalViewport({
             terminalContextMenuItems({
               hasSelection: selectionAction !== null,
               canAddToChat: canAddSelectionToChat(),
+              canPaste: canWriteTerminal(),
             }),
             { x: event.clientX, y: event.clientY },
           );
@@ -733,7 +793,7 @@ export function TerminalViewport({
         const activeTerminal = terminalRef.current;
         if (!activeTerminal) return;
         const result = await writeTerminal(data);
-        if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
+        if (result?._tag === "Failure" && !isAtomCommandInterrupted(result)) {
           const error = squashAtomCommandFailure(result);
           writeSystemMessage(
             activeTerminal,
@@ -814,7 +874,9 @@ export function TerminalViewport({
           });
           return;
         }
-        const target = resolvePathLinkTarget(text, cwd);
+        const originalCwd = readInteractionCwd();
+        if (originalCwd === null) return;
+        const target = resolvePathLinkTarget(text, originalCwd);
         void (async () => {
           const result = await openTerminalPath(target);
           if (result._tag === "Success" || isAtomCommandInterrupted(result)) {
@@ -831,7 +893,7 @@ export function TerminalViewport({
       function handleData(data: string): void {
         void (async () => {
           const result = await writeTerminal(data);
-          if (result._tag === "Success" || isAtomCommandInterrupted(result)) return;
+          if (!result || result._tag === "Success" || isAtomCommandInterrupted(result)) return;
           const error = squashAtomCommandFailure(result);
           writeSystemMessage(
             terminal,
@@ -953,8 +1015,9 @@ export function TerminalViewport({
     previousSessionRef.current = current;
   }, [terminalOutput, terminalError, terminalStatus, terminalVersion]);
 
+  const canAutoFocus = useEffectEvent(() => mayAutoFocus?.() ?? true);
   useEffect(() => {
-    if (!autoFocus || !visible) return;
+    if (!autoFocus || !visible || !canAutoFocus()) return;
     // Claim focus when requested, then hand it to the terminal once ready only
     // if the user has not focused something else in the meantime.
     (terminalRef.current ?? containerRef.current)?.focus();
@@ -978,16 +1041,40 @@ export function TerminalViewport({
     };
   }, [drawerHeight, environmentId, resizeEpoch, terminalId, threadId]);
   return (
-    <div
-      ref={containerRef}
-      tabIndex={-1}
-      className="relative h-full w-full overflow-hidden bg-(--terminal-background)"
-    />
+    <div className="flex h-full min-h-0 flex-col">
+      {workspaceChanged && (
+        <div
+          role="status"
+          className="flex flex-wrap items-center gap-2 border-b border-border bg-muted/40 px-3 py-2 text-xs"
+        >
+          <span className="min-w-0 flex-1 text-muted-foreground">
+            <Tooltip>
+              <TooltipTrigger render={<span className="block truncate" />}>
+                Shell opened in {terminalSession.summary?.cwd}
+              </TooltipTrigger>
+              <TooltipPopup>{terminalSession.summary?.cwd}</TooltipPopup>
+            </Tooltip>
+            Checkout changed. This shell and its history are preserved; commands are disabled.
+          </span>
+          {onNewTerminal && (
+            <Button variant="outline" size="sm" onClick={onNewTerminal}>
+              New terminal in current checkout
+            </Button>
+          )}
+        </div>
+      )}
+      <div
+        ref={containerRef}
+        tabIndex={-1}
+        className="relative min-h-0 w-full flex-1 overflow-hidden bg-(--terminal-background)"
+      />
+    </div>
   );
 }
 
 interface ThreadTerminalDrawerProps {
   mode?: "drawer" | "panel";
+  mayAutoFocus?: (() => boolean) | undefined;
   threadRef: ScopedThreadRef;
   threadId: ThreadId;
   cwd: string;
@@ -1009,6 +1096,8 @@ interface ThreadTerminalDrawerProps {
   closeShortcutLabel?: string | undefined;
   onActiveTerminalChange: (terminalId: string) => void;
   onCloseTerminal: (terminalId: string) => void;
+  /** Reconcile a server close locally; never request another destructive close. */
+  onTerminalClosed: (terminalId: string) => void;
   onHeightChange: (height: number) => void;
   onAddTerminalContext: (selection: TerminalContextSelection) => void;
   keybindings: ResolvedKeybindingsConfig;
@@ -1016,6 +1105,8 @@ interface ThreadTerminalDrawerProps {
   terminalLabelsById?: ReadonlyMap<string, string>;
   /** Prefer per-session launch locations when the server already knows a terminal. */
   terminalLaunchLocationsById?: ReadonlyMap<string, TerminalLaunchLocation>;
+  /** Native sessions retain natural exits and gate each pane against the current thread scope. */
+  nativeWorkspace?: NativeTerminalWorkspace | undefined;
 }
 
 interface TerminalActionButtonProps {
@@ -1049,6 +1140,7 @@ function TerminalActionButton({ label, className, onClick, children }: TerminalA
 
 export default function ThreadTerminalDrawer({
   mode = "drawer",
+  mayAutoFocus,
   threadRef,
   threadId,
   cwd,
@@ -1070,11 +1162,13 @@ export default function ThreadTerminalDrawer({
   closeShortcutLabel,
   onActiveTerminalChange,
   onCloseTerminal,
+  onTerminalClosed,
   onHeightChange,
   onAddTerminalContext,
   keybindings,
   terminalLabelsById,
   terminalLaunchLocationsById,
+  nativeWorkspace,
 }: ThreadTerminalDrawerProps) {
   const isPanel = mode === "panel";
   const [advancedTypography] = useLocalStorage(
@@ -1534,6 +1628,8 @@ export default function ThreadTerminalDrawer({
                           threadRef={threadRef}
                           threadId={threadId}
                           terminalId={terminalId}
+                          nativeWorkspace={nativeWorkspace}
+                          onNewTerminal={onNewTerminal}
                           terminalLabel={terminalLabelById.get(terminalId) ?? "Terminal"}
                           cwd={terminalLaunchLocation.cwd}
                           {...(terminalLaunchLocation.worktreePath !== undefined
@@ -1543,9 +1639,11 @@ export default function ThreadTerminalDrawer({
                             ? { runtimeEnv: terminalLaunchLocation.runtimeEnv }
                             : {})}
                           onSessionExited={() => onCloseTerminal(terminalId)}
+                          onSessionClosed={() => onTerminalClosed(terminalId)}
                           onAddTerminalContext={onAddTerminalContext}
                           focusRequestId={focusRequestId}
                           autoFocus={terminalId === resolvedActiveTerminalId}
+                          mayAutoFocus={mayAutoFocus}
                           visible={visible}
                           resizeEpoch={resizeEpoch}
                           drawerHeight={drawerHeight}
@@ -1564,6 +1662,8 @@ export default function ThreadTerminalDrawer({
                   threadRef={threadRef}
                   threadId={threadId}
                   terminalId={resolvedActiveTerminalId}
+                  nativeWorkspace={nativeWorkspace}
+                  onNewTerminal={onNewTerminal}
                   terminalLabel={terminalLabelById.get(resolvedActiveTerminalId) ?? "Terminal"}
                   cwd={activeTerminalLaunchLocation.cwd}
                   {...(activeTerminalLaunchLocation.worktreePath !== undefined
@@ -1573,9 +1673,11 @@ export default function ThreadTerminalDrawer({
                     ? { runtimeEnv: activeTerminalLaunchLocation.runtimeEnv }
                     : {})}
                   onSessionExited={() => onCloseTerminal(resolvedActiveTerminalId)}
+                  onSessionClosed={() => onTerminalClosed(resolvedActiveTerminalId)}
                   onAddTerminalContext={onAddTerminalContext}
                   focusRequestId={focusRequestId}
                   autoFocus
+                  mayAutoFocus={mayAutoFocus}
                   visible={visible}
                   resizeEpoch={resizeEpoch}
                   drawerHeight={drawerHeight}

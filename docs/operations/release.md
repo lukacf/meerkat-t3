@@ -1,8 +1,8 @@
-# Release Checklist
+# Original T3 release reference
 
-> For maintainers. Using T3 Code? See [docs/user](../user/).
+For Meerkat T3 packaging and distribution, use [Meerkat distribution](meerkat-distribution.md). Its Mac release path supports ad-hoc signing without an Apple Developer account.
 
-This document covers the unified release workflow for stable and nightly desktop releases.
+The workflow below is inherited from the original T3 Code project. It publishes donor packages and services and is not the Meerkat release entry point.
 
 ## What the workflow does
 

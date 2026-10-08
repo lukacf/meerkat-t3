@@ -1010,6 +1010,34 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
         }
 
+        case "thread.prepared-turn-changed": {
+          const existing = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existing)) return;
+          yield* projectionThreadRepository.upsert({
+            ...existing.value,
+            preparedTurn: event.payload.preparedTurn,
+            updatedAt: event.payload.preparedTurn.updatedAt,
+          });
+          if (event.payload.preparedTurn.phase === "released")
+            yield* refreshThreadShellSummary(event.payload.threadId);
+          return;
+        }
+
+        case "thread.turn-start-requested": {
+          const existing = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existing) || existing.value.preparedTurn == null) return;
+          yield* projectionThreadRepository.upsert({
+            ...existing.value,
+            preparedTurn: null,
+            updatedAt: event.occurredAt,
+          });
+          return;
+        }
+
         // A message cannot change any summary field except latestUserMessageAt,
         // which is a monotonic maximum that folds in directly. The full refresh
         // would re-read every message body in the thread per user message.
@@ -1134,6 +1162,17 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       "applyThreadMessagesProjection",
     )(function* (event, attachmentSideEffects) {
       switch (event.type) {
+        case "thread.prepared-turn-changed":
+          if (event.payload.preparedTurn.phase === "released") {
+            // The retained prepared command still owns its attachments for Edit.
+            yield* sql`DELETE FROM projection_thread_messages
+              WHERE thread_id = ${event.payload.threadId}
+                AND message_id = ${event.payload.preparedTurn.command.message.messageId}
+                AND role = 'user' AND turn_id IS NULL`.pipe(
+              Effect.mapError(toPersistenceSqlError("ProjectionPipeline.releasePreparedTurn")),
+            );
+          }
+          return;
         // A draft retry re-creates a soft-deleted thread id. Every projector
         // drops its own rows for the old incarnation here so replay from any
         // per-projector cursor rebuilds the new thread without stale history.
@@ -1172,7 +1211,9 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           const nextText = Option.match(existingMessage, {
             onNone: () => event.payload.text,
             onSome: (message) =>
-              event.payload.text.length === 0 ? message.text : event.payload.text,
+              event.payload.text.length === 0 && !event.payload.replaceText
+                ? message.text
+                : event.payload.text,
           });
           const nextAttachments =
             event.payload.attachments !== undefined
@@ -1386,6 +1427,14 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
           return;
 
         case "thread.turn-start-requested": {
+          if (
+            event.payload.handlingMode === "steer" &&
+            event.payload.steeringTurnId !== undefined
+          ) {
+            // The request targets an existing run. Admission or rejection does
+            // not open a new turn or replace independently queued work.
+            return;
+          }
           const pendingTurnStart = yield* projectionTurnRepository.getPendingTurnStartByThreadId({
             threadId: event.payload.threadId,
           });
@@ -1642,6 +1691,13 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
 
         case "thread.turn-interrupt-requested": {
           if (event.payload.turnId === undefined) {
+            return;
+          }
+          const session = yield* projectionThreadSessionRepository.getByThreadId({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isSome(session) && session.value.providerName === "meerkat") {
+            // The native member's terminal event owns the cancellation outcome.
             return;
           }
           const existingTurn = yield* projectionTurnRepository.getByTurnId({
@@ -2018,6 +2074,15 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
             threadId: ThreadId.make(threadId),
           });
           const retainedPaths = collectThreadAttachmentRelativePaths(threadId, messages);
+          const threadRow = yield* projectionThreadRepository.getById({
+            threadId: ThreadId.make(threadId),
+          });
+          if (Option.isSome(threadRow) && threadRow.value.preparedTurn) {
+            for (const attachment of threadRow.value.preparedTurn.command.message.attachments) {
+              const relativePath = attachmentRelativePath(attachment);
+              if (relativePath) retainedPaths.add(relativePath);
+            }
+          }
           const activities = yield* projectionThreadActivityRepository.listByThreadId({
             threadId: ThreadId.make(threadId),
           });

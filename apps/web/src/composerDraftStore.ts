@@ -96,8 +96,9 @@ type ComposerPersistState =
   | { capturedState: ComposerDraftStoreState }
   | PersistedComposerDraftStoreState;
 
+const composerHasDurableStorage = typeof localStorage !== "undefined";
 const composerDebouncedStorage = createDeferredStorage<StorageValue<ComposerPersistState>>(
-  typeof localStorage !== "undefined" ? localStorage : createMemoryStorage(),
+  composerHasDurableStorage ? localStorage : createMemoryStorage(),
   (value) =>
     JSON.stringify({
       state:
@@ -216,7 +217,7 @@ const isPersistedComposerDraftFileAttachment = Schema.is(PersistedComposerDraftF
 
 const PersistedTerminalContextDraft = Schema.Struct({
   id: Schema.String,
-  threadId: ThreadId,
+  threadId: Schema.optionalKey(ThreadId),
   createdAt: Schema.String,
   terminalId: Schema.String,
   terminalLabel: Schema.String,
@@ -845,7 +846,7 @@ function terminalContextDedupKey(context: TerminalContextDraft): string {
 }
 
 function normalizeTerminalContextForThread(
-  threadId: ThreadId,
+  threadId: ThreadId | undefined,
   context: TerminalContextDraft,
 ): TerminalContextDraft | null {
   const terminalId = context.terminalId.trim();
@@ -868,7 +869,7 @@ function normalizeTerminalContextForThread(
 }
 
 function normalizeTerminalContextsForThread(
-  threadId: ThreadId,
+  threadId: ThreadId | undefined,
   contexts: ReadonlyArray<TerminalContextDraft>,
 ): TerminalContextDraft[] {
   const existingIds = new Set<string>();
@@ -876,7 +877,10 @@ function normalizeTerminalContextsForThread(
   const normalizedContexts: TerminalContextDraft[] = [];
 
   for (const context of contexts) {
-    const normalizedContext = normalizeTerminalContextForThread(threadId, context);
+    const normalizedContext = normalizeTerminalContextForThread(
+      threadId ?? context.threadId,
+      context,
+    );
     if (!normalizedContext) {
       continue;
     }
@@ -1323,8 +1327,7 @@ function normalizePersistedTerminalContextDraft(
   if (
     typeof id !== "string" ||
     id.length === 0 ||
-    typeof threadId !== "string" ||
-    threadId.length === 0 ||
+    (threadId !== undefined && (typeof threadId !== "string" || threadId.length === 0)) ||
     typeof createdAt !== "string" ||
     createdAt.length === 0 ||
     typeof lineStart !== "number" ||
@@ -1344,7 +1347,7 @@ function normalizePersistedTerminalContextDraft(
   const normalizedLineEnd = Math.max(normalizedLineStart, Math.floor(lineEnd));
   return {
     id: toComposerContextId(id),
-    threadId: threadId as ThreadId,
+    ...(typeof threadId === "string" ? { threadId: ThreadId.make(threadId) } : {}),
     createdAt,
     terminalId,
     terminalLabel,
@@ -2163,7 +2166,7 @@ export function partializeComposerDraftStoreState(
         ? {
             terminalContexts: draft.terminalContexts.map((context) => ({
               id: context.id,
-              threadId: context.threadId,
+              ...(context.threadId ? { threadId: context.threadId } : {}),
               createdAt: context.createdAt,
               terminalId: context.terminalId,
               terminalLabel: context.terminalLabel,
@@ -3583,8 +3586,8 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
         },
         insertTerminalContext: (threadRef, prompt, context, index) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef);
-          const threadId = resolveComposerThreadId(get(), threadRef);
-          if (!threadKey || !threadId) {
+          const threadId = resolveComposerThreadId(get(), threadRef) ?? context.threadId;
+          if (!threadKey) {
             return false;
           }
           let inserted = false;
@@ -3623,8 +3626,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
         },
         addTerminalContext: (threadRef, context) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef);
-          const threadId = resolveComposerThreadId(get(), threadRef);
-          if (!threadKey || !threadId) {
+          if (!threadKey) {
             return;
           }
           get().addTerminalContexts(
@@ -3635,14 +3637,19 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
         addTerminalContexts: (threadRef, contexts, options) => {
           const threadKey = resolveComposerDraftKey(get(), threadRef);
           const threadId = resolveComposerThreadId(get(), threadRef);
-          if (!threadKey || !threadId || contexts.length === 0) {
+          if (!threadKey || contexts.length === 0) {
             return;
           }
+          // Standalone conversations have no coordinator thread. Retain the terminal's
+          // own scope instead of fabricating a thread merely to store draft context.
+          const normalizeContexts = (entries: TerminalContextDraft[]) =>
+            threadId
+              ? normalizeTerminalContextsForThread(threadId, entries)
+              : normalizeTerminalContextsForThread(undefined, entries);
           const currentContexts = get().draftsByThreadKey[threadKey]?.terminalContexts ?? [];
-          const incoming = normalizeTerminalContextsForThread(threadId, [
-            ...currentContexts,
-            ...contexts,
-          ]).slice(currentContexts.length);
+          const incoming = normalizeContexts([...currentContexts, ...contexts]).slice(
+            currentContexts.length,
+          );
           if (incoming.length === 0) return;
           const placedAtCaret =
             options?.appendReference !== false &&
@@ -3651,7 +3658,7 @@ const composerDraftStore = create<ComposerDraftStoreState>()(
               false);
           set((state) => {
             const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
-            const acceptedContexts = normalizeTerminalContextsForThread(threadId, [
+            const acceptedContexts = normalizeContexts([
               ...existing.terminalContexts,
               ...contexts,
             ]).slice(existing.terminalContexts.length);
@@ -4182,6 +4189,30 @@ export function clearComposerDraftsEnvironment(environmentId: EnvironmentId): vo
     };
   });
   composerDebouncedStorage.flush();
+}
+
+/** Confirm the current snapshot reached local storage before retiring a delivery request. */
+export function flushComposerDraftPersistence(): boolean {
+  if (!composerHasDurableStorage) return false;
+  try {
+    const capturedState = useComposerDraftStore.getState();
+    const version = COMPOSER_DRAFT_STORAGE_VERSION;
+    // Schedule again so an earlier failed debounce can be retried without changing the draft.
+    composerDebouncedStorage.setItem(COMPOSER_DRAFT_STORAGE_KEY, {
+      state: { capturedState },
+      version,
+    });
+    composerDebouncedStorage.flush();
+    return (
+      composerDebouncedStorage.getItem(COMPOSER_DRAFT_STORAGE_KEY) ===
+      JSON.stringify({
+        state: partializeComposerDraftStoreState(capturedState),
+        version,
+      })
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function useComposerThreadDraft(threadRef: ComposerThreadTarget): ComposerThreadDraftState {

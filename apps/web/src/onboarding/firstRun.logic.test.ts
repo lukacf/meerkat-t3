@@ -524,3 +524,38 @@ describe("isFreshFirstRunWorkspace", () => {
     ).toBe(false);
   });
 });
+
+describe("resuming setup", () => {
+  it("does not infer completion from projects created while setup was active", () => {
+    expect(
+      resolveFirstRunDecision({
+        ...freshWorkspace,
+        progressStep: "projects",
+        projectCount: 3,
+        threadCount: 2,
+        workspaceFresh: false,
+      }),
+    ).toEqual({ decision: "wizard", persistCompletion: false });
+  });
+  it("opens the workspace for the first task without marking setup complete", () => {
+    expect(
+      resolveFirstRunDecision({
+        ...freshWorkspace,
+        progressStep: "first-task",
+        projectCount: 3,
+        workspaceFresh: false,
+      }),
+    ).toEqual({ decision: "app", persistCompletion: false });
+  });
+  it("resumes model access after a hosted computer has been paired", () => {
+    expect(
+      resolveHostedFirstRunDecision({
+        hydrated: true,
+        completed: false,
+        progressStep: "agents",
+        catalogReady: true,
+        environmentCount: 1,
+      }),
+    ).toEqual({ decision: "wizard", persistCompletion: false });
+  });
+});

@@ -185,65 +185,47 @@ export const make = Effect.gen(function* () {
       Effect.withSpan("ServerSecretStore.get"),
     );
 
-  const set: ServerSecretStore["Service"]["set"] = (name, value) => {
-    const secretPath = resolveSecretPath(name);
-    return crypto.randomUUIDv4.pipe(
-      Effect.mapError(
-        (cause) =>
-          new SecretStoreTemporaryPathError({
-            resource: `secret ${name}`,
-            cause,
-          }),
-      ),
-      Effect.flatMap((uuid) => {
-        const tempPath = `${secretPath}.${uuid}.tmp`;
-        return Effect.gen(function* () {
-          yield* fileSystem.writeFile(tempPath, value);
-          yield* fileSystem.chmod(tempPath, 0o600);
-          yield* fileSystem.rename(tempPath, secretPath);
-          yield* fileSystem.chmod(secretPath, 0o600);
-        }).pipe(
-          Effect.catch((cause) =>
-            fileSystem.remove(tempPath).pipe(
-              Effect.ignore,
-              Effect.flatMap(() =>
-                Effect.fail(
-                  new SecretStorePersistError({
-                    resource: `secret ${name}`,
-                    cause,
-                  }),
-                ),
-              ),
+  const persist = (name: string, value: Uint8Array, exclusive: boolean) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const temporaryDirectory = yield* fileSystem
+          .makeTempDirectoryScoped({
+            directory: serverConfig.secretsDir,
+            prefix: `${name}.`,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) => new SecretStoreTemporaryPathError({ resource: `secret ${name}`, cause }),
             ),
+          );
+        const temporaryPath = path.join(temporaryDirectory, "value.bin");
+        yield* Effect.gen(function* () {
+          // Close the complete private candidate before publishing its final name.
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const file = yield* fileSystem.open(temporaryPath, { flag: "wx", mode: 0o600 });
+              yield* file.writeAll(value);
+              yield* file.sync;
+              yield* fileSystem.chmod(temporaryPath, 0o600);
+            }),
+          );
+          const secretPath = resolveSecretPath(name);
+          yield* exclusive
+            ? fileSystem.link(temporaryPath, secretPath)
+            : fileSystem.rename(temporaryPath, secretPath);
+        }).pipe(
+          Effect.mapError(
+            (cause) => new SecretStorePersistError({ resource: `secret ${name}`, cause }),
           ),
         );
       }),
-      Effect.withSpan("ServerSecretStore.set"),
     );
-  };
 
-  const create: ServerSecretStore["Service"]["create"] = (name, value) => {
-    const secretPath = resolveSecretPath(name);
-    return Effect.scoped(
-      Effect.gen(function* () {
-        const file = yield* fileSystem.open(secretPath, {
-          flag: "wx",
-          mode: 0o600,
-        });
-        yield* file.writeAll(value);
-        yield* file.sync;
-        yield* fileSystem.chmod(secretPath, 0o600);
-      }),
-    ).pipe(
-      Effect.mapError(
-        (cause) =>
-          new SecretStorePersistError({
-            resource: `secret ${name}`,
-            cause,
-          }),
-      ),
-    );
-  };
+  const set: ServerSecretStore["Service"]["set"] = (name, value) =>
+    persist(name, value, false).pipe(Effect.withSpan("ServerSecretStore.set"));
+
+  const create: ServerSecretStore["Service"]["create"] = (name, value) =>
+    persist(name, value, true).pipe(Effect.withSpan("ServerSecretStore.create"));
 
   const getOrCreateRandom: ServerSecretStore["Service"]["getOrCreateRandom"] = (name, bytes) =>
     get(name).pipe(

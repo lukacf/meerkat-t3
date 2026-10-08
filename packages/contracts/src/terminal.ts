@@ -303,6 +303,20 @@ export class TerminalSessionLookupError extends Schema.TaggedError<TerminalSessi
   }
 }
 
+export class TerminalWorkspaceChangedError extends Schema.TaggedError<TerminalWorkspaceChangedError>()(
+  "TerminalWorkspaceChangedError",
+  {
+    threadId: Schema.String,
+    terminalId: Schema.String,
+    terminalCwd: Schema.String,
+    currentCwd: Schema.String,
+  },
+) {
+  override get message() {
+    return `This terminal is still open in ${this.terminalCwd}. The thread now uses ${this.currentCwd}. Open a new terminal to run commands; the existing process and history have been preserved.`;
+  }
+}
+
 export class TerminalProviderInstanceNotFoundError extends Schema.TaggedError<TerminalProviderInstanceNotFoundError>()(
   "TerminalProviderInstanceNotFoundError",
   {
@@ -372,6 +386,7 @@ export const TerminalError = Schema.Union([
   TerminalCwdError,
   TerminalHistoryError,
   TerminalSessionLookupError,
+  TerminalWorkspaceChangedError,
   TerminalProviderInstanceNotFoundError,
   TerminalProviderEnvironmentError,
   TerminalNotRunningError,

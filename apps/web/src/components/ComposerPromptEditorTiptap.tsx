@@ -71,7 +71,10 @@ import {
   ComposerContextRecordsContext,
 } from "./composerContextPresentation";
 import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection";
-import { formatProviderSkillDisplayName } from "@t3tools/client-runtime/providerSkills";
+import {
+  providerSkillReferenceMeta,
+  resolveProviderSkillReference,
+} from "@t3tools/client-runtime/providerSkills";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { importPastedComposerText } from "./composerInlineTokenPaste";
 import { didComposerSelectionChangeVisibly } from "./composerSelection";
@@ -120,6 +123,8 @@ export interface ComposerPromptEditorProps {
   skills: ReadonlyArray<ServerProviderSkill>;
   disabled: boolean;
   placeholder: string;
+  ariaLabel?: string;
+  suggestionList?: { id: string; activeOptionId: string } | undefined;
   containerClassName?: string;
   className?: string;
   placeholderClassName?: string;
@@ -256,6 +261,8 @@ const ComposerSkillExtension = Node.create({
       skillName: { default: "" },
       skillLabel: { default: "" },
       skillDescription: { default: null },
+      skillPath: { default: null },
+      source: { default: "" },
     };
   },
   parseHTML() {
@@ -273,9 +280,11 @@ function ComposerSkillNodeView({ node }: NodeViewProps) {
   const actions = use(ComposerContextActionsContext);
   const skills = use(RichComposerSkillsContext);
   const skillName = (node.attrs.skillName as string) ?? "";
-  const skillLabel = (node.attrs.skillLabel as string) || skillName;
   const skillDescription = (node.attrs.skillDescription as string | null) ?? null;
-  const skill = skills.find((candidate) => candidate.name === skillName);
+  const skillPath = node.attrs.skillPath as string | null;
+  const meta = providerSkillReferenceMeta(skills, skillName, skillPath ?? undefined);
+  const skillLabel = meta.label;
+  const skill = resolveProviderSkillReference(skills, skillName, skillPath ?? undefined);
   return (
     <NodeViewWrapper as="span" className={CHIP_NODE_SELECTION_CLASS_NAME}>
       <ContextChipPopover
@@ -288,10 +297,11 @@ function ComposerSkillNodeView({ node }: NodeViewProps) {
           <p className="font-medium">{skillLabel}</p>
           <p>
             {skill?.description ??
+              meta.description ??
               skillDescription ??
               "No description is available for this skill."}
           </p>
-          {skill?.path ? (
+          {skill?.path && !skill.path.startsWith("meerkat-skill://") ? (
             <Button variant="outline" size="sm" onClick={() => actions.openMention(skill.path)}>
               View instructions
             </Button>
@@ -563,6 +573,8 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     skills,
     disabled,
     placeholder,
+    ariaLabel = "Message",
+    suggestionList,
     containerClassName,
     className,
     placeholderClassName,
@@ -613,17 +625,9 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     latestValueRef.current = value;
   }, [value]);
 
-  const skillLabelFor = useCallback((name: string): SkillMeta => {
+  const skillLabelFor = useCallback((name: string, path?: string): SkillMeta => {
     const normalized = name.startsWith("$") ? name.slice(1) : name;
-    const skill = skillsRef.current.find((candidate) => candidate.name === normalized);
-    if (!skill) {
-      return { label: formatProviderSkillDisplayName({ name: normalized }), description: null };
-    }
-    const shortDescription = skill.shortDescription?.trim();
-    return {
-      label: formatProviderSkillDisplayName(skill),
-      description: shortDescription || skill.description?.trim() || null,
-    };
+    return providerSkillReferenceMeta(skillsRef.current, normalized, path);
   }, []);
 
   const initialCursor = clampCollapsedComposerCursor(value, cursor);
@@ -715,18 +719,29 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
     );
   }, []);
 
-  const editorAttributes = useMemo(
-    () => ({
+  const suggestionListId = suggestionList?.id;
+  const activeSuggestionId = suggestionList?.activeOptionId;
+  const editorAttributes = useMemo(() => {
+    const attributes: Record<string, string> = {
       class: cn(
         "composer-tiptap -m-1 block max-h-52 min-h-19.5 overflow-y-auto p-1 whitespace-pre-wrap wrap-break-word bg-transparent leading-relaxed text-foreground focus:outline-none",
         className,
       ),
       "data-testid": "composer-editor",
       "data-composer-rich-text": richText ? "true" : "false",
+      role: "textbox",
+      "aria-label": ariaLabel,
+      "aria-multiline": "true",
+      "aria-disabled": disabled ? "true" : "false",
       "aria-placeholder": placeholder,
-    }),
-    [className, placeholder, richText],
-  );
+    };
+    if (suggestionListId && activeSuggestionId) {
+      attributes["aria-autocomplete"] = "list";
+      attributes["aria-controls"] = suggestionListId;
+      attributes["aria-activedescendant"] = activeSuggestionId;
+    }
+    return attributes;
+  }, [ariaLabel, className, disabled, placeholder, richText, suggestionListId, activeSuggestionId]);
 
   const editor = useEditor(
     {
@@ -773,20 +788,9 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
       ],
       content: buildDocJson(
         value,
-        (name) => {
+        (name, path) => {
           const normalized = name.startsWith("$") ? name.slice(1) : name;
-          const found = skills.find((candidate) => candidate.name === normalized);
-          if (!found) {
-            return {
-              label: formatProviderSkillDisplayName({ name: normalized }),
-              description: null,
-            };
-          }
-          const shortDescription = found.shortDescription?.trim();
-          return {
-            label: formatProviderSkillDisplayName(found),
-            description: shortDescription || found.description?.trim() || null,
-          };
+          return providerSkillReferenceMeta(skills, normalized, path);
         },
         { styling: richText },
       ),
@@ -1315,7 +1319,7 @@ function ComposerPromptEditorTiptapInner(props: ComposerPromptEditorProps) {
  */
 function insertMarkdownParagraphs(
   value: string,
-  skillLabelFor: (name: string) => SkillMeta,
+  skillLabelFor: (name: string, path?: string) => SkillMeta,
   options: { styling: boolean },
   insertContent: (content: JSONContent[] | JSONContent) => void,
 ): void {

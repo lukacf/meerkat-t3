@@ -1,0 +1,259 @@
+[
+  {
+    "id": "evt-agent-01a0f896-8a10-7cc0-9963-60ddda0371c4",
+    "dedupe_key": "console-event:default:evt-agent-01a0f896-8a10-7cc0-9963-60ddda0371c4",
+    "timestamp_ms": 1790877010448,
+    "runtime_key": "default",
+    "identity": "browser-reviewer",
+    "session_id": "01a0f895-8ae6-7f52-999c-93d90366805a",
+    "kind": "tool_call_requested",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "0f989751-9309-5d79-a425-9e3b65ae69b1",
+    "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1",
+    "cursor": "console:148",
+    "payload": {
+      "args": {
+        "tabId": "tab_1"
+      },
+      "id": "call_preview_ownership_after_wrong_workspace_0",
+      "identity": {
+        "interaction_id": "0f989751-9309-5d79-a425-9e3b65ae69b1",
+        "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1"
+      },
+      "name": "preview_status",
+      "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1",
+      "session_id": "01a0f895-8ae6-7f52-999c-93d90366805a",
+      "source_event_type": "tool_call_requested",
+      "source_sequence": 86,
+      "tool_call_id": "call_preview_ownership_after_wrong_workspace_0",
+      "type": "tool_call_requested"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f896-8a10-7cc0-9963-60ddda0371c4"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f896-8a10-7cc0-9963-60e27bdc5e09",
+    "dedupe_key": "console-event:default:evt-agent-01a0f896-8a10-7cc0-9963-60e27bdc5e09",
+    "timestamp_ms": 1790877010448,
+    "runtime_key": "default",
+    "identity": "browser-reviewer",
+    "session_id": "01a0f895-8ae6-7f52-999c-93d90366805a",
+    "kind": "tool_execution_started",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "0f989751-9309-5d79-a425-9e3b65ae69b1",
+    "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1",
+    "cursor": "console:149",
+    "payload": {
+      "id": "call_preview_ownership_after_wrong_workspace_0",
+      "identity": {
+        "interaction_id": "0f989751-9309-5d79-a425-9e3b65ae69b1",
+        "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1"
+      },
+      "name": "preview_status",
+      "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1",
+      "session_id": "01a0f895-8ae6-7f52-999c-93d90366805a",
+      "source_event_type": "tool_execution_started",
+      "source_sequence": 87,
+      "tool_call_id": "call_preview_ownership_after_wrong_workspace_0",
+      "type": "tool_execution_started"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f896-8a10-7cc0-9963-60e27bdc5e09"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f896-8a1b-7b33-a7e8-ad7d90e0e036",
+    "dedupe_key": "console-event:default:evt-agent-01a0f896-8a1b-7b33-a7e8-ad7d90e0e036",
+    "timestamp_ms": 1790877010459,
+    "runtime_key": "default",
+    "identity": "browser-reviewer",
+    "session_id": "01a0f895-8ae6-7f52-999c-93d90366805a",
+    "kind": "tool_execution_completed",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "0f989751-9309-5d79-a425-9e3b65ae69b1",
+    "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1",
+    "cursor": "console:150",
+    "payload": {
+      "content": [
+        {
+          "text": "{\"hostConnectionId\":\"d4c78da7-59e6-4fdd-83d6-fd53c1878705\",\"available\":true,\"visible\":false,\"tabId\":\"tab_1\",\"url\":\"http://127.0.0.1:50466/\",\"title\":\"Browser acceptance fixture\",\"loading\":false,\"viewportSetting\":{\"_tag\":\"freeform\",\"width\":1280,\"height\":800}}",
+          "type": "text"
+        }
+      ],
+      "duration_ms": 31,
+      "id": "call_preview_ownership_after_wrong_workspace_0",
+      "identity": {
+        "interaction_id": "0f989751-9309-5d79-a425-9e3b65ae69b1",
+        "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1"
+      },
+      "is_error": false,
+      "name": "preview_status",
+      "result": "{\"hostConnectionId\":\"d4c78da7-59e6-4fdd-83d6-fd53c1878705\",\"available\":true,\"visible\":false,\"tabId\":\"tab_1\",\"url\":\"http://127.0.0.1:50466/\",\"title\":\"Browser acceptance fixture\",\"loading\":false,\"viewportSetting\":{\"_tag\":\"freeform\",\"width\":1280,\"height\":800}}",
+      "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1",
+      "session_id": "01a0f895-8ae6-7f52-999c-93d90366805a",
+      "source_event_type": "tool_execution_completed",
+      "source_sequence": 88,
+      "tool_call_id": "call_preview_ownership_after_wrong_workspace_0",
+      "type": "tool_execution_completed"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f896-8a1b-7b33-a7e8-ad7d90e0e036"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f896-8a1b-7b33-a7e8-ad8a391e52b5",
+    "dedupe_key": "console-event:default:evt-agent-01a0f896-8a1b-7b33-a7e8-ad8a391e52b5",
+    "timestamp_ms": 1790877010459,
+    "runtime_key": "default",
+    "identity": "browser-reviewer",
+    "session_id": "01a0f895-8ae6-7f52-999c-93d90366805a",
+    "kind": "tool_result_received",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "0f989751-9309-5d79-a425-9e3b65ae69b1",
+    "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1",
+    "cursor": "console:151",
+    "payload": {
+      "content": [
+        {
+          "text": "{\"hostConnectionId\":\"d4c78da7-59e6-4fdd-83d6-fd53c1878705\",\"available\":true,\"visible\":false,\"tabId\":\"tab_1\",\"url\":\"http://127.0.0.1:50466/\",\"title\":\"Browser acceptance fixture\",\"loading\":false,\"viewportSetting\":{\"_tag\":\"freeform\",\"width\":1280,\"height\":800}}",
+          "type": "text"
+        }
+      ],
+      "id": "call_preview_ownership_after_wrong_workspace_0",
+      "identity": {
+        "interaction_id": "0f989751-9309-5d79-a425-9e3b65ae69b1",
+        "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1"
+      },
+      "is_error": false,
+      "name": "preview_status",
+      "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1",
+      "session_id": "01a0f895-8ae6-7f52-999c-93d90366805a",
+      "source_event_type": "tool_result_received",
+      "source_sequence": 89,
+      "tool_call_id": "call_preview_ownership_after_wrong_workspace_0",
+      "type": "tool_result_received"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f896-8a1b-7b33-a7e8-ad8a391e52b5"
+    }
+  },
+  {
+    "id": "console-frame-cfa090931f980bc0dcb01f3b1513a6c28fe90c737e975a6709d0790f74220ae6",
+    "dedupe_key": "session-history:default:01a0f895-8ae6-7f52-999c-93d90366805a:33:2f99c9b0763c3f14",
+    "timestamp_ms": 1790877010425,
+    "runtime_key": "default",
+    "identity": "browser-reviewer",
+    "session_id": "01a0f895-8ae6-7f52-999c-93d90366805a",
+    "kind": "assistant_message",
+    "status": "completed",
+    "frame_version": 1,
+    "interaction_id": "0f989751-9309-5d79-a425-9e3b65ae69b1",
+    "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1",
+    "cursor": "console:166",
+    "payload": {
+      "assistant_message_id": "01a0f896-89b4-70d3-90fb-79d2a53be03a",
+      "message": {
+        "assistant_message_id": "01a0f896-89b4-70d3-90fb-79d2a53be03a",
+        "blocks": [
+          {
+            "block_type": "tool_use",
+            "data": {
+              "args": {
+                "tabId": "tab_1"
+              },
+              "id": "call_preview_ownership_after_wrong_workspace_0",
+              "meta": {
+                "provider": "open_ai_response",
+                "response_id": "preview_ownership_after_wrong_workspace_0"
+              },
+              "name": "preview_status"
+            }
+          }
+        ],
+        "created_at": "2026-10-01T17:50:10.425498Z",
+        "identity": {
+          "interaction_id": "0f989751-9309-5d79-a425-9e3b65ae69b1",
+          "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1"
+        },
+        "role": "block_assistant",
+        "stop_reason": "tool_use"
+      },
+      "result": "",
+      "source_event_type": "session_history",
+      "text": "",
+      "type": "session_history"
+    },
+    "source": {
+      "kind": "session_history",
+      "source_cursor": "01a0f895-8ae6-7f52-999c-93d90366805a:33"
+    }
+  },
+  {
+    "id": "console-frame-97e73a104c72b11683b6dd6d4aea452ad1009fa861f737a94c91f1c85491d243",
+    "dedupe_key": "session-history:default:01a0f895-8ae6-7f52-999c-93d90366805a:33:tool-call:0:2f99c9b0763c3f14",
+    "timestamp_ms": 1790877010425,
+    "runtime_key": "default",
+    "identity": "browser-reviewer",
+    "session_id": "01a0f895-8ae6-7f52-999c-93d90366805a",
+    "kind": "tool_call_requested",
+    "status": "completed",
+    "frame_version": 1,
+    "interaction_id": "0f989751-9309-5d79-a425-9e3b65ae69b1",
+    "run_id": "01a0f896-89a2-7f11-b6b6-89ad8b5565a1",
+    "cursor": "console:167",
+    "payload": {
+      "args": {
+        "tabId": "tab_1"
+      },
+      "assistant_message_id": "01a0f896-89b4-70d3-90fb-79d2a53be03a",
+      "id": "call_preview_ownership_after_wrong_workspace_0",
+      "name": "preview_status",
+      "source_event_type": "session_history",
+      "tool_call_id": "call_preview_ownership_after_wrong_workspace_0",
+      "type": "session_history"
+    },
+    "source": {
+      "kind": "session_history",
+      "source_cursor": "01a0f895-8ae6-7f52-999c-93d90366805a:33:tool-call:0"
+    }
+  },
+  {
+    "id": "console-frame-d753c17167f369ff7f916213fdbc2d14dd8721ad293fb4971d42f9d8d02dc027",
+    "dedupe_key": "session-history:default:01a0f895-8ae6-7f52-999c-93d90366805a:34:0:410f7ade45963c2a",
+    "timestamp_ms": 1790877010457,
+    "runtime_key": "default",
+    "identity": "browser-reviewer",
+    "session_id": "01a0f895-8ae6-7f52-999c-93d90366805a",
+    "kind": "tool_execution_completed",
+    "status": "completed",
+    "frame_version": 1,
+    "cursor": "console:168",
+    "payload": {
+      "content": [
+        {
+          "text": "{\"hostConnectionId\":\"d4c78da7-59e6-4fdd-83d6-fd53c1878705\",\"available\":true,\"visible\":false,\"tabId\":\"tab_1\",\"url\":\"http://127.0.0.1:50466/\",\"title\":\"Browser acceptance fixture\",\"loading\":false,\"viewportSetting\":{\"_tag\":\"freeform\",\"width\":1280,\"height\":800}}",
+          "type": "text"
+        }
+      ],
+      "id": "call_preview_ownership_after_wrong_workspace_0",
+      "is_error": false,
+      "result": "{\"hostConnectionId\":\"d4c78da7-59e6-4fdd-83d6-fd53c1878705\",\"available\":true,\"visible\":false,\"tabId\":\"tab_1\",\"url\":\"http://127.0.0.1:50466/\",\"title\":\"Browser acceptance fixture\",\"loading\":false,\"viewportSetting\":{\"_tag\":\"freeform\",\"width\":1280,\"height\":800}}",
+      "source_event_type": "session_history",
+      "tool_call_id": "call_preview_ownership_after_wrong_workspace_0",
+      "type": "session_history"
+    },
+    "source": {
+      "kind": "session_history",
+      "source_cursor": "01a0f895-8ae6-7f52-999c-93d90366805a:34:0"
+    }
+  }
+]

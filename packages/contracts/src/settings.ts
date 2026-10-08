@@ -7,6 +7,8 @@ import {
   ForwardCompatibleNullable,
   ForwardCompatibleOptional,
   OmittedWhenNull,
+  EnvironmentId,
+  ThreadId,
   ProjectId,
   TrimmedNonEmptyString,
   TrimmedString,
@@ -37,8 +39,9 @@ import {
 } from "./preview.ts";
 import {
   ProviderInstanceConfig,
+  ProviderInstanceEnvironment,
   ProviderInstanceId,
-  type ProviderDriverKind,
+  ProviderDriverKind,
 } from "./providerInstance.ts";
 import { PullRequestMergeMethod } from "./pullRequest.ts";
 
@@ -291,6 +294,15 @@ export const LoadBalancingWeights = Schema.Record(
 
 export const DiffColorScheme = Schema.Literals(["red-green", "blue-orange"]);
 
+export const OnboardingProgress = Schema.Struct({
+  step: Schema.Literals(["connection", "agents", "projects", "first-task"]),
+  environmentIds: Schema.Array(EnvironmentId),
+  startedAt: Schema.String,
+  projectRef: Schema.NullOr(Schema.Struct({ environmentId: EnvironmentId, projectId: ProjectId })),
+  threadId: Schema.NullOr(ThreadId),
+});
+export type OnboardingProgress = typeof OnboardingProgress.Type;
+
 export const ClientSettingsSchema = Schema.Struct({
   notificationMode: NotificationMode.pipe(
     Schema.withDecodingDefault(Effect.succeed("off" as const)),
@@ -399,6 +411,10 @@ export const ClientSettingsSchema = Schema.Struct({
   // that predates this field decodes to `null` — so the gate also requires an
   // empty workspace before it treats the client as a fresh install.
   onboardingCompletedAt: Schema.NullOr(Schema.String).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  // Setup progress survives restarts; creating a project is not completion.
+  onboardingProgress: Schema.NullOr(OnboardingProgress).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
   ),
   // Model favorites. Historically keyed by provider kind, now
@@ -1290,6 +1306,66 @@ export type ServerSettings = typeof ServerSettings.Type;
 
 export const DEFAULT_SERVER_SETTINGS: ServerSettings = Schema.decodeSync(ServerSettings)({});
 
+/** Field-level provider changes composed against current settings by the server. */
+export const ProviderSettingsIntent = Schema.Union([
+  Schema.Struct({
+    kind: Schema.Literal("add"),
+    instanceId: ProviderInstanceId,
+    instance: ProviderInstanceConfig,
+  }),
+  Schema.Struct({
+    kind: Schema.Literal("edit"),
+    instanceId: ProviderInstanceId,
+    driver: ProviderDriverKind,
+    changes: Schema.Struct({
+      enabled: Schema.optionalKey(Schema.Boolean),
+      displayName: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+      accentColor: Schema.optionalKey(Schema.NullOr(TrimmedNonEmptyString)),
+      environment: Schema.optionalKey(Schema.NullOr(ProviderInstanceEnvironment)),
+      config: Schema.optionalKey(
+        Schema.Struct({
+          set: Schema.optionalKey(Schema.Record(Schema.String, Schema.Unknown)),
+          remove: Schema.optionalKey(Schema.Array(Schema.String)),
+        }),
+      ),
+    }),
+  }),
+  Schema.Struct({ kind: Schema.Literal("delete"), instanceId: ProviderInstanceId }),
+  Schema.Struct({
+    kind: Schema.Literal("resetDefault"),
+    driver: Schema.Literals(["codex", "claudeAgent", "cursor", "grok", "opencode", "antigravity"]),
+  }),
+]);
+export type ProviderSettingsIntent = typeof ProviderSettingsIntent.Type;
+
+export class ProviderSettingsConflictError extends Schema.TaggedError<ProviderSettingsConflictError>()(
+  "ProviderSettingsConflictError",
+  {
+    instanceId: Schema.String,
+    reason: Schema.Literals([
+      "instance_exists",
+      "instance_missing",
+      "driver_changed",
+      "config_not_object",
+      "conflicting_config_keys",
+    ]),
+  },
+) {
+  override get message(): string {
+    switch (this.reason) {
+      case "instance_exists":
+        return "A provider with this ID already exists. Choose another ID.";
+      case "instance_missing":
+        return "This provider no longer exists. Refresh settings before editing it.";
+      case "driver_changed":
+        return "This provider has changed. Refresh settings before editing it.";
+      case "config_not_object":
+      case "conflicting_config_keys":
+        return "These changes cannot be applied to the current provider configuration.";
+    }
+  }
+}
+
 /**
  * Read the legacy `enabled` flag embedded in a provider instance config
  * blob. The envelope-level `ProviderInstanceConfig.enabled` is the single
@@ -1590,6 +1666,7 @@ export const ClientSettingsPatch = Schema.Struct({
   environmentIdentificationMode: Schema.optionalKey(EnvironmentIdentificationMode),
   glassOpacity: Schema.optionalKey(GlassOpacity),
   onboardingCompletedAt: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  onboardingProgress: Schema.optionalKey(Schema.NullOr(OnboardingProgress)),
   fontSizeInterface: Schema.optionalKey(InterfaceFontSize),
   fontSizePrompt: Schema.optionalKey(PromptFontSize),
   fontSizeCode: Schema.optionalKey(CodeFontSize),

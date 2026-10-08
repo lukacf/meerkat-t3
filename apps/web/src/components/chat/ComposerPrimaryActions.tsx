@@ -6,6 +6,7 @@ import { StageBackdropButtonArt, useSidebarStageBackdropVariant } from "../Sideb
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { composerFloatingLayerProps } from "./composerEventScope";
 
 interface PendingActionState {
@@ -109,6 +110,26 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
   );
 
   if (pendingAction) {
+    const pendingSubmitButton = (
+      <button
+        type="submit"
+        className={cn(messageActionPillClassName, "h-8 sm:h-7", compact ? "px-3" : "px-4")}
+        {...pointerFocusProps}
+        disabled={
+          isSendDisabled ||
+          isEnvironmentUnavailable ||
+          pendingAction.isResponding ||
+          (pendingAction.isLastQuestion ? !pendingAction.isComplete : !pendingAction.canAdvance)
+        }
+      >
+        {formatPendingPrimaryActionLabel({
+          compact,
+          isLastQuestion: pendingAction.isLastQuestion,
+          isResponding: pendingAction.isResponding,
+          questionIndex: pendingAction.questionIndex,
+        })}
+      </button>
+    );
     return (
       <div className={cn("flex items-center justify-end", compact ? "gap-1.5" : "gap-2")}>
         {isRunning ? renderStopGenerationButton(true) : null}
@@ -136,23 +157,16 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
             </Button>
           )
         ) : null}
-        <button
-          type="submit"
-          className={cn(messageActionPillClassName, "h-8 sm:h-7", compact ? "px-3" : "px-4")}
-          {...pointerFocusProps}
-          disabled={
-            isEnvironmentUnavailable ||
-            pendingAction.isResponding ||
-            (pendingAction.isLastQuestion ? !pendingAction.isComplete : !pendingAction.canAdvance)
-          }
-        >
-          {formatPendingPrimaryActionLabel({
-            compact,
-            isLastQuestion: pendingAction.isLastQuestion,
-            isResponding: pendingAction.isResponding,
-            questionIndex: pendingAction.questionIndex,
-          })}
-        </button>
+        {isSendDisabled ? (
+          <Tooltip>
+            <TooltipTrigger render={<span className="inline-flex" tabIndex={0} />}>
+              {pendingSubmitButton}
+            </TooltipTrigger>
+            <TooltipPopup>{sendDisabledReason}</TooltipPopup>
+          </Tooltip>
+        ) : (
+          pendingSubmitButton
+        )}
       </div>
     );
   }
@@ -211,23 +225,21 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
     );
   }
 
+  const sendButtonDisabled =
+    isSendBusy || isSendDisabled || isConnecting || isEnvironmentUnavailable || !hasSendableContent;
   const sendButton = (
     <button
       type="submit"
       className={cn(
         "relative isolate flex h-9 w-9 items-center justify-center overflow-hidden rounded-full shadow-xs transition-all duration-150 enabled:cursor-pointer enabled:inset-shadow-2xs enabled:inset-shadow-white/16 hover:scale-105 active:inset-shadow-black/8 active:shadow-none disabled:pointer-events-none disabled:opacity-64 disabled:shadow-none disabled:hover:scale-100 sm:h-8 sm:w-8",
-        stageBackdropVariant
-          ? "bg-transparent text-white enabled:shadow-black/24 enabled:hover:brightness-110"
-          : "bg-message-action text-message-action-foreground enabled:shadow-message-action/24 hover:bg-message-action-hover",
+        sendButtonDisabled
+          ? "border border-input bg-transparent text-muted-foreground"
+          : stageBackdropVariant
+            ? "bg-transparent text-white enabled:shadow-black/24 enabled:hover:brightness-110"
+            : "bg-message-action text-message-action-foreground enabled:shadow-message-action/24 hover:bg-message-action-hover",
       )}
       {...pointerFocusProps}
-      disabled={
-        isSendBusy ||
-        isSendDisabled ||
-        isConnecting ||
-        isEnvironmentUnavailable ||
-        !hasSendableContent
-      }
+      disabled={sendButtonDisabled}
       aria-label={
         isEnvironmentUnavailable
           ? "Environment disconnected"
@@ -244,7 +256,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
                     : "Send message"
       }
     >
-      {stageBackdropVariant ? (
+      {stageBackdropVariant && !sendButtonDisabled ? (
         <span className="absolute inset-0 -z-10" aria-hidden="true">
           <StageBackdropButtonArt variant={stageBackdropVariant} />
         </span>

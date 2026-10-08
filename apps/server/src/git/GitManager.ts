@@ -30,6 +30,7 @@ import {
   type VcsStatusRemoteResult,
   VcsStatusResult,
   ModelSelection,
+  TextGenerationError,
   type ProjectId,
   SourceControlProviderError,
   type SourceControlProviderKind,
@@ -57,6 +58,7 @@ import {
 
 import { GitManagerError, GitPullRequestMaterializationError } from "@t3tools/contracts";
 import * as TextGeneration from "../textGeneration/TextGeneration.ts";
+import { resolveTextGenerationModelForCwd } from "../textGeneration/TextGenerationModelSelection.ts";
 import {
   conventionalCommitsTextGenerationPolicy,
   customTextGenerationPolicy,
@@ -94,7 +96,7 @@ export type GitBranchPullRequest = NonNullable<VcsStatusResult["pr"]> & {
 };
 
 interface SourceControlTextGenerationSettings {
-  readonly modelSelection: ModelSelection;
+  readonly modelSelection: Effect.Effect<ModelSelection, TextGenerationError>;
   readonly style: SourceControlWritingStyleSettings;
 }
 
@@ -758,7 +760,11 @@ export const make = Effect.gen(function* () {
         Effect.orElseSucceed(() => []),
       );
 
-  const resolveStylePolicy = (cwd: string, settings: SourceControlTextGenerationSettings) =>
+  const resolveStylePolicy = (
+    cwd: string,
+    settings: SourceControlTextGenerationSettings,
+    modelSelection: ModelSelection,
+  ) =>
     Effect.gen(function* () {
       switch (settings.style.mode) {
         case "conventional_commits":
@@ -776,10 +782,10 @@ export const make = Effect.gen(function* () {
           const subjects = yield* readRecentCommitSubjects(cwd);
           const agentInstructions = yield* readRepositoryInstructions(cwd, "AGENTS.md");
           const isClaudeWriter =
-            settings.modelSelection.instanceId === "claudeAgent" ||
+            modelSelection.instanceId === "claudeAgent" ||
             (yield* providerRegistry.getProviders).some(
               (provider) =>
-                provider.instanceId === settings.modelSelection.instanceId &&
+                provider.instanceId === modelSelection.instanceId &&
                 provider.driver === "claudeAgent",
             );
           const claudeInstructions = isClaudeWriter
@@ -1698,8 +1704,17 @@ export const make = Effect.gen(function* () {
       upstreamRef: string | null;
       hasUpstream: boolean;
     } | null = null;
+    const explicitResultPr =
+      (result.pr.status === "created" || result.pr.status === "opened_existing") && result.pr.url
+        ? {
+            url: result.pr.url,
+            state: "open" as const,
+          }
+        : null;
 
-    if (result.action !== "commit") {
+    // A confirmed PR already determines its View action. Optional status for the
+    // toast must not erase that result before the caller can save its link.
+    if (result.action !== "commit" && explicitResultPr === null) {
       const finalStatus = yield* gitCore.statusDetails(cwd);
       if (finalStatus.branch) {
         finalBranchContext = {
@@ -1711,13 +1726,6 @@ export const make = Effect.gen(function* () {
       }
     }
 
-    const explicitResultPr =
-      (result.pr.status === "created" || result.pr.status === "opened_existing") && result.pr.url
-        ? {
-            url: result.pr.url,
-            state: "open" as const,
-          }
-        : null;
     const shouldLookupExistingOpenPr =
       (result.action === "commit_push" || result.action === "push") &&
       result.push.status === "pushed" &&
@@ -1865,7 +1873,8 @@ export const make = Effect.gen(function* () {
         };
       }
 
-      const policy = yield* resolveStylePolicy(input.cwd, input.settings);
+      const modelSelection = yield* input.settings.modelSelection;
+      const policy = yield* resolveStylePolicy(input.cwd, input.settings, modelSelection);
 
       const generated = yield* textGeneration
         .generateCommitMessage({
@@ -1875,7 +1884,7 @@ export const make = Effect.gen(function* () {
           stagedPatch: limitContext(context.stagedPatch, 50_000),
           ...(input.includeBranch ? { includeBranch: true } : {}),
           ...(policy ? { policy } : {}),
-          modelSelection: input.settings.modelSelection,
+          modelSelection,
         })
         .pipe(Effect.map((result) => sanitizeCommitMessage(result)));
 
@@ -2006,8 +2015,16 @@ export const make = Effect.gen(function* () {
     cwd: string,
     fallbackBranch: string | null,
     emit: GitActionProgressEmitter,
+    pullRequest?: GitRunStackedActionInput["pullRequest"],
   ) {
     const provider = yield* sourceControlProvider(cwd);
+    if (pullRequest?.draft && provider.kind !== "github") {
+      return yield* new GitManagerError({
+        operation: "runPrStep",
+        cwd,
+        detail: "Creating draft pull requests is currently supported for GitHub repositories.",
+      });
+    }
     const terms = getChangeRequestTerminologyForKind(provider.kind);
     const details = yield* gitCore.statusDetails(cwd);
     const branch = details.branch ?? fallbackBranch;
@@ -2044,30 +2061,38 @@ export const make = Effect.gen(function* () {
     }
 
     const baseBranch = yield* resolveBaseBranch(cwd, branch, details.upstreamRef, headContext);
+    const manualContent = pullRequest?.title !== undefined ? pullRequest : undefined;
     yield* emit({
       kind: "phase_started",
       phase: "pr",
-      label: `Generating ${terms.shortLabel} content...`,
+      label: manualContent
+        ? `Preparing ${terms.shortLabel}...`
+        : `Generating ${terms.shortLabel} content...`,
     });
-    const baseRangeRef = yield* resolveBaseRangeRef(cwd, baseBranch);
-    const rangeContext = yield* gitCore.readRangeContext(cwd, baseRangeRef);
-    const policy = yield* resolveStylePolicy(cwd, settings);
-    const changeRequestTemplate =
-      settings.style.followChangeRequestTemplates && provider.kind === "github"
-        ? Option.getOrUndefined(yield* detectPrTemplate(cwd, baseRangeRef, gitCore.execute))
-        : undefined;
+    const generated =
+      manualContent ??
+      (yield* Effect.gen(function* () {
+        const baseRangeRef = yield* resolveBaseRangeRef(cwd, baseBranch);
+        const rangeContext = yield* gitCore.readRangeContext(cwd, baseRangeRef);
+        const modelSelection = yield* settings.modelSelection;
+        const policy = yield* resolveStylePolicy(cwd, settings, modelSelection);
+        const changeRequestTemplate =
+          settings.style.followChangeRequestTemplates && provider.kind === "github"
+            ? Option.getOrUndefined(yield* detectPrTemplate(cwd, baseRangeRef, gitCore.execute))
+            : undefined;
 
-    const generated = yield* textGeneration.generatePrContent({
-      cwd,
-      baseBranch,
-      headBranch: headContext.headBranch,
-      commitSummary: limitContext(rangeContext.commitSummary, 20_000),
-      diffSummary: limitContext(rangeContext.diffSummary, 20_000),
-      diffPatch: limitContext(rangeContext.diffPatch, 60_000),
-      ...(changeRequestTemplate ? { changeRequestTemplate } : {}),
-      ...(policy ? { policy } : {}),
-      modelSelection: settings.modelSelection,
-    });
+        return yield* textGeneration.generatePrContent({
+          cwd,
+          baseBranch,
+          headBranch: headContext.headBranch,
+          commitSummary: limitContext(rangeContext.commitSummary, 20_000),
+          diffSummary: limitContext(rangeContext.diffSummary, 20_000),
+          diffPatch: limitContext(rangeContext.diffPatch, 60_000),
+          ...(changeRequestTemplate ? { changeRequestTemplate } : {}),
+          ...(policy ? { policy } : {}),
+          modelSelection,
+        });
+      }));
 
     const bodyFile = path.join(
       tempDir,
@@ -2089,15 +2114,28 @@ export const make = Effect.gen(function* () {
       phase: "pr",
       label: `Creating ${terms.singular}...`,
     });
-    yield* provider
+    const createdIdentity = yield* provider
       .createChangeRequest({
         cwd,
         baseRefName: baseBranch,
         headSelector: headContext.preferredHeadSelector,
         title: generated.title,
         bodyFile,
+        ...(pullRequest?.draft !== undefined ? { draft: pullRequest.draft } : {}),
       })
       .pipe(Effect.ensuring(fileSystem.remove(bodyFile).pipe(Effect.ignore)));
+
+    // Creation already returned this identity. A later list can be stale or
+    // unavailable and must not turn that success into an unlinked PR or failure.
+    if (createdIdentity) {
+      return {
+        status: "created" as const,
+        ...createdIdentity,
+        baseBranch,
+        headBranch: headContext.headBranch,
+        title: generated.title,
+      };
+    }
 
     const created = yield* findOpenPr(cwd, headContext);
     if (!created) {
@@ -2628,8 +2666,7 @@ export const make = Effect.gen(function* () {
     const existingBranchNames = yield* gitCore.listLocalBranchNames(cwd);
     const resolvedBranch = resolveAutoFeatureBranchName(existingBranchNames, preferredBranch);
 
-    yield* gitCore.createRef({ cwd, refName: resolvedBranch });
-    yield* Effect.scoped(gitCore.switchRef({ cwd, refName: resolvedBranch }));
+    yield* gitCore.createRef({ cwd, refName: resolvedBranch, switchRef: true });
 
     return {
       branchStep: { status: "created" as const, name: resolvedBranch },
@@ -2648,6 +2685,14 @@ export const make = Effect.gen(function* () {
         GitManagerServiceError
       > {
         const initialStatus = yield* gitCore.statusDetails(input.cwd);
+        if (input.expectedBranch !== undefined && input.expectedBranch !== initialStatus.branch) {
+          return yield* new GitManagerError({
+            operation: "runStackedAction",
+            cwd: input.cwd,
+            detail:
+              "The checked-out branch changed. Review the current branch and choose the Git action again.",
+          });
+        }
         const wantsCommit = isCommitAction(input.action);
         const wantsPush =
           input.action === "push" ||
@@ -2704,21 +2749,20 @@ export const make = Effect.gen(function* () {
         let preResolvedCommitSuggestion: CommitAndBranchSuggestion | undefined = undefined;
 
         const textGenerationSettings = yield* projectSettingsFor(input).pipe(
-          Effect.flatMap((settings) =>
-            settings.sourceControlWriterModelSelection === null
-              ? Effect.succeed({
-                  modelSelection: settings.textGenerationModelSelection,
-                  style: settings.sourceControlWritingStyle,
-                })
-              : providerRegistry.getProviders.pipe(
-                  Effect.map((providers) => ({
-                    modelSelection: ServerSettings.resolveSourceControlWriterModelSelection(
-                      settings,
-                      providers,
-                    ),
-                    style: settings.sourceControlWritingStyle,
-                  })),
-                ),
+          Effect.flatMap(
+            Effect.fnUntraced(function* (settings) {
+              // Manual messages and existing PRs never need a model probe. The
+              // generated phases share one selection for this action.
+              const modelSelection = yield* Effect.cached(
+                resolveTextGenerationModelForCwd({
+                  registry: providerRegistry,
+                  settings,
+                  cwd: input.cwd,
+                  purpose: "source-control",
+                }),
+              );
+              return { modelSelection, style: settings.sourceControlWritingStyle };
+            }),
           ),
           Effect.mapError(
             (cause) =>
@@ -2802,7 +2846,13 @@ export const make = Effect.gen(function* () {
               .pipe(
                 Effect.tap(() => Ref.set(currentPhase, Option.some("pr"))),
                 Effect.flatMap(() =>
-                  runPrStep(textGenerationSettings, input.cwd, currentBranch, progress.emit),
+                  runPrStep(
+                    textGenerationSettings,
+                    input.cwd,
+                    currentBranch,
+                    progress.emit,
+                    input.pullRequest,
+                  ),
                 ),
               )
           : { status: "skipped_not_requested" as const };

@@ -12,6 +12,7 @@
  */
 import type {
   OrchestrationClientOrigin,
+  CommandId,
   OrchestrationCommand,
   OrchestrationEvent,
   ThreadId,
@@ -72,7 +73,12 @@ export interface OrchestrationEngineShape {
    */
   readonly dispatch: (
     command: OrchestrationCommand,
-    options?: { readonly origin?: OrchestrationClientOrigin },
+    options?: {
+      readonly origin?: OrchestrationClientOrigin;
+      /** Server-only authority after an explicit prepared-turn retry preflight. */
+      readonly preparedTurnRecoveryId?: CommandId;
+      readonly continueAfterInterruptedSetup?: boolean;
+    },
   ) => Effect.Effect<{ sequence: number }, OrchestrationDispatchError, never>;
 
   /**

@@ -196,6 +196,8 @@ const ConfigWarningType = Schema.Literal("config.warning");
 const DeprecationNoticeType = Schema.Literal("deprecation.notice");
 const FilesPersistedType = Schema.Literal("files.persisted");
 const ToolDeniedType = Schema.Literal("tool.denied");
+const SkillsResolvedType = Schema.Literal("skills.resolved");
+const SkillsResolutionFailedType = Schema.Literal("skills.resolution-failed");
 const RuntimeWarningType = Schema.Literal("runtime.warning");
 const RuntimeErrorType = Schema.Literal("runtime.error");
 
@@ -431,6 +433,8 @@ export type ToolActivitySource = typeof ToolActivitySource.Type;
 
 export const ItemLifecyclePayload = Schema.Struct({
   itemType: CanonicalItemType,
+  /** Complete runtime-owned text replacing provisional assistant deltas, including an empty result. */
+  authoritativeText: Schema.optional(Schema.String),
   status: Schema.optional(RuntimeItemStatus),
   title: Schema.optional(TrimmedNonEmptyStringSchema),
   detail: Schema.optional(TrimmedNonEmptyStringSchema),
@@ -801,6 +805,16 @@ const ToolDeniedPayload = Schema.Struct({
 });
 export type ToolDeniedPayload = typeof ToolDeniedPayload.Type;
 
+// The native envelope owns the skill keys and structured failure reason.
+// Keep it intact instead of maintaining a second copy of the native enum.
+export const SkillResolutionPayload = Schema.Struct({
+  nativeEvent: UnknownRecordSchema,
+  nativeSourceEventId: TrimmedNonEmptyStringSchema,
+  nativeSessionId: TrimmedNonEmptyStringSchema,
+  nativeDeliveryId: TrimmedNonEmptyStringSchema,
+});
+export type SkillResolutionPayload = typeof SkillResolutionPayload.Type;
+
 const RuntimeWarningPayload = Schema.Struct({
   message: TrimmedNonEmptyStringSchema,
   detail: Schema.optional(Schema.Unknown),
@@ -1160,6 +1174,21 @@ const ProviderRuntimeToolDeniedEvent = Schema.Struct({
 });
 export type ProviderRuntimeToolDeniedEvent = typeof ProviderRuntimeToolDeniedEvent.Type;
 
+const ProviderRuntimeSkillsResolvedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: SkillsResolvedType,
+  payload: SkillResolutionPayload,
+});
+export type ProviderRuntimeSkillsResolvedEvent = typeof ProviderRuntimeSkillsResolvedEvent.Type;
+
+const ProviderRuntimeSkillsResolutionFailedEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: SkillsResolutionFailedType,
+  payload: SkillResolutionPayload,
+});
+export type ProviderRuntimeSkillsResolutionFailedEvent =
+  typeof ProviderRuntimeSkillsResolutionFailedEvent.Type;
+
 const ProviderRuntimeWarningEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
   type: RuntimeWarningType,
@@ -1222,6 +1251,8 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeDeprecationNoticeEvent,
   ProviderRuntimeFilesPersistedEvent,
   ProviderRuntimeToolDeniedEvent,
+  ProviderRuntimeSkillsResolvedEvent,
+  ProviderRuntimeSkillsResolutionFailedEvent,
   ProviderRuntimeWarningEvent,
   ProviderRuntimeErrorEvent,
 ]);

@@ -1,5 +1,7 @@
 # Remote access
 
+This is an inherited reference for the original T3 product. Remote installation and these CLI commands are not supported setup steps for the Meerkat pilot. Use the [local Mac setup](getting-started.md). An existing compatible server must supply its own pairing link through its connection settings or operator.
+
 Connect a phone, browser, or another desktop app to T3 Code running on a different
 machine. That machine must stay running and reachable while you work.
 

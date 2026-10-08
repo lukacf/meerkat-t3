@@ -4,14 +4,17 @@ import {
   DesktopTelemetryControlMessage,
 } from "@t3tools/contracts";
 import { assert, describe, it } from "@effect/vitest";
+import * as Cause from "effect/Cause";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as PlatformError from "effect/PlatformError";
+import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -73,7 +76,9 @@ function makeProcess(options?: {
   readonly stdout?: Stream.Stream<Uint8Array, PlatformError.PlatformError>;
   readonly stderr?: Stream.Stream<Uint8Array, PlatformError.PlatformError>;
   readonly exitCode?: Effect.Effect<ChildProcessSpawner.ExitCode, PlatformError.PlatformError>;
+  readonly isRunning?: Effect.Effect<boolean, PlatformError.PlatformError>;
   readonly kill?: ChildProcessSpawner.ChildProcessHandle["kill"];
+  readonly getInputFd?: ChildProcessSpawner.ChildProcessHandle["getInputFd"];
   readonly getOutputFd?: ChildProcessSpawner.ChildProcessHandle["getOutputFd"];
 }): ChildProcessSpawner.ChildProcessHandle {
   return ChildProcessSpawner.makeHandle({
@@ -82,10 +87,10 @@ function makeProcess(options?: {
     stderr: options?.stderr ?? Stream.empty,
     all: Stream.merge(options?.stdout ?? Stream.empty, options?.stderr ?? Stream.empty),
     exitCode: options?.exitCode ?? Effect.succeed(ChildProcessSpawner.ExitCode(0)),
-    isRunning: Effect.succeed(false),
+    isRunning: options?.isRunning ?? Effect.succeed(false),
     kill: options?.kill ?? (() => Effect.void),
     stdin: Sink.drain,
-    getInputFd: () => Sink.drain,
+    getInputFd: options?.getInputFd ?? (() => Sink.drain),
     getOutputFd: options?.getOutputFd ?? (() => Stream.empty),
     unref: Effect.succeed(Effect.void),
   });
@@ -199,6 +204,7 @@ describe("DesktopBackendManager", () => {
         let telemetryJson = "";
         let readyCount = 0;
         const ready = yield* Deferred.make<void>();
+        const telemetryRead = yield* Deferred.make<void>();
         const exited = yield* Queue.unbounded<void>();
 
         const spawnerLayer = Layer.succeed(
@@ -211,14 +217,23 @@ describe("DesktopBackendManager", () => {
                 if (fd3?.type === "input" && fd3.stream) {
                   bootstrapJson = yield* fd3.stream.pipe(Stream.decodeText(), Stream.mkString);
                 }
-                const fd4 = command.options.additionalFds?.fd4;
-                if (fd4?.type === "input" && fd4.stream) {
-                  telemetryJson = yield* fd4.stream.pipe(Stream.decodeText(), Stream.mkString);
-                }
               }
 
               return makeProcess({
-                exitCode: Deferred.await(ready).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
+                getInputFd: () =>
+                  Sink.forEach((chunk: Uint8Array) =>
+                    Effect.sync(() => {
+                      telemetryJson += new TextDecoder().decode(chunk);
+                    }),
+                  ).pipe(
+                    Sink.mapEffect(() =>
+                      Deferred.succeed(telemetryRead, undefined).pipe(Effect.asVoid),
+                    ),
+                  ),
+                exitCode: Deferred.await(ready).pipe(
+                  Effect.andThen(Deferred.await(telemetryRead)),
+                  Effect.as(ChildProcessSpawner.ExitCode(0)),
+                ),
               });
             }),
           ),
@@ -260,6 +275,7 @@ describe("DesktopBackendManager", () => {
         assert.isDefined(spawnedCommand.options.forceKillAfter);
         assert.equal(spawnedCommand.options.additionalFds?.fd4?.type, "input");
         assert.equal(spawnedCommand.options.additionalFds?.fd5?.type, "output");
+        assert.notProperty(spawnedCommand.options.additionalFds, "fd6");
         assert.equal(
           Duration.toMillis(Duration.fromInputUnsafe(spawnedCommand.options.forceKillAfter)),
           2_000,
@@ -529,9 +545,10 @@ describe("DesktopBackendManager", () => {
     }),
   );
 
-  it.effect("reports child exit before waiting for trailing output to drain", () =>
+  it.effect("keeps draining an observed exit when its process scope closes", () =>
     Effect.scoped(
       Effect.gen(function* () {
+        const processScope = yield* Scope.fork(yield* Scope.Scope);
         const exitObserved = yield* Deferred.make<void>();
         const finishOutputDrain = yield* Deferred.make<void>();
         const spawnerLayer = Layer.succeed(
@@ -556,15 +573,515 @@ describe("DesktopBackendManager", () => {
           onExitObserved: () => Deferred.succeed(exitObserved, void 0).pipe(Effect.asVoid),
         }).pipe(
           Effect.provide(Layer.merge(spawnerLayer, healthyHttpClientLayer)),
+          Scope.provide(processScope),
           Effect.forkChild,
         );
 
         yield* Deferred.await(exitObserved);
+        yield* Scope.close(processScope, Exit.void);
         assert.isUndefined(runFiber.pollUnsafe());
 
         yield* Deferred.succeed(finishOutputDrain, void 0);
         assert.equal((yield* Fiber.join(runFiber)).code.pipe(Option.getOrUndefined), 1);
       }),
+    ),
+  );
+
+  it.effect("does not advertise a parent lifetime descriptor through stdin bootstrap", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        let bootstrapJson = "";
+        const spawnerLayer = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make((command) =>
+            Effect.gen(function* () {
+              if (command._tag !== "StandardCommand" || !Stream.isStream(command.options.stdin)) {
+                throw new Error("Expected a backend bootstrap stream on stdin.");
+              }
+              assert.isUndefined(command.options.additionalFds);
+              bootstrapJson = yield* command.options.stdin.pipe(
+                Stream.decodeText(),
+                Stream.mkString,
+              );
+              return makeProcess({
+                getInputFd: (fd) => {
+                  assert.notEqual(fd, 6);
+                  return Sink.drain;
+                },
+              });
+            }),
+          ),
+        );
+        yield* DesktopBackendManager.runBackendProcess({
+          ...baseConfig,
+          bootstrapDelivery: "stdin",
+          bootstrap: { ...baseConfig.bootstrap, desktopParentLifetimeFd: 6 },
+          desktopTelemetryStream: Stream.empty,
+        }).pipe(Effect.provide(Layer.merge(spawnerLayer, healthyHttpClientLayer)));
+        assert.notProperty(yield* decodeBootstrap(bootstrapJson), "desktopParentLifetimeFd");
+      }),
+    ),
+  );
+
+  it.effect("keeps the parent lifetime input open until backend scope shutdown", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const processScope = yield* Scope.fork(yield* Scope.Scope);
+        const started = yield* Deferred.make<void>();
+        const lifetimeOpened = yield* Deferred.make<void>();
+        const lifetimeEnded = yield* Deferred.make<void>();
+        const telemetryEnded = yield* Deferred.make<void>();
+        const signaled = yield* Deferred.make<void>();
+        const events: Array<string> = [];
+        let spawnedCommand: ChildProcess.Command | undefined;
+        let lifetimeBytes = 0;
+        const spawnerLayer = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make((command) =>
+            Effect.gen(function* () {
+              spawnedCommand = command;
+              yield* Effect.addFinalizer(() => Effect.sync(() => events.push("group released")));
+              return makeProcess({
+                getInputFd: (fd) =>
+                  fd === 6
+                    ? Sink.unwrap(
+                        Deferred.succeed(lifetimeOpened, undefined).pipe(
+                          Effect.as(
+                            Sink.forEach((chunk: Uint8Array) =>
+                              Effect.sync(() => {
+                                lifetimeBytes += chunk.byteLength;
+                              }),
+                            ).pipe(
+                              Sink.mapEffect(() =>
+                                Effect.sync(() => events.push("lifetime ended")).pipe(
+                                  Effect.andThen(Deferred.succeed(lifetimeEnded, undefined)),
+                                  Effect.asVoid,
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      )
+                    : Sink.drain.pipe(
+                        Sink.mapEffect(() =>
+                          Deferred.succeed(telemetryEnded, undefined).pipe(Effect.asVoid),
+                        ),
+                      ),
+                exitCode: Deferred.await(signaled).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
+                isRunning: Deferred.isDone(signaled).pipe(Effect.map((done) => !done)),
+              });
+            }),
+          ),
+        );
+        const runFiber = yield* DesktopBackendManager.runBackendProcess({
+          ...baseConfig,
+          bootstrap: { ...baseConfig.bootstrap, desktopParentLifetimeFd: 6 },
+          desktopTelemetryStream: Stream.empty,
+          onStarted: () => Deferred.succeed(started, undefined).pipe(Effect.asVoid),
+          signalShutdown: () =>
+            Effect.sync(() => events.push("signal")).pipe(
+              Effect.andThen(Deferred.succeed(signaled, undefined)),
+              Effect.asVoid,
+            ),
+        }).pipe(
+          Effect.provide(Layer.merge(spawnerLayer, healthyHttpClientLayer)),
+          Scope.provide(processScope),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(started);
+        assert.isDefined(spawnedCommand);
+        if (spawnedCommand._tag !== "StandardCommand") {
+          throw new Error("Expected backend to spawn a standard command.");
+        }
+        assert.deepEqual(spawnedCommand.options.additionalFds?.fd6, { type: "input" });
+        yield* Deferred.await(lifetimeOpened);
+        yield* Deferred.await(telemetryEnded);
+        assert.isFalse(yield* Deferred.isDone(lifetimeEnded));
+        assert.equal(lifetimeBytes, 0);
+
+        yield* Scope.close(processScope, Exit.void);
+        assert.equal(Option.getOrUndefined((yield* Fiber.join(runFiber)).code), 0);
+        assert.isTrue(yield* Deferred.isDone(lifetimeEnded));
+        assert.deepEqual(events, ["lifetime ended", "signal", "group released"]);
+      }),
+    ),
+  );
+
+  it.effect("ends only the stopping backend's telemetry input before signaling it", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const processScope = yield* Scope.fork(yield* Scope.Scope);
+        const started = yield* Deferred.make<void>();
+        const subscribed = yield* Deferred.make<void>();
+        const inputEnded = yield* Deferred.make<void>();
+        const signaled = yield* Deferred.make<void>();
+        const publisher = yield* PubSub.unbounded<Uint8Array>();
+        const otherBackend = yield* PubSub.subscribe(publisher);
+        const events: Array<string> = [];
+        const sharedStream = Stream.unwrap(
+          PubSub.subscribe(publisher).pipe(
+            Effect.tap(() => Deferred.succeed(subscribed, undefined)),
+            Effect.map(Stream.fromSubscription),
+          ),
+        );
+        const spawnerLayer = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.gen(function* () {
+              yield* Effect.addFinalizer(() => Effect.sync(() => events.push("group released")));
+              return makeProcess({
+                getInputFd: () =>
+                  Sink.drain.pipe(
+                    Sink.mapEffect(() =>
+                      Effect.sync(() => events.push("input ended")).pipe(
+                        Effect.andThen(Deferred.succeed(inputEnded, undefined)),
+                        Effect.asVoid,
+                      ),
+                    ),
+                  ),
+                exitCode: Deferred.await(signaled).pipe(
+                  Effect.andThen(Deferred.await(inputEnded)),
+                  Effect.as(ChildProcessSpawner.ExitCode(0)),
+                ),
+                isRunning: Deferred.isDone(signaled).pipe(Effect.map((done) => !done)),
+              });
+            }),
+          ),
+        );
+        const runFiber = yield* DesktopBackendManager.runBackendProcess({
+          ...baseConfig,
+          desktopTelemetryStream: sharedStream,
+          onStarted: () => Deferred.succeed(started, undefined).pipe(Effect.asVoid),
+          signalShutdown: () =>
+            Effect.sync(() => events.push("signal")).pipe(
+              Effect.andThen(Deferred.succeed(signaled, undefined)),
+              Effect.asVoid,
+            ),
+        }).pipe(
+          Effect.provide(Layer.merge(spawnerLayer, healthyHttpClientLayer)),
+          Scope.provide(processScope),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(started);
+        yield* Deferred.await(subscribed);
+        // No new sample arrives. Closing must interrupt the blocked pull and
+        // complete the sink normally, which is what sends descriptor EOF.
+        yield* Scope.close(processScope, Exit.void);
+        assert.equal(Option.getOrUndefined((yield* Fiber.join(runFiber)).code), 0);
+        assert.deepEqual(events, ["input ended", "signal", "group released"]);
+
+        const sample = new TextEncoder().encode("another backend is still subscribed\n");
+        yield* PubSub.publish(publisher, sample);
+        assert.deepEqual(yield* PubSub.take(otherBackend), sample);
+      }),
+    ),
+  );
+
+  it.effect("still signals the backend when its telemetry writer cannot drain", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const processScope = yield* Scope.fork(yield* Scope.Scope);
+        const started = yield* Deferred.make<void>();
+        const writeBlocked = yield* Deferred.make<void>();
+        const sourceEnded = yield* Deferred.make<void>();
+        const signaled = yield* Deferred.make<void>();
+        const spawnerLayer = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.succeed(
+              makeProcess({
+                getInputFd: () =>
+                  Sink.forEach(() =>
+                    Deferred.succeed(writeBlocked, undefined).pipe(Effect.andThen(Effect.never)),
+                  ),
+                exitCode: Deferred.await(signaled).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
+                isRunning: Deferred.isDone(signaled).pipe(Effect.map((done) => !done)),
+              }),
+            ),
+          ),
+        );
+        const runFiber = yield* DesktopBackendManager.runBackendProcess({
+          ...baseConfig,
+          desktopTelemetryStream: Stream.make(new Uint8Array([1])).pipe(
+            Stream.concat(Stream.never),
+            Stream.ensuring(Deferred.succeed(sourceEnded, undefined)),
+          ),
+          onStarted: () => Deferred.succeed(started, undefined).pipe(Effect.asVoid),
+          signalShutdown: () => Deferred.succeed(signaled, undefined).pipe(Effect.asVoid),
+        }).pipe(
+          Effect.provide(Layer.merge(spawnerLayer, healthyHttpClientLayer)),
+          Scope.provide(processScope),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(started);
+        yield* Deferred.await(writeBlocked);
+        const closeFiber = yield* Scope.close(processScope, Exit.void).pipe(Effect.forkChild);
+        yield* TestClock.adjust(Duration.seconds(1));
+        yield* Deferred.await(signaled);
+        yield* Fiber.join(closeFiber);
+        assert.equal(Option.getOrUndefined((yield* Fiber.join(runFiber)).code), 0);
+        yield* Deferred.await(sourceEnded);
+      }).pipe(Effect.provide(TestClock.layer())),
+    ),
+  );
+
+  it.effect("lets the backend finish native cleanup before releasing its process group", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const processScope = yield* Scope.fork(yield* Scope.Scope);
+        const started = yield* Deferred.make<void>();
+        const signaled = yield* Deferred.make<void>();
+        const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+        const events: Array<string> = [];
+        const spawnerLayer = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.gen(function* () {
+              yield* Effect.addFinalizer(() => Effect.sync(() => events.push("group released")));
+              return makeProcess({
+                exitCode: Deferred.await(exited),
+                isRunning: Deferred.isDone(exited).pipe(Effect.map((done) => !done)),
+              });
+            }),
+          ),
+        );
+        const runFiber = yield* DesktopBackendManager.runBackendProcess({
+          ...baseConfig,
+          desktopTelemetryStream: Stream.empty,
+          onStarted: () => Deferred.succeed(started, undefined).pipe(Effect.asVoid),
+          signalShutdown: (pid) =>
+            Effect.sync(() => events.push(`signal:${pid}`)).pipe(
+              Effect.andThen(Deferred.succeed(signaled, undefined)),
+              Effect.asVoid,
+            ),
+        }).pipe(
+          Effect.provide(Layer.merge(spawnerLayer, healthyHttpClientLayer)),
+          Scope.provide(processScope),
+          Effect.forkChild,
+        );
+        yield* Deferred.await(started);
+        const closeFiber = yield* Scope.close(processScope, Exit.void).pipe(Effect.forkChild);
+        yield* Deferred.await(signaled);
+        // Native cleanup may take 342s plus 5s of escalation. Neither the old
+        // 2s process grace nor the old 5s application timeout may cut it short.
+        yield* TestClock.adjust(Duration.seconds(348));
+        assert.deepEqual(events, ["signal:123"]);
+        assert.isUndefined(closeFiber.pollUnsafe());
+        events.push("native cleanup complete");
+        yield* Deferred.succeed(exited, ChildProcessSpawner.ExitCode(0));
+        yield* Fiber.join(closeFiber);
+        assert.equal(Option.getOrUndefined((yield* Fiber.join(runFiber)).code), 0);
+        assert.deepEqual(events, ["signal:123", "native cleanup complete", "group released"]);
+      }).pipe(Effect.provide(TestClock.layer())),
+    ),
+  );
+
+  it.effect(
+    "bounds a hung backend and retains incomplete cleanup after escalation exits zero",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const processScope = yield* Scope.fork(yield* Scope.Scope);
+          const started = yield* Deferred.make<void>();
+          const signaled = yield* Deferred.make<void>();
+          const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+          const failures: Array<string> = [];
+          let groupReleases = 0;
+          const spawnerLayer = Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make(() =>
+              Effect.gen(function* () {
+                yield* Effect.addFinalizer(() =>
+                  Effect.gen(function* () {
+                    groupReleases += 1;
+                    yield* Deferred.succeed(exited, ChildProcessSpawner.ExitCode(0));
+                  }),
+                );
+                return makeProcess({
+                  exitCode: Deferred.await(exited),
+                  isRunning: Deferred.isDone(exited).pipe(Effect.map((done) => !done)),
+                });
+              }),
+            ),
+          );
+          const runFiber = yield* DesktopBackendManager.runBackendProcess({
+            ...baseConfig,
+            desktopTelemetryStream: Stream.empty,
+            onStarted: () => Deferred.succeed(started, undefined).pipe(Effect.asVoid),
+            signalShutdown: () => Deferred.succeed(signaled, undefined).pipe(Effect.asVoid),
+            onShutdownFailure: (error) =>
+              Effect.sync(() => {
+                failures.push(error.message);
+              }),
+          }).pipe(
+            Effect.provide(Layer.merge(spawnerLayer, healthyHttpClientLayer)),
+            Scope.provide(processScope),
+            Effect.exit,
+            Effect.forkChild,
+          );
+          yield* Deferred.await(started);
+          const closeFiber = yield* Scope.close(processScope, Exit.void).pipe(Effect.forkChild);
+          yield* Deferred.await(signaled);
+          yield* TestClock.adjust(Duration.minutes(10));
+          yield* Fiber.join(closeFiber);
+          assert.equal(groupReleases, 1);
+          assert.equal(failures.length, 1);
+          assert.include(failures[0]!, "cleanup is incomplete");
+          assert.include(failures[0]!, "600000ms");
+          const result = yield* Fiber.join(runFiber);
+          assert.isTrue(Exit.isFailure(result));
+          if (Exit.isFailure(result)) {
+            assert.instanceOf(
+              result.cause.reasons.find(Cause.isFailReason)?.error,
+              DesktopBackendManager.BackendProcessShutdownError,
+            );
+          }
+        }).pipe(Effect.provide(TestClock.layer())),
+      ),
+  );
+
+  it.effect(
+    "bounds a finalizer stop while retaining ownership until the backend really exits",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const spawned = yield* Deferred.make<void>();
+          const teardownStarted = yield* Deferred.make<void>();
+          const allowTeardown = yield* Deferred.make<void>();
+          const exited = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
+          const failures: Array<string> = [];
+          let spawnCount = 0;
+          const instance = yield* makeTestInstance({
+            spawnerLayer: Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make(() =>
+                Effect.gen(function* () {
+                  spawnCount += 1;
+                  yield* Effect.addFinalizer(() =>
+                    Effect.gen(function* () {
+                      yield* Deferred.succeed(teardownStarted, undefined);
+                      // Models the spawner's exit wait after its group signals: it
+                      // can remain pending even when its nominal grace has elapsed.
+                      yield* Deferred.await(allowTeardown);
+                      yield* Deferred.succeed(exited, ChildProcessSpawner.ExitCode(0));
+                    }),
+                  );
+                  yield* Deferred.succeed(spawned, undefined);
+                  return makeProcess({ exitCode: Deferred.await(exited) });
+                }),
+              ),
+            ),
+            httpClientLayer: httpClientLayer(() => Effect.never),
+            backendOutputLog: {
+              persistFailureSnapshot: ({ details }) =>
+                Effect.sync(() => {
+                  failures.push(details);
+                }),
+            },
+          });
+          yield* instance.start;
+          yield* Deferred.await(spawned);
+          const quitting = yield* Effect.scoped(Effect.addFinalizer(() => instance.stop())).pipe(
+            Effect.forkChild,
+          );
+          yield* Deferred.await(teardownStarted);
+          yield* TestClock.adjust(Duration.minutes(11));
+          yield* Fiber.join(quitting);
+          const snapshot = yield* instance.snapshot;
+          assert.equal(Option.getOrUndefined(snapshot.activePid), 123);
+          assert.isFalse(snapshot.desiredRunning);
+          assert.isFalse(snapshot.restartScheduled);
+          assert.equal(failures.length, 1);
+          assert.include(failures[0]!, "cleanup remains incomplete");
+          yield* instance.start;
+          assert.equal(spawnCount, 1);
+          assert.equal(Option.getOrUndefined((yield* instance.snapshot).activePid), 123);
+
+          // Finish the owned close before leaving this test's enclosing scope.
+          yield* Deferred.succeed(allowTeardown, undefined);
+          yield* instance.stop();
+          assert.isTrue(Option.isNone((yield* instance.snapshot).activePid));
+        }).pipe(Effect.provide(TestClock.layer())),
+      ),
+  );
+
+  it.effect("does not report a process exit when the exit observer is interrupted", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const observingExit = yield* Deferred.make<void>();
+        let observedExits = 0;
+        const spawnerLayer = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.succeed(
+              makeProcess({
+                exitCode: Deferred.succeed(observingExit, void 0).pipe(
+                  Effect.andThen(Effect.never),
+                ),
+              }),
+            ),
+          ),
+        );
+
+        const runFiber = yield* DesktopBackendManager.runBackendProcess({
+          ...baseConfig,
+          desktopTelemetryStream: Stream.empty,
+          onExitObserved: () =>
+            Effect.sync(() => {
+              observedExits += 1;
+            }),
+        }).pipe(
+          Effect.provide(Layer.merge(spawnerLayer, healthyHttpClientLayer)),
+          Effect.forkChild,
+        );
+
+        yield* Deferred.await(observingExit);
+        yield* Fiber.interrupt(runFiber);
+        assert.equal(observedExits, 0);
+      }),
+    ),
+  );
+
+  it.effect("bounds output draining after an observed exit", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const exitObserved = yield* Deferred.make<void>();
+        const outputStarted = yield* Deferred.make<void>();
+        const outputStopped = yield* Deferred.make<void>();
+        const spawnerLayer = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.succeed(
+              makeProcess({
+                stderr: Stream.fromEffect(
+                  Deferred.succeed(outputStarted, void 0).pipe(
+                    Effect.andThen(Effect.never),
+                    Effect.ensuring(Deferred.succeed(outputStopped, void 0)),
+                  ),
+                ),
+                exitCode: Deferred.await(outputStarted).pipe(
+                  Effect.as(ChildProcessSpawner.ExitCode(1)),
+                ),
+              }),
+            ),
+          ),
+        );
+
+        const runFiber = yield* DesktopBackendManager.runBackendProcess({
+          ...baseConfig,
+          desktopTelemetryStream: Stream.empty,
+          outputDrainTimeout: Duration.seconds(1),
+          onExitObserved: () => Deferred.succeed(exitObserved, void 0).pipe(Effect.asVoid),
+        }).pipe(
+          Effect.provide(Layer.merge(spawnerLayer, healthyHttpClientLayer)),
+          Effect.forkChild,
+        );
+
+        yield* Deferred.await(exitObserved);
+        yield* TestClock.adjust(Duration.seconds(1));
+        assert.equal((yield* Fiber.join(runFiber)).code.pipe(Option.getOrUndefined), 1);
+        assert.isTrue(yield* Deferred.isDone(outputStopped));
+      }).pipe(Effect.provide(TestClock.layer())),
     ),
   );
 
@@ -913,6 +1430,103 @@ describe("DesktopBackendManager", () => {
       }),
     ),
   );
+
+  for (const { exitCode, persistsFailure } of [
+    { exitCode: 0, persistsFailure: false },
+    { exitCode: 1, persistsFailure: true },
+  ]) {
+    it.effect(
+      `${persistsFailure ? "retains" : "discards"} drained shutdown output after a requested stop exits ${exitCode}`,
+      () =>
+        Effect.scoped(
+          Effect.gen(function* () {
+            const teardownStarted = yield* Deferred.make<void>();
+            const allowExit = yield* Deferred.make<void>();
+            const processExited = yield* Deferred.make<void>();
+            const outputDrainStarted = yield* Deferred.make<void>();
+            const allowOutput = yield* Deferred.make<void>();
+            const outputChunks: Array<string> = [];
+            const persisted: Array<{ readonly details: string; readonly chunks: Array<string> }> =
+              [];
+            let startCount = 0;
+            let discardedSessionCount = 0;
+            const spawnerLayer = Layer.succeed(
+              ChildProcessSpawner.ChildProcessSpawner,
+              ChildProcessSpawner.make(() =>
+                Effect.gen(function* () {
+                  startCount += 1;
+                  const scope = yield* Scope.Scope;
+                  yield* Scope.addFinalizer(
+                    scope,
+                    Deferred.succeed(teardownStarted, void 0).pipe(
+                      Effect.andThen(Deferred.await(allowExit)),
+                      Effect.andThen(Deferred.succeed(processExited, void 0)),
+                      Effect.asVoid,
+                    ),
+                  );
+                  return makeProcess({
+                    exitCode: Deferred.await(processExited).pipe(
+                      Effect.as(ChildProcessSpawner.ExitCode(exitCode)),
+                    ),
+                    stderr: Stream.fromEffect(
+                      Deferred.succeed(outputDrainStarted, void 0).pipe(
+                        Effect.andThen(Deferred.await(processExited)),
+                        Effect.andThen(Deferred.await(allowOutput)),
+                        Effect.as(new TextEncoder().encode("final shutdown diagnostic\n")),
+                      ),
+                    ),
+                  });
+                }),
+              ),
+            );
+            const instance = yield* makeTestInstance({
+              spawnerLayer,
+              httpClientLayer: httpClientLayer(() => Effect.never),
+              backendOutputLog: {
+                writeOutputChunk: (_streamName, chunk) =>
+                  Effect.sync(() => {
+                    outputChunks.push(new TextDecoder().decode(chunk));
+                  }),
+                persistFailure: ({ details }) =>
+                  Effect.sync(() => {
+                    persisted.push({ details, chunks: [...outputChunks] });
+                  }),
+                discardSession: Effect.sync(() => {
+                  discardedSessionCount += 1;
+                }),
+              },
+            });
+
+            yield* instance.start;
+            yield* Deferred.await(outputDrainStarted);
+            const stopFiber = yield* instance.stop().pipe(Effect.forkChild);
+            yield* Deferred.await(teardownStarted);
+            yield* Deferred.succeed(allowExit, void 0);
+            yield* Deferred.await(processExited);
+            assert.isUndefined(stopFiber.pollUnsafe());
+            assert.deepEqual(persisted, []);
+            assert.equal(discardedSessionCount, 0);
+
+            yield* Deferred.succeed(allowOutput, void 0);
+            yield* Fiber.join(stopFiber);
+            assert.deepEqual(outputChunks, ["final shutdown diagnostic\n"]);
+            assert.deepEqual(
+              persisted,
+              persistsFailure
+                ? [{ details: `pid=123 code=${exitCode}`, chunks: outputChunks }]
+                : [],
+            );
+            assert.equal(discardedSessionCount, persistsFailure ? 0 : 1);
+            const snapshot = yield* instance.snapshot;
+            assert.isFalse(snapshot.desiredRunning);
+            assert.isFalse(snapshot.restartScheduled);
+            assert.isTrue(Option.isNone(snapshot.activePid));
+            yield* TestClock.adjust(Duration.seconds(10));
+            assert.equal(startCount, 1);
+          }).pipe(Effect.provide(TestClock.layer())),
+        ),
+    );
+  }
 
   it.effect("restarts when start is requested during stop teardown", () =>
     Effect.scoped(
@@ -1504,7 +2118,7 @@ describe("DesktopBackendManager", () => {
     ),
   );
 
-  it.effect("stopAllPoolInstances bounds the quit finalizer when backends hang", () =>
+  it.effect("stopAllPoolInstances awaits concurrent backend cleanup before quitting", () =>
     Effect.scoped(
       Effect.gen(function* () {
         // Each backend's process-scope finalizer reports when it starts and
@@ -1530,7 +2144,11 @@ describe("DesktopBackendManager", () => {
                       Effect.asVoid,
                     ),
                   );
-                  return makeProcess({ exitCode: Effect.never });
+                  return makeProcess({
+                    exitCode: Deferred.await(allowTeardown).pipe(
+                      Effect.as(ChildProcessSpawner.ExitCode(0)),
+                    ),
+                  });
                 }),
               ),
             ),
@@ -1561,17 +2179,16 @@ describe("DesktopBackendManager", () => {
         const started = yield* Queue.takeN(teardownStarted, 2);
         assert.deepEqual(started.toSorted(), ["instance1", "instance2"]);
 
-        // Both backends are now hung in teardown. Advancing past the 5s
-        // budget must let the quit finalizer return without them.
+        // The manager owns escalation. The application must not abandon
+        // either stop when native cleanup takes longer than five seconds.
         yield* TestClock.adjust(Duration.seconds(5));
-        yield* Fiber.join(quitFiber);
+        assert.isUndefined(quitFiber.pollUnsafe());
         assert.equal(yield* Queue.size(teardownFinished), 0);
 
-        // The timed-out closes keep running in the background and finish
-        // once the backends unblock.
         yield* Deferred.succeed(allowTeardown, undefined);
         const finished = yield* Queue.takeN(teardownFinished, 2);
         assert.deepEqual(finished.toSorted(), ["instance1", "instance2"]);
+        yield* Fiber.join(quitFiber);
       }).pipe(Effect.provide(TestClock.layer())),
     ),
   );

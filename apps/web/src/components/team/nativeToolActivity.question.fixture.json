@@ -1,0 +1,1049 @@
+[
+  {
+    "id": "console-evt-1",
+    "dedupe_key": "console-event:default:console-evt-1",
+    "timestamp_ms": 1790877882707,
+    "runtime_key": "default",
+    "identity": "_system",
+    "conversation_id": "_system",
+    "kind": "runtime_bootstrapped",
+    "status": "delivered",
+    "frame_version": 1,
+    "cursor": "console:1",
+    "payload": {
+      "source": "unified_runtime"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "console-evt-1"
+    }
+  },
+  {
+    "id": "console-frame-ffc768817a8e6832e797b528328873388e230365d9fb323dc217faaaa46e48b8",
+    "dedupe_key": "send:default:reviewer:meerkat-app:235cd321-7e1a-4380-ac99-5b9b96675226",
+    "timestamp_ms": 1790878535928,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "user_input",
+    "status": "delivered",
+    "frame_version": 3,
+    "updated_at_ms": 1790878535937,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "cursor": "console:2",
+    "payload": {
+      "content": "UI_SKILL_SELECTED [review](meerkat-skill://78249a26-13e0-4f13-a9c7-a96c5d258502/review)",
+      "handling_mode": "queue",
+      "idempotency_key": "235cd321-7e1a-4380-ac99-5b9b96675226",
+      "origin": "meerkat-app",
+      "skill_refs": [
+        {
+          "kind": "structured",
+          "skill_name": "review",
+          "source_uuid": "78249a26-13e0-4f13-a9c7-a96c5d258502"
+        }
+      ]
+    },
+    "source": {
+      "kind": "send",
+      "source_cursor": "060aacc6ab9dd79e"
+    }
+  },
+  {
+    "id": "console-frame-ae75ee9c16c2c2f58de9db213edbbaa0d8f522999599b02d5fb19961aa730b4b",
+    "dedupe_key": "frame-update:console-frame-ffc768817a8e6832e797b528328873388e230365d9fb323dc217faaaa46e48b8:2",
+    "timestamp_ms": 1790878535928,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "frame_updated",
+    "status": "dispatching",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "parent_frame_id": "console-frame-ffc768817a8e6832e797b528328873388e230365d9fb323dc217faaaa46e48b8",
+    "caused_by_frame_id": "console-frame-ffc768817a8e6832e797b528328873388e230365d9fb323dc217faaaa46e48b8",
+    "cursor": "console:3",
+    "payload": {
+      "frame": {
+        "conversation_id": "reviewer",
+        "cursor": "console:2",
+        "dedupe_key": "send:default:reviewer:meerkat-app:235cd321-7e1a-4380-ac99-5b9b96675226",
+        "frame_version": 2,
+        "id": "console-frame-ffc768817a8e6832e797b528328873388e230365d9fb323dc217faaaa46e48b8",
+        "identity": "reviewer",
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "kind": "user_input",
+        "payload": {
+          "content": "UI_SKILL_SELECTED [review](meerkat-skill://78249a26-13e0-4f13-a9c7-a96c5d258502/review)",
+          "handling_mode": "queue",
+          "idempotency_key": "235cd321-7e1a-4380-ac99-5b9b96675226",
+          "origin": "meerkat-app",
+          "skill_refs": [
+            {
+              "kind": "structured",
+              "skill_name": "review",
+              "source_uuid": "78249a26-13e0-4f13-a9c7-a96c5d258502"
+            }
+          ]
+        },
+        "runtime_key": "default",
+        "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+        "source": {
+          "kind": "send",
+          "source_cursor": "060aacc6ab9dd79e"
+        },
+        "status": "dispatching",
+        "timestamp_ms": 1790878535928,
+        "updated_at_ms": 1790878535928
+      }
+    },
+    "source": {
+      "kind": "synthetic"
+    }
+  },
+  {
+    "id": "console-frame-6c085d7a9002d6e9151330de35e32cd95cbf24be6d06c968b46d60e98fa1ce01",
+    "dedupe_key": "frame-update:console-frame-ffc768817a8e6832e797b528328873388e230365d9fb323dc217faaaa46e48b8:3",
+    "timestamp_ms": 1790878535937,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "frame_updated",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "parent_frame_id": "console-frame-ffc768817a8e6832e797b528328873388e230365d9fb323dc217faaaa46e48b8",
+    "caused_by_frame_id": "console-frame-ffc768817a8e6832e797b528328873388e230365d9fb323dc217faaaa46e48b8",
+    "cursor": "console:4",
+    "payload": {
+      "frame": {
+        "conversation_id": "reviewer",
+        "cursor": "console:2",
+        "dedupe_key": "send:default:reviewer:meerkat-app:235cd321-7e1a-4380-ac99-5b9b96675226",
+        "frame_version": 3,
+        "id": "console-frame-ffc768817a8e6832e797b528328873388e230365d9fb323dc217faaaa46e48b8",
+        "identity": "reviewer",
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "kind": "user_input",
+        "payload": {
+          "content": "UI_SKILL_SELECTED [review](meerkat-skill://78249a26-13e0-4f13-a9c7-a96c5d258502/review)",
+          "handling_mode": "queue",
+          "idempotency_key": "235cd321-7e1a-4380-ac99-5b9b96675226",
+          "origin": "meerkat-app",
+          "skill_refs": [
+            {
+              "kind": "structured",
+              "skill_name": "review",
+              "source_uuid": "78249a26-13e0-4f13-a9c7-a96c5d258502"
+            }
+          ]
+        },
+        "runtime_key": "default",
+        "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+        "source": {
+          "kind": "send",
+          "source_cursor": "060aacc6ab9dd79e"
+        },
+        "status": "delivered",
+        "timestamp_ms": 1790878535928,
+        "updated_at_ms": 1790878535937
+      }
+    },
+    "source": {
+      "kind": "synthetic"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8ad-d11e-7231-b7c9-0ed259d4cebc",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8ad-d11e-7231-b7c9-0ed259d4cebc",
+    "timestamp_ms": 1790878535966,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "skills_resolved",
+    "status": "delivered",
+    "frame_version": 1,
+    "cursor": "console:5",
+    "payload": {
+      "injection_bytes": 163,
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "skills": [
+        {
+          "skill_name": "review",
+          "source_uuid": "78249a26-13e0-4f13-a9c7-a96c5d258502"
+        }
+      ],
+      "source_event_type": "skills_resolved",
+      "source_sequence": 1,
+      "type": "skills_resolved"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8ad-d11e-7231-b7c9-0ed259d4cebc"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8ad-d11e-7231-b7c9-0eeb4e8dee3c",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8ad-d11e-7231-b7c9-0eeb4e8dee3c",
+    "timestamp_ms": 1790878535966,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "run_started",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:6",
+    "payload": {
+      "identity": {
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+      },
+      "input": {
+        "content": [
+          {
+            "skill_key": {
+              "skill_name": "review",
+              "source_uuid": "78249a26-13e0-4f13-a9c7-a96c5d258502"
+            },
+            "text": "<skill source_uuid=\"78249a26-13e0-4f13-a9c7-a96c5d258502\" skill_name=\"review\">\nFollow repository conventions. Body marker: MANUAL_UI_HIDDEN_SECOND_78263.\n\n</skill>",
+            "type": "skill_context"
+          },
+          {
+            "text": "UI_SKILL_SELECTED [review](meerkat-skill://78249a26-13e0-4f13-a9c7-a96c5d258502/review)",
+            "type": "text"
+          }
+        ],
+        "kind": "content"
+      },
+      "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "source_event_type": "run_started",
+      "source_sequence": 2,
+      "type": "run_started"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8ad-d11e-7231-b7c9-0eeb4e8dee3c"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8ad-d11e-7231-b7c9-0ef43a289c20",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8ad-d11e-7231-b7c9-0ef43a289c20",
+    "timestamp_ms": 1790878535966,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "turn_started",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:7",
+    "payload": {
+      "assistant_message_id": "01a0f8ad-d118-7750-b416-299e2e740e20",
+      "identity": {
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+      },
+      "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "source_event_type": "turn_started",
+      "source_sequence": 3,
+      "turn_number": 0,
+      "type": "turn_started"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8ad-d11e-7231-b7c9-0ef43a289c20"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8ad-d12c-7f30-9c1a-be9eb128293e",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8ad-d12c-7f30-9c1a-be9eb128293e",
+    "timestamp_ms": 1790878535980,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "tool_call_requested",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:8",
+    "payload": {
+      "args": {
+        "questions": [
+          {
+            "allowCustom": false,
+            "id": "review",
+            "multiSelect": false,
+            "options": [
+              {
+                "id": "return-review",
+                "label": "Return review"
+              },
+              {
+                "id": "hold",
+                "label": "Hold"
+              }
+            ],
+            "question": "Return this review?"
+          }
+        ],
+        "title": "Manual UI review"
+      },
+      "id": "manual_ui_question_call",
+      "identity": {
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+      },
+      "name": "ui_multiple_choice",
+      "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "source_event_type": "tool_call_requested",
+      "source_sequence": 4,
+      "tool_call_id": "manual_ui_question_call",
+      "type": "tool_call_requested"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8ad-d12c-7f30-9c1a-be9eb128293e"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8ad-d12c-7f30-9c1a-bea30af37924",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8ad-d12c-7f30-9c1a-bea30af37924",
+    "timestamp_ms": 1790878535980,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "tool_execution_started",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:9",
+    "payload": {
+      "id": "manual_ui_question_call",
+      "identity": {
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+      },
+      "name": "ui_multiple_choice",
+      "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "source_event_type": "tool_execution_started",
+      "source_sequence": 5,
+      "tool_call_id": "manual_ui_question_call",
+      "type": "tool_execution_started"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8ad-d12c-7f30-9c1a-bea30af37924"
+    }
+  },
+  {
+    "id": "console-frame-5227841593b48776cce93b5d45887d6418135faaa0d5e7a022b1754aec4634a9",
+    "dedupe_key": "runtime-notice-snapshot-v2:default:01a0f8a3-d95c-7822-9134-dca558a68a67:0:9:full:643d5437104296e21d906ecb15b2c96ad278f20cfc4af53b12bb6069bd853726:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+    "timestamp_ms": 1790878537778,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "runtime_notice_snapshot",
+    "status": "completed",
+    "frame_version": 1,
+    "cursor": "console:10",
+    "payload": {
+      "complete": true,
+      "history_positions": [],
+      "notices": [],
+      "observed_through": "console:9",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "settled_attempts": []
+    },
+    "source": {
+      "kind": "session_history"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8ae-6c68-7c23-b9af-f8b2f2b30dda",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8ae-6c68-7c23-b9af-f8b2f2b30dda",
+    "timestamp_ms": 1790878575720,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "tool_execution_completed",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:11",
+    "payload": {
+      "content": [
+        {
+          "data": {
+            "answers": [
+              {
+                "customText": "",
+                "questionId": "review",
+                "selectedOptionIds": [
+                  "return-review"
+                ]
+              }
+            ],
+            "dismissed": false
+          },
+          "type": "structured"
+        }
+      ],
+      "duration_ms": 39742,
+      "id": "manual_ui_question_call",
+      "identity": {
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+      },
+      "is_error": false,
+      "name": "ui_multiple_choice",
+      "result": "{\"answers\":[{\"customText\":\"\",\"questionId\":\"review\",\"selectedOptionIds\":[\"return-review\"]}],\"dismissed\":false}",
+      "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "source_event_type": "tool_execution_completed",
+      "source_sequence": 6,
+      "tool_call_id": "manual_ui_question_call",
+      "type": "tool_execution_completed"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8ae-6c68-7c23-b9af-f8b2f2b30dda"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8ae-6c68-7c23-b9af-f8c023ac55e5",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8ae-6c68-7c23-b9af-f8c023ac55e5",
+    "timestamp_ms": 1790878575720,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "tool_result_received",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:12",
+    "payload": {
+      "content": [
+        {
+          "data": {
+            "answers": [
+              {
+                "customText": "",
+                "questionId": "review",
+                "selectedOptionIds": [
+                  "return-review"
+                ]
+              }
+            ],
+            "dismissed": false
+          },
+          "type": "structured"
+        }
+      ],
+      "id": "manual_ui_question_call",
+      "identity": {
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+      },
+      "is_error": false,
+      "name": "ui_multiple_choice",
+      "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "source_event_type": "tool_result_received",
+      "source_sequence": 7,
+      "tool_call_id": "manual_ui_question_call",
+      "type": "tool_result_received"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8ae-6c68-7c23-b9af-f8c023ac55e5"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8ae-6c69-7542-862a-7e047433d56f",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8ae-6c69-7542-862a-7e047433d56f",
+    "timestamp_ms": 1790878575721,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "turn_completed",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:13",
+    "payload": {
+      "assistant_message_id": "01a0f8ad-d118-7750-b416-299e2e740e20",
+      "identity": {
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+      },
+      "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "source_event_type": "turn_completed",
+      "source_sequence": 8,
+      "stop_reason": "tool_use",
+      "type": "turn_completed",
+      "usage": {
+        "accounting": {
+          "aggregation": "provider_inclusive_input_total",
+          "convention": "open_ai_input_includes_cached_subset",
+          "model": "gpt-5.6-sol",
+          "presented_tokens": 20,
+          "provider": "openai"
+        },
+        "cache_creation_tokens": null,
+        "cache_read_tokens": null,
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8ae-6c69-7542-862a-7e047433d56f"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8ae-6c69-7542-862a-7e1d18fe4c8c",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8ae-6c69-7542-862a-7e1d18fe4c8c",
+    "timestamp_ms": 1790878575721,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "turn_started",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:14",
+    "payload": {
+      "assistant_message_id": "01a0f8ae-6c62-7163-942d-a553ab36ea2a",
+      "identity": {
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+      },
+      "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "source_event_type": "turn_started",
+      "source_sequence": 9,
+      "turn_number": 1,
+      "type": "turn_started"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8ae-6c69-7542-862a-7e1d18fe4c8c"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8ae-6c6d-77d2-862c-eef259b1c760",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8ae-6c6d-77d2-862c-eef259b1c760",
+    "timestamp_ms": 1790878575725,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "text_delta",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:15",
+    "payload": {
+      "assistant_message_id": "01a0f8ae-6c62-7163-942d-a553ab36ea2a",
+      "delta": "UI_QUESTION_ANSWERED",
+      "identity": {
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+      },
+      "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "source_event_type": "text_delta",
+      "source_sequence": 10,
+      "type": "text_delta"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8ae-6c6d-77d2-862c-eef259b1c760"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8ae-6c6d-77d2-862c-ef06afa01481",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8ae-6c6d-77d2-862c-ef06afa01481",
+    "timestamp_ms": 1790878575725,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "text_complete",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:16",
+    "payload": {
+      "assistant_message_id": "01a0f8ae-6c62-7163-942d-a553ab36ea2a",
+      "content": "UI_QUESTION_ANSWERED",
+      "identity": {
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+      },
+      "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "source_event_type": "text_complete",
+      "source_sequence": 11,
+      "type": "text_complete"
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8ae-6c6d-77d2-862c-ef06afa01481"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8ae-6c6d-77d2-862c-ef11523a0d46",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8ae-6c6d-77d2-862c-ef11523a0d46",
+    "timestamp_ms": 1790878575725,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "turn_completed",
+    "status": "delivered",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:17",
+    "payload": {
+      "assistant_message_id": "01a0f8ae-6c62-7163-942d-a553ab36ea2a",
+      "identity": {
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+      },
+      "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "source_event_type": "turn_completed",
+      "source_sequence": 12,
+      "stop_reason": "end_turn",
+      "type": "turn_completed",
+      "usage": {
+        "accounting": {
+          "aggregation": "provider_inclusive_input_total",
+          "convention": "open_ai_input_includes_cached_subset",
+          "model": "gpt-5.6-sol",
+          "presented_tokens": 20,
+          "provider": "openai"
+        },
+        "cache_creation_tokens": null,
+        "cache_read_tokens": null,
+        "input_tokens": 20,
+        "output_tokens": 5
+      }
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8ae-6c6d-77d2-862c-ef11523a0d46"
+    }
+  },
+  {
+    "id": "console-frame-3032568031625d72c9661e52455eb5e25dfffbbf69169495211f1978406a6468",
+    "dedupe_key": "assistant-history-snapshot-v1:default:01a0f8a3-d95c-7822-9134-dca558a68a67:0:7:10:40b28c35003035add7c3ba484231e379c48bdb80c5e1600eac62c027f94938d6",
+    "timestamp_ms": 1790878575742,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "assistant_history_snapshot",
+    "status": "delivered",
+    "frame_version": 1,
+    "cursor": "console:18",
+    "payload": {
+      "assistant_message_ids": [
+        "01a0f8ad-d118-7750-b416-299e2e740e20",
+        "01a0f8ae-6c62-7163-942d-a553ab36ea2a"
+      ],
+      "complete": true,
+      "observed_through": "console:10",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67"
+    },
+    "source": {
+      "kind": "session_history"
+    }
+  },
+  {
+    "id": "console-frame-6c95474e5eaeb2fccac8ae51cdfea3d59c7f2ded93573d42fe6e44f8ce2e688a",
+    "dedupe_key": "session-history:default:01a0f8a3-d95c-7822-9134-dca558a68a67:1:4405661533fd8e23",
+    "timestamp_ms": 1790878535958,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "user_input",
+    "status": "completed",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:19",
+    "payload": {
+      "content": [
+        {
+          "skill_key": {
+            "skill_name": "review",
+            "source_uuid": "78249a26-13e0-4f13-a9c7-a96c5d258502"
+          },
+          "text": "<skill source_uuid=\"78249a26-13e0-4f13-a9c7-a96c5d258502\" skill_name=\"review\">\nFollow repository conventions. Body marker: MANUAL_UI_HIDDEN_SECOND_78263.\n\n</skill>",
+          "type": "skill_context"
+        },
+        {
+          "text": "UI_SKILL_SELECTED [review](meerkat-skill://78249a26-13e0-4f13-a9c7-a96c5d258502/review)",
+          "type": "text"
+        }
+      ],
+      "message": {
+        "content": [
+          {
+            "skill_key": {
+              "skill_name": "review",
+              "source_uuid": "78249a26-13e0-4f13-a9c7-a96c5d258502"
+            },
+            "text": "<skill source_uuid=\"78249a26-13e0-4f13-a9c7-a96c5d258502\" skill_name=\"review\">\nFollow repository conventions. Body marker: MANUAL_UI_HIDDEN_SECOND_78263.\n\n</skill>",
+            "type": "skill_context"
+          },
+          {
+            "text": "UI_SKILL_SELECTED [review](meerkat-skill://78249a26-13e0-4f13-a9c7-a96c5d258502/review)",
+            "type": "text"
+          }
+        ],
+        "created_at": "2026-10-01T18:15:35.958981Z",
+        "identity": {
+          "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+          "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+        },
+        "role": "user"
+      }
+    },
+    "source": {
+      "kind": "session_history",
+      "source_cursor": "01a0f8a3-d95c-7822-9134-dca558a68a67:1"
+    }
+  },
+  {
+    "id": "console-frame-7bce1c69f813052f9ab170d85f5875e7917684ba4808134f09d1299168e1d679",
+    "dedupe_key": "session-history:default:01a0f8a3-d95c-7822-9134-dca558a68a67:2:b6a4598acb8d6c46",
+    "timestamp_ms": 1790878535971,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "assistant_message",
+    "status": "completed",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:20",
+    "payload": {
+      "assistant_message_id": "01a0f8ad-d118-7750-b416-299e2e740e20",
+      "message": {
+        "assistant_message_id": "01a0f8ad-d118-7750-b416-299e2e740e20",
+        "blocks": [
+          {
+            "block_type": "tool_use",
+            "data": {
+              "args": {
+                "questions": [
+                  {
+                    "allowCustom": false,
+                    "id": "review",
+                    "multiSelect": false,
+                    "options": [
+                      {
+                        "id": "return-review",
+                        "label": "Return review"
+                      },
+                      {
+                        "id": "hold",
+                        "label": "Hold"
+                      }
+                    ],
+                    "question": "Return this review?"
+                  }
+                ],
+                "title": "Manual UI review"
+              },
+              "id": "manual_ui_question_call",
+              "meta": {
+                "provider": "open_ai_response",
+                "response_id": "resp_manual_1"
+              },
+              "name": "ui_multiple_choice"
+            }
+          }
+        ],
+        "created_at": "2026-10-01T18:15:35.971272Z",
+        "identity": {
+          "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+          "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+        },
+        "role": "block_assistant",
+        "stop_reason": "tool_use"
+      },
+      "result": "",
+      "source_event_type": "session_history",
+      "text": "",
+      "type": "session_history"
+    },
+    "source": {
+      "kind": "session_history",
+      "source_cursor": "01a0f8a3-d95c-7822-9134-dca558a68a67:2"
+    }
+  },
+  {
+    "id": "console-frame-7c688f04cac40d79e77ee18a5a33176d802f77d6544529b7e9aafe45f5eba900",
+    "dedupe_key": "session-history:default:01a0f8a3-d95c-7822-9134-dca558a68a67:2:tool-call:0:b6a4598acb8d6c46",
+    "timestamp_ms": 1790878535971,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "tool_call_requested",
+    "status": "completed",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:21",
+    "payload": {
+      "args": {
+        "questions": [
+          {
+            "allowCustom": false,
+            "id": "review",
+            "multiSelect": false,
+            "options": [
+              {
+                "id": "return-review",
+                "label": "Return review"
+              },
+              {
+                "id": "hold",
+                "label": "Hold"
+              }
+            ],
+            "question": "Return this review?"
+          }
+        ],
+        "title": "Manual UI review"
+      },
+      "assistant_message_id": "01a0f8ad-d118-7750-b416-299e2e740e20",
+      "id": "manual_ui_question_call",
+      "name": "ui_multiple_choice",
+      "source_event_type": "session_history",
+      "tool_call_id": "manual_ui_question_call",
+      "type": "session_history"
+    },
+    "source": {
+      "kind": "session_history",
+      "source_cursor": "01a0f8a3-d95c-7822-9134-dca558a68a67:2:tool-call:0"
+    }
+  },
+  {
+    "id": "console-frame-fea505915f798e86f2cfe953b2ed50fae0fd24de9f38070fce332e4cab4fcfb3",
+    "dedupe_key": "session-history:default:01a0f8a3-d95c-7822-9134-dca558a68a67:3:0:d80f20373592cccc",
+    "timestamp_ms": 1790878575713,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "tool_execution_completed",
+    "status": "completed",
+    "frame_version": 1,
+    "cursor": "console:22",
+    "payload": {
+      "content": [
+        {
+          "data": {
+            "answers": [
+              {
+                "customText": "",
+                "questionId": "review",
+                "selectedOptionIds": [
+                  "return-review"
+                ]
+              }
+            ],
+            "dismissed": false
+          },
+          "type": "structured"
+        }
+      ],
+      "id": "manual_ui_question_call",
+      "is_error": false,
+      "result": "{\"answers\":[{\"customText\":\"\",\"questionId\":\"review\",\"selectedOptionIds\":[\"return-review\"]}],\"dismissed\":false}",
+      "source_event_type": "session_history",
+      "tool_call_id": "manual_ui_question_call",
+      "type": "session_history"
+    },
+    "source": {
+      "kind": "session_history",
+      "source_cursor": "01a0f8a3-d95c-7822-9134-dca558a68a67:3:0"
+    }
+  },
+  {
+    "id": "console-frame-9fb2169050ee9d5bbe43e3590fd871e580ba0a097224c14480861552fc9c4134",
+    "dedupe_key": "session-history:default:01a0f8a3-d95c-7822-9134-dca558a68a67:4:1db9d71a7c22fc5e",
+    "timestamp_ms": 1790878575724,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "text_complete",
+    "status": "completed",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:23",
+    "payload": {
+      "assistant_message_id": "01a0f8ae-6c62-7163-942d-a553ab36ea2a",
+      "message": {
+        "assistant_message_id": "01a0f8ae-6c62-7163-942d-a553ab36ea2a",
+        "blocks": [
+          {
+            "block_type": "text",
+            "data": {
+              "meta": {
+                "id": "msg_manual_2",
+                "provider": "open_ai_assistant_message",
+                "response_id": "resp_manual_2"
+              },
+              "text": "UI_QUESTION_ANSWERED"
+            }
+          }
+        ],
+        "created_at": "2026-10-01T18:16:15.724969Z",
+        "identity": {
+          "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+          "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+        },
+        "role": "block_assistant",
+        "stop_reason": "end_turn"
+      },
+      "result": "UI_QUESTION_ANSWERED",
+      "source_event_type": "session_history",
+      "text": "UI_QUESTION_ANSWERED",
+      "type": "session_history"
+    },
+    "source": {
+      "kind": "session_history",
+      "source_cursor": "01a0f8a3-d95c-7822-9134-dca558a68a67:4"
+    }
+  },
+  {
+    "id": "console-frame-d3bf9dfc62085af151803b391e96cc3ed415eb154c0e5d41bc8fabfbfd0d45d2",
+    "dedupe_key": "assistant-history-snapshot-v1:default:01a0f8a3-d95c-7822-9134-dca558a68a67:18:17:23:40b28c35003035add7c3ba484231e379c48bdb80c5e1600eac62c027f94938d6",
+    "timestamp_ms": 1790878575750,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "assistant_history_snapshot",
+    "status": "delivered",
+    "frame_version": 1,
+    "cursor": "console:24",
+    "payload": {
+      "assistant_message_ids": [
+        "01a0f8ad-d118-7750-b416-299e2e740e20",
+        "01a0f8ae-6c62-7163-942d-a553ab36ea2a"
+      ],
+      "complete": true,
+      "observed_through": "console:23",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67"
+    },
+    "source": {
+      "kind": "session_history"
+    }
+  },
+  {
+    "id": "evt-agent-01a0f8ae-6c71-7c30-a490-a3487372c776",
+    "dedupe_key": "console-event:default:evt-agent-01a0f8ae-6c71-7c30-a490-a3487372c776",
+    "timestamp_ms": 1790878575729,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "interaction_complete",
+    "status": "completed",
+    "frame_version": 1,
+    "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+    "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+    "cursor": "console:25",
+    "payload": {
+      "assistant_message_id": "01a0f8ae-6c62-7163-942d-a553ab36ea2a",
+      "extraction_required": false,
+      "identity": {
+        "interaction_id": "bd499395-463b-5bff-8692-2e52d0317515",
+        "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756"
+      },
+      "result": "UI_QUESTION_ANSWERED",
+      "run_id": "01a0f8ad-d104-77a3-9a81-cd2d4d203756",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+      "source_event_type": "run_completed",
+      "source_sequence": 13,
+      "type": "run_completed",
+      "usage": {
+        "cache_creation_tokens": null,
+        "cache_read_tokens": null,
+        "input_tokens": 40,
+        "output_tokens": 10
+      }
+    },
+    "source": {
+      "kind": "console_event",
+      "source_event_id": "evt-agent-01a0f8ae-6c71-7c30-a490-a3487372c776"
+    }
+  },
+  {
+    "id": "console-frame-d75b6c246ffca2fc77ffeb2dee8f4cb946b8bb152bef480065a27e86cd855680",
+    "dedupe_key": "assistant-history-snapshot-v1:default:01a0f8a3-d95c-7822-9134-dca558a68a67:24:25:25:40b28c35003035add7c3ba484231e379c48bdb80c5e1600eac62c027f94938d6",
+    "timestamp_ms": 1790878575758,
+    "runtime_key": "default",
+    "identity": "reviewer",
+    "conversation_id": "reviewer",
+    "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67",
+    "kind": "assistant_history_snapshot",
+    "status": "delivered",
+    "frame_version": 1,
+    "cursor": "console:26",
+    "payload": {
+      "assistant_message_ids": [
+        "01a0f8ad-d118-7750-b416-299e2e740e20",
+        "01a0f8ae-6c62-7163-942d-a553ab36ea2a"
+      ],
+      "complete": true,
+      "observed_through": "console:25",
+      "session_id": "01a0f8a3-d95c-7822-9134-dca558a68a67"
+    },
+    "source": {
+      "kind": "session_history"
+    }
+  }
+]

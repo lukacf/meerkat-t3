@@ -211,10 +211,15 @@ export const make = Effect.gen(function* () {
       arch: platformArch(hostArchitecture),
       ...(machine === null ? {} : { machine }),
     },
-    serverVersion: packageJson.version,
+    serverVersion:
+      serverConfig.mode === "desktop"
+        ? (serverConfig.desktopAppVersion ?? packageJson.version)
+        : packageJson.version,
     orchestrationProtocolVersion: ORCHESTRATION_PROTOCOL_VERSION,
     capabilities: {
+      providerSettingsIntents: true,
       repositoryIdentity: true,
+      gitIdentity: true,
       connectionProbe: true,
       attachmentUploads: true,
       questionAttachments: true,

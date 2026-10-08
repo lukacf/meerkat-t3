@@ -25,6 +25,7 @@ import type {
   RuntimeMode,
   ServerConfig as T3ServerConfig,
   ThreadId,
+  ThreadPreparedTurn,
   UsageLimitsReport,
   UserInputQuestion,
 } from "@t3tools/contracts";
@@ -91,6 +92,10 @@ import { ComposerFeedback } from "./ComposerFeedback";
 import { ComposerUsageLimits } from "./ComposerUsageLimits";
 import { PendingUserInputCard } from "./PendingUserInputCard";
 import { ThreadCreationFailedCard } from "./ThreadCreationFailedCard";
+import { PreparedTurnRecoveryCard } from "./PreparedTurnRecoveryCard";
+import { preparedTurnBlocksSend } from "../../state/prepared-turn-recovery";
+import { preparedRecoveryHoldsAtom } from "../../state/use-thread-outbox";
+import { useAtomValue } from "@effect/atom-react";
 import {
   FLOATING_WORKING_CONTROL_COVERAGE,
   FloatingWorkingControl,
@@ -113,6 +118,7 @@ import type { ThreadContentPresentation } from "./threadContentPresentation";
 import { resolveThreadFeedSubmissionAnchor } from "./thread-feed-live-follow";
 
 export interface ThreadDetailScreenProps {
+  readonly preparedTurn?: ThreadPreparedTurn | null;
   readonly worktreeSetup?: WorktreeSetupCardProps | null;
   readonly setupWorkingStartedAt?: string | null;
   readonly selectedThread: OrchestrationThreadShell;
@@ -265,6 +271,10 @@ const USER_INPUT_TOGGLE_TIMING = {
 };
 
 export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: ThreadDetailScreenProps) {
+  const recoveryHolds = useAtomValue(preparedRecoveryHoldsAtom);
+  const recoveryBlocksSend =
+    preparedTurnBlocksSend(props.preparedTurn) ||
+    Boolean(recoveryHolds[scopedThreadKey(props.environmentId, props.selectedThread.id)]);
   const navigation = useNavigation();
   const deviceState = useEnvironmentQuery(
     deviceEnvironment.state({ environmentId: props.environmentId, input: {} }),
@@ -982,6 +992,19 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                 onScrollToEnd={handleScrollToEnd}
               />
               <View className="w-full self-center" style={{ maxWidth: contentMaxWidth }}>
+                {props.preparedTurn ? (
+                  <PreparedTurnRecoveryCard
+                    key={`${props.environmentId}:${props.selectedThread.id}:${props.preparedTurn.recoveryId}`}
+                    environmentId={props.environmentId}
+                    threadId={props.selectedThread.id}
+                    prepared={props.preparedTurn}
+                    connected={
+                      props.connectionStateLabel === "connected" &&
+                      props.threadSyncStatus === "live"
+                    }
+                    setupActive={props.worktreeSetup?.snapshot.phase === "running"}
+                  />
+                ) : null}
                 {props.feedbackSubmissions.map((submission) => (
                   <ComposerFeedback
                     key={submission.id}
@@ -1087,7 +1110,11 @@ export const ThreadDetailScreen = memo(function ThreadDetailScreen(props: Thread
                   // them against a thread id the server may still reject
                   // would strand them in the outbox.
                   sendBlockedReason={
-                    props.creationState?.kind === "preparing" ? "Starting the task…" : null
+                    recoveryBlocksSend
+                      ? "Recover the saved message before sending."
+                      : props.creationState?.kind === "preparing"
+                        ? "Starting the task…"
+                        : null
                   }
                   bottomInset={composerBottomInset}
                   onChangeDraftMessage={props.onChangeDraftMessage}

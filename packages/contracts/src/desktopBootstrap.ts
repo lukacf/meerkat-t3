@@ -12,6 +12,7 @@ export const DesktopBackendBootstrap = Schema.Struct({
   t3Home: Schema.optional(Schema.String),
   host: Schema.String,
   desktopBootstrapToken: Schema.String,
+  desktopAppVersion: Schema.optionalKey(Schema.String.check(Schema.isNonEmpty())),
   tailscaleServeEnabled: Schema.Boolean,
   tailscaleServePort: PortSchema,
   otlpTracesUrl: Schema.optional(Schema.String),
@@ -19,8 +20,18 @@ export const DesktopBackendBootstrap = Schema.Struct({
   otlpLogsUrl: Schema.optional(Schema.String),
   desktopTelemetryFd: Schema.optionalKey(PositiveInt),
   desktopTelemetryControlFd: Schema.optionalKey(PositiveInt),
+  // Dedicated desktop-owned pipe, separate from bootstrap and telemetry.
+  // Standalone and WSL launches omit it.
+  desktopParentLifetimeFd: Schema.optionalKey(Schema.Int.check(Schema.isGreaterThanOrEqualTo(6))),
   resourceMonitorPath: Schema.optionalKey(TrimmedNonEmptyString),
-});
+}).check(
+  Schema.makeFilter(
+    (bootstrap) =>
+      bootstrap.desktopParentLifetimeFd === undefined ||
+      (bootstrap.desktopParentLifetimeFd !== bootstrap.desktopTelemetryFd &&
+        bootstrap.desktopParentLifetimeFd !== bootstrap.desktopTelemetryControlFd),
+  ),
+);
 
 export type DesktopBackendBootstrap = typeof DesktopBackendBootstrap.Type;
 

@@ -16,11 +16,16 @@ export * from "./provider.ts";
 export * from "./providerInstance.ts";
 export * from "./providerSetup.ts";
 export * from "./providerRuntime.ts";
+export * from "./meerkatTeam.ts";
+export * from "./meerkatSearch.ts";
+export * from "./meerkatControls.ts";
+export * from "./meerkatApprovals.ts";
 export * from "./providerUsageLimits.ts";
 export * from "./usageLimitSourceId.ts";
 export * from "./model.ts";
 export * from "./keybindings.ts";
 export * from "./server.ts";
+export * from "./restoreReview.ts";
 export * from "./settings.ts";
 export * from "./git.ts";
 export * from "./vcs.ts";
@@ -44,3 +49,18 @@ export * from "./resourceTelemetry.ts";
 export * from "./usage.ts";
 export * from "./rpc.ts";
 export * from "./worktreeSetup.ts";
+
+export * from "./meerkatMedia.ts";
+
+export * from "./projectTerminal.ts";
+
+export * from "./meerkatAgentQueue.ts";
+
+export * from "./meerkatAttention.ts";
+
+export * from "./meerkatCoordinatorWork.ts";
+
+export * from "./meerkatThreadRecovery.ts";
+
+export * from "./meerkatCheckpoints.ts";
+export * from "./meerkatUsage.ts";

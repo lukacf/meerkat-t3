@@ -505,6 +505,30 @@ describe("hasMarkdownFilePrimaryAction", () => {
 });
 
 describe("ChatMarkdown skill chips", () => {
+  it("leaves bare native skill names as text and renders only the exact selected source", () => {
+    const first = {
+      name: "review",
+      displayName: "Review first source",
+      path: "meerkat-skill://b3fdcd90-cb8c-40c2-aee5-c1aba30a9b64/review",
+    };
+    const second = {
+      name: "review",
+      displayName: "Review second source",
+      path: "meerkat-skill://4fa3e1a2-5b6c-47d8-9012-3456789abcde/review",
+    };
+    const html = renderToStaticMarkup(
+      <ChatMarkdown
+        cwd={undefined}
+        text={`Keep $review as text. Select [review](${second.path}).`}
+        skills={[first, second]}
+      />,
+    );
+    expect(html).toContain("$review");
+    expect(html).not.toContain(first.displayName);
+    expect(html).toContain(second.displayName);
+    expect(html).toContain(`data-markdown-copy="[review](${second.path})"`);
+  });
+
   it("updates digit-leading skill labels when discovered skills change", async () => {
     vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
     let renderer: ReactTestRenderer | undefined;

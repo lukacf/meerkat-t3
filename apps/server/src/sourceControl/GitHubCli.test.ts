@@ -12,6 +12,7 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 import { VcsProcessExitError, VcsProcessSpawnError } from "@t3tools/contracts";
 
 import * as VcsProcess from "../vcs/VcsProcess.ts";
+import * as ProcessRunner from "../processRunner.ts";
 import * as GitHubCli from "./GitHubCli.ts";
 import * as GitHubGraphQlBudget from "./githubGraphQlBudget.ts";
 import * as SourceControlRateLimit from "./SourceControlRateLimit.ts";
@@ -637,3 +638,151 @@ describe("GitHubCli.layer", () => {
     }).pipe(Effect.provide(layer)),
   );
 });
+
+it.effect("creates an explicitly requested draft PR with exact title and body file", () =>
+  Effect.gen(function* () {
+    mockRun.mockReturnValue(Effect.succeed(processOutput("https://github.com/acme/web/pull/42\n")));
+    const gh = yield* GitHubCli.GitHubCli;
+    yield* gh.createPullRequest({
+      cwd: "/repo",
+      baseBranch: "main",
+      headSelector: "owner:feature",
+      title: "Repair parser",
+      bodyFile: "/tmp/pr body.md",
+      draft: true,
+    });
+    expect(mockRun.mock.calls[0]?.[0].args).toEqual([
+      "pr",
+      "create",
+      "--base",
+      "main",
+      "--head",
+      "owner:feature",
+      "--title",
+      "Repair parser",
+      "--body-file",
+      "/tmp/pr body.md",
+      "--draft",
+    ]);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each([
+  "https://github.com/acme/web/pull/42",
+  "https://code.acme.test:8443/acme/web/pull/42",
+])("retains the direct successful PR identity from %s", (url) =>
+  Effect.gen(function* () {
+    mockRun.mockReturnValueOnce(Effect.succeed(processOutput(`${url}\n`)));
+    const gh = yield* GitHubCli.GitHubCli;
+    const result = yield* gh.createPullRequest({
+      cwd: "/repo",
+      baseBranch: "main",
+      headSelector: "owner:feature",
+      title: "Repair parser",
+      bodyFile: "/tmp/pr.md",
+    });
+    assert.deepStrictEqual(result, { url, number: 42 });
+    expect(mockRun).toHaveBeenCalledTimes(1);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each([
+  "",
+  "Created a pull request",
+  "https://github.com/acme/web/issues/42",
+  "https://github.com/acme/web/pull/0",
+  "https://github.com/acme/web/pull/9007199254740992",
+  "https://user:secret@github.com/acme/web/pull/42",
+  "https://github.com/acme/web/pull/42?token=secret",
+  "https://github.com/acme/web/pull/42#details",
+  "https://github.com/acme/web/pull/42\nhttps://github.com/acme/web/pull/43",
+])("reports unconfirmed creation for successful noncanonical output %j", (stdout) =>
+  Effect.gen(function* () {
+    mockRun.mockReturnValueOnce(Effect.succeed(processOutput(stdout)));
+    const gh = yield* GitHubCli.GitHubCli;
+    const error = yield* gh
+      .createPullRequest({
+        cwd: "/repo",
+        baseBranch: "main",
+        headSelector: "feature",
+        title: "Repair parser",
+        bodyFile: "/tmp/pr.md",
+      })
+      .pipe(Effect.flip);
+    assert.instanceOf(error, GitHubCli.GitHubPullRequestCreationUnconfirmedError);
+    assert.include(error.detail, "may have been created");
+    assert.include(error.detail, "before retrying");
+    expect(yield* encodeGitHubCliError(error)).not.toContain("secret");
+    expect(mockRun).toHaveBeenCalledTimes(1);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect.each(["stdoutTruncated", "stdoutInvalidUtf8"] as const)(
+  "does not trust %s creation output or convert failed creation into a receipt",
+  (invalidOutput) =>
+    Effect.gen(function* () {
+      mockRun.mockReturnValueOnce(
+        Effect.succeed({
+          ...processOutput("https://github.com/acme/web/pull/42"),
+          [invalidOutput]: true,
+        }),
+      );
+      const gh = yield* GitHubCli.GitHubCli;
+      const input = {
+        cwd: "/repo",
+        baseBranch: "main",
+        headSelector: "feature",
+        title: "Repair parser",
+        bodyFile: "/tmp/pr.md",
+      };
+      const unconfirmed = yield* gh.createPullRequest(input).pipe(Effect.flip);
+      assert.instanceOf(unconfirmed, GitHubCli.GitHubPullRequestCreationUnconfirmedError);
+      const cause = new VcsProcessExitError({
+        operation: "GitHubCli.execute",
+        command: "gh",
+        cwd: "/repo",
+        exitCode: 1,
+        detail: "Creation did not return a successful response.",
+      });
+      mockRun.mockReturnValueOnce(Effect.fail(cause));
+      const error = yield* gh.createPullRequest(input).pipe(Effect.flip);
+      assert.strictEqual(error.cause, cause);
+      expect(mockRun).toHaveBeenCalledTimes(2);
+    }).pipe(Effect.provide(layer)),
+);
+
+it.effect("does not accept a PR URL printed by a command that exits unsuccessfully", () =>
+  Effect.gen(function* () {
+    let attempts = 0;
+    const process = yield* VcsProcess.make.pipe(
+      Effect.provideService(ProcessRunner.ProcessRunner, {
+        run: () => {
+          attempts += 1;
+          return Effect.succeed({
+            stdout: "https://github.com/acme/web/pull/42\n",
+            stderr: "Command did not complete successfully",
+            code: ChildProcessSpawner.ExitCode(1),
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            stdoutInvalidUtf8: false,
+            stderrInvalidUtf8: false,
+          });
+        },
+      }),
+    );
+    const gh = yield* GitHubCli.make.pipe(Effect.provideService(VcsProcess.VcsProcess, process));
+    const error = yield* gh
+      .createPullRequest({
+        cwd: "/repo",
+        baseBranch: "main",
+        headSelector: "feature",
+        title: "Repair parser",
+        bodyFile: "/tmp/pr.md",
+      })
+      .pipe(Effect.flip);
+    assert.instanceOf(error, GitHubCli.GitHubCliCommandError);
+    assert.instanceOf(error.cause, VcsProcessExitError);
+    assert.strictEqual(attempts, 1);
+  }).pipe(Effect.provide(Layer.mergeAll(GitHubGraphQlBudget.layer, SourceControlRateLimit.layer))),
+);

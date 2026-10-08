@@ -14,6 +14,15 @@ const descriptor = {
 } as const;
 
 describe("ExecutionEnvironmentDescriptor", () => {
+  it("only enables repository author setup when the server advertises it", () => {
+    expect(decodeDescriptor(descriptor).capabilities.gitIdentity).toBeUndefined();
+    expect(
+      decodeDescriptor({
+        ...descriptor,
+        capabilities: { ...descriptor.capabilities, gitIdentity: true },
+      }).capabilities.gitIdentity,
+    ).toBe(true);
+  });
   it("requires an advertised required-worktree bootstrap capability", () => {
     expect(decodeDescriptor(descriptor).capabilities.requiredWorktreeBootstrap).toBeUndefined();
     expect(

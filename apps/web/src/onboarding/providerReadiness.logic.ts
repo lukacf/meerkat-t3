@@ -36,10 +36,59 @@ function quoteProviderBinary(
 export function getOnboardingProviderState(provider: ServerProvider | undefined) {
   if (provider === undefined) return "checking";
   if (!provider.enabled || provider.status === "disabled") return "disabled";
+  if (provider.availability === "unavailable") return "attention";
   if (!provider.installed) return "install";
   if (provider.auth.status === "unauthenticated") return "signIn";
   if (provider.status === "ready") return "ready";
   return "attention";
+}
+
+/** Native instances remain visible before credentials or runtime setup succeeds. */
+export function selectOnboardingProviderSetup(
+  providers: ReadonlyArray<ServerProvider> | null | undefined,
+) {
+  const enabled =
+    providers?.filter((provider) => provider.enabled && provider.status !== "disabled") ?? [];
+  const meerkatProviders = enabled.filter((provider) => provider.driver === "meerkat");
+  return {
+    meerkatProviders,
+    showCliProviders:
+      meerkatProviders.length === 0 || enabled.some((provider) => provider.driver !== "meerkat"),
+  };
+}
+
+export function getMeerkatOnboardingPresentation(provider: ServerProvider) {
+  const state = getOnboardingProviderState(provider);
+  if (provider.availability === "unavailable" || state === "install") {
+    return {
+      ready: false,
+      label: "Runtime unavailable",
+      detail:
+        provider.message ??
+        "The bundled Meerkat runtime could not start. Retry the check or open Providers to fix this instance, then return to setup.",
+    };
+  }
+  if (state === "ready") {
+    return {
+      ready: true,
+      label: provider.auth.status === "authenticated" ? "Credentials detected" : "Runtime ready",
+      detail: "Continue to choose a project. Your first task will confirm model access.",
+    };
+  }
+  if (state === "signIn") {
+    return {
+      ready: false,
+      label: "Needs credentials",
+      detail: "Add an API key for your model provider to start working.",
+    };
+  }
+  return {
+    ready: false,
+    label: state === "disabled" ? "Disabled" : "Needs attention",
+    detail:
+      provider.message ??
+      "Retry the check or open Providers to fix this instance, then return to setup.",
+  };
 }
 
 const PROVIDER_STATE_PRIORITY = {

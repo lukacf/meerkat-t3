@@ -13,6 +13,7 @@ import {
   buildSidebarProjectPickerEntries,
   buildSidebarProjectSnapshots,
   projectGroupsSpanEnvironments,
+  resolveSidebarProjectPickerTarget,
 } from "./sidebarProjectGrouping";
 import { orderItemsByPreferredIds } from "./components/Sidebar.logic";
 import { legacyProjectCwdPreferenceKey } from "./uiStateStore";
@@ -356,6 +357,73 @@ describe("environment grouping", () => {
     });
     expect(entries[0]?.isPreferred).toBe(true);
     expect(entries[1]?.group.displayName).toBe("separate");
+  });
+
+  it("expands selected groups into exact checkouts without changing other logical groups", () => {
+    const first = makeProject({ repositoryIdentity });
+    const second = makeProject({
+      id: ProjectId.make("second-checkout"),
+      workspaceRoot: "/another/shared-repo",
+      repositoryIdentity,
+    });
+    const remote = makeProject({
+      environmentId: remoteEnvironmentId,
+      workspaceRoot: "/remote/shared-repo",
+      repositoryIdentity,
+    });
+    const otherIdentity = { ...repositoryIdentity, canonicalKey: "github.com/example/other" };
+    const other = makeProject({
+      id: ProjectId.make("other"),
+      workspaceRoot: "/work/other",
+      repositoryIdentity: otherIdentity,
+    });
+    const otherRemote = makeProject({
+      ...other,
+      environmentId: remoteEnvironmentId,
+      workspaceRoot: "/remote/other",
+    });
+    const groups = buildSidebarProjectSnapshots({
+      projects: [first, second, remote, other, otherRemote],
+      settings: defaultGroupingSettings,
+      primaryEnvironmentId,
+      resolveEnvironmentLabel: (id) => (id === primaryEnvironmentId ? "Local" : "Remote"),
+    });
+    const currentRef = { environmentId: primaryEnvironmentId, projectId: second.id };
+    const entries = buildSidebarProjectPickerEntries({
+      groups,
+      preferredProjectRef: currentRef,
+      expandCheckouts: (group) => group.projectKey === repositoryIdentity.canonicalKey,
+    });
+    expect(entries).toHaveLength(4);
+    expect(entries[0]?.targetProject.id).toBe(second.id);
+    expect(entries.filter((entry) => entry.isPreferred)).toHaveLength(1);
+    const expanded = entries.filter((entry) => entry.isExplicitCheckout);
+    expect(new Set(expanded.map((entry) => entry.key))).toEqual(
+      new Set([
+        derivePhysicalProjectKey(first),
+        derivePhysicalProjectKey(second),
+        derivePhysicalProjectKey(remote),
+      ]),
+    );
+    const remoteChoice = expanded.find(
+      (entry) => entry.targetProject.environmentId === remoteEnvironmentId,
+    )!;
+    expect(resolveSidebarProjectPickerTarget(remoteChoice, currentRef)).toEqual({
+      environmentId: remoteEnvironmentId,
+      projectId: remote.id,
+    });
+    const firstChoice = expanded.find((entry) => entry.key === derivePhysicalProjectKey(first))!;
+    expect(resolveSidebarProjectPickerTarget(firstChoice, currentRef)).toEqual({
+      environmentId: primaryEnvironmentId,
+      projectId: first.id,
+    });
+    const otherChoice = entries.find(
+      (entry) => entry.group.projectKey === otherIdentity.canonicalKey,
+    )!;
+    expect(otherChoice.key).toBe(otherIdentity.canonicalKey);
+    expect(otherChoice.isExplicitCheckout).toBe(false);
+    const otherRemoteRef = { environmentId: remoteEnvironmentId, projectId: otherRemote.id };
+    expect(resolveSidebarProjectPickerTarget(otherChoice, otherRemoteRef)).toEqual(otherRemoteRef);
   });
 
   it("keeps the current environment when available and falls back otherwise", () => {

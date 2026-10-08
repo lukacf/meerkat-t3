@@ -97,6 +97,58 @@ it.effect("maps GitHub PR summaries into provider-neutral change requests", () =
   }),
 );
 
+it.effect("retains successful creation identity without needing another GitHub request", () =>
+  Effect.gen(function* () {
+    const commands: string[][] = [];
+    const url = "https://github.acme.test/other/actual-repository/pull/72";
+    const provider = yield* GitHubSourceControlProvider.make.pipe(
+      Effect.provide(GitHubCli.layer),
+      Effect.provideService(VcsProcess.VcsProcess, {
+        run: (input) => {
+          commands.push([...input.args]);
+          return input.args[0] === "pr" && input.args[1] === "create"
+            ? Effect.succeed(processResult(`${url}\n`))
+            : Effect.die("Creation identity must not depend on a later request");
+        },
+      }),
+    );
+    const result = yield* provider.createChangeRequest({
+      cwd: "/repo",
+      baseRefName: "main",
+      headSelector: "fork:feature",
+      title: "Repair parser",
+      bodyFile: "/tmp/pr.md",
+      draft: true,
+    });
+    assert.deepStrictEqual(result, { url, number: 72 });
+    assert.strictEqual(commands.length, 1);
+  }),
+);
+
+it.effect("preserves actionable uncertainty when creation returns no usable identity", () =>
+  Effect.gen(function* () {
+    const provider = yield* GitHubSourceControlProvider.make.pipe(
+      Effect.provide(GitHubCli.layer),
+      Effect.provideService(VcsProcess.VcsProcess, {
+        run: () => Effect.succeed(processResult("")),
+      }),
+    );
+    const error = yield* provider
+      .createChangeRequest({
+        cwd: "/repo",
+        baseRefName: "main",
+        headSelector: "fork:feature",
+        title: "Repair parser",
+        bodyFile: "/tmp/pr.md",
+      })
+      .pipe(Effect.flip);
+    assert.strictEqual(error.operation, "createChangeRequest");
+    assert.instanceOf(error.cause, GitHubCli.GitHubPullRequestCreationUnconfirmedError);
+    assert.include(error.detail, "may have been created");
+    assert.include(error.detail, "Check GitHub for this branch before retrying");
+  }),
+);
+
 it.effect("adds safe request context while retaining GitHub CLI causes", () =>
   Effect.gen(function* () {
     const cause = new GitHubCli.GitHubPullRequestNotFoundError({
@@ -226,6 +278,7 @@ it.effect("creates GitHub PRs through provider-neutral input names", () =>
       headSelector: "owner:feature/provider",
       title: "Provider PR",
       bodyFile: "/tmp/body.md",
+      draft: true,
     });
 
     assert.deepStrictEqual(createInput, {
@@ -234,6 +287,7 @@ it.effect("creates GitHub PRs through provider-neutral input names", () =>
       headSelector: "owner:feature/provider",
       title: "Provider PR",
       bodyFile: "/tmp/body.md",
+      draft: true,
     });
   }),
 );
@@ -279,6 +333,117 @@ it("accepts active authenticated GitHub accounts when another account fails", ()
       host: Option.some("github.com"),
     },
   );
+});
+
+for (const inactiveFirst of [false, true]) {
+  it(`reports the failed active GitHub account when a valid inactive account is ${inactiveFirst ? "first" : "last"}`, () => {
+    const active = {
+      state: "error",
+      active: true,
+      host: "github.com",
+      login: "selected-user",
+      error: "The selected credential has expired.",
+    };
+    const inactive = {
+      state: "success",
+      active: false,
+      host: "github.com",
+      login: "other-user",
+    };
+    const auth = GitHubSourceControlProvider.discovery.parseAuth(
+      processResult(
+        JSON.stringify({
+          hosts: { "github.com": inactiveFirst ? [inactive, active] : [active, inactive] },
+        }),
+      ),
+    );
+
+    assert.strictEqual(auth.status, "unauthenticated");
+    assert.deepStrictEqual(auth.account, Option.none());
+    assert.deepStrictEqual(auth.host, Option.some("github.com"));
+    assert.deepStrictEqual(auth.detail, Option.some(active.error));
+  });
+}
+
+it("retains the first valid-account fallback when no account is marked active", () => {
+  const auth = GitHubSourceControlProvider.discovery.parseAuth(
+    processResult(
+      JSON.stringify({
+        hosts: {
+          "github.com": [
+            { state: "success", active: false, host: "github.com", login: "default-user" },
+          ],
+          "github.enterprise.test": [
+            {
+              state: "success",
+              active: false,
+              host: "github.enterprise.test",
+              login: "enterprise-user",
+            },
+          ],
+        },
+      }),
+    ),
+  );
+
+  assert.strictEqual(auth.status, "authenticated");
+  assert.deepStrictEqual(auth.account, Option.some("default-user"));
+  assert.deepStrictEqual(auth.host, Option.some("github.com"));
+});
+
+it("still discovers a valid active account on another host", () => {
+  const auth = GitHubSourceControlProvider.discovery.parseAuth(
+    processResult(
+      JSON.stringify({
+        hosts: {
+          "github.com": [
+            { state: "error", active: true, host: "github.com", login: "expired-user" },
+          ],
+          "github.enterprise.test": [
+            {
+              state: "success",
+              active: true,
+              host: "github.enterprise.test",
+              login: "enterprise-user",
+              tokenSource: "keyring",
+              gitProtocol: "https",
+            },
+          ],
+        },
+      }),
+    ),
+  );
+
+  assert.strictEqual(auth.status, "authenticated");
+  assert.deepStrictEqual(auth.account, Option.some("enterprise-user"));
+  assert.deepStrictEqual(auth.host, Option.some("github.enterprise.test"));
+});
+
+it("retains the inactive fallback on an unrelated host with no active marker", () => {
+  const auth = GitHubSourceControlProvider.discovery.parseAuth(
+    processResult(
+      JSON.stringify({
+        hosts: {
+          "github.com": [
+            { state: "error", active: true, host: "github.com", login: "expired-user" },
+            { state: "success", active: false, host: "github.com", login: "other-user" },
+          ],
+          "github.enterprise.test": [
+            {
+              state: "success",
+              active: false,
+              host: "github.enterprise.test",
+              login: "enterprise-user",
+            },
+          ],
+        },
+      }),
+    ),
+  );
+
+  assert.strictEqual(auth.status, "authenticated");
+  assert.deepStrictEqual(auth.account, Option.some("enterprise-user"));
+  assert.deepStrictEqual(auth.host, Option.some("github.enterprise.test"));
 });
 
 it("parses GitHub auth JSON from stdout when stderr has warnings", () => {

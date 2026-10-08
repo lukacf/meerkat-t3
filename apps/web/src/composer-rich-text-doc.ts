@@ -101,7 +101,7 @@ interface DocLine {
 
 function atomJsonForSegment(
   segment: Exclude<ReturnType<typeof splitPromptIntoComposerSegments>[number], { type: "text" }>,
-  skillLabelFor: (name: string) => SkillMeta,
+  skillLabelFor: (name: string, path?: string) => SkillMeta,
 ): InlineJson {
   if (segment.type === "mention") {
     return {
@@ -110,13 +110,14 @@ function atomJsonForSegment(
     };
   }
   if (segment.type === "skill") {
-    const meta = skillLabelFor(segment.name);
+    const meta = skillLabelFor(segment.name, segment.path);
     return {
       type: "composer-skill",
       attrs: {
         skillName: segment.name,
         skillLabel: meta.label,
         skillDescription: meta.description,
+        ...(segment.path ? { skillPath: segment.path, source: segment.source } : {}),
       },
     };
   }
@@ -173,7 +174,7 @@ function textJsonForSpan(text: string, marks: RichTextMark[]): Record<string, un
 
 export function buildTiptapContent(
   value: string,
-  skillLabelFor: (name: string) => SkillMeta,
+  skillLabelFor: (name: string, path?: string) => SkillMeta,
   options?: { styling?: boolean },
 ): Record<string, unknown>[] {
   const styling = options?.styling ?? true;
@@ -266,7 +267,7 @@ export function buildTiptapContent(
 
 export function buildDocJson(
   value: string,
-  skillLabelFor: (name: string) => SkillMeta,
+  skillLabelFor: (name: string, path?: string) => SkillMeta,
   options?: { styling?: boolean },
 ) {
   return { type: "doc", content: buildTiptapContent(value, skillLabelFor, options) };
@@ -306,6 +307,7 @@ function readAtomSource(node: ProseMirrorNode): string {
     case "composer-context-reference":
       return typeof attrs.source === "string" ? attrs.source : "";
     case "composer-skill": {
+      if (typeof attrs.source === "string" && attrs.source) return attrs.source;
       const name = typeof attrs.skillName === "string" ? attrs.skillName : "";
       return name ? `$${name}` : "";
     }

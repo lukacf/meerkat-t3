@@ -15,6 +15,96 @@ const base = {
   threadId: ThreadId.make("thread-1"),
 };
 
+describe("runtimeEventToActivities native skill receipts", () => {
+  const keys = [
+    { source_uuid: "b3fdcd90-cb8c-40c2-aee5-c1aba30a9b64", skill_name: "review" },
+    { source_uuid: "97e07e7d-4641-43c6-b49d-a8827225fa24", skill_name: "review" },
+  ];
+  const nativeEnvelope = {
+    event_id: "f9422cca-aa96-4f06-b9ba-a6550d1c811c",
+    source: { type: "session", session_id: "native-session" },
+    seq: 11,
+    mob_id: "native-mob",
+    timestamp_ms: Date.parse(base.createdAt),
+  };
+  const receipt = {
+    nativeSourceEventId: `evt-agent-${nativeEnvelope.event_id}`,
+    nativeSessionId: "native-session",
+    nativeDeliveryId: `meerkat-output:run:native-session:evt-agent-${nativeEnvelope.event_id}`,
+  };
+
+  it("shows names but retains both exact source keys and the untouched envelope", () => {
+    const nativeEvent = {
+      ...nativeEnvelope,
+      payload: { type: "skills_resolved", skills: keys, injection_bytes: 789 },
+    };
+    const event = {
+      ...base,
+      provider: ProviderDriverKind.make("meerkat"),
+      type: "skills.resolved",
+      eventId: EventId.make(receipt.nativeDeliveryId),
+      payload: { ...receipt, nativeEvent },
+    } satisfies ProviderRuntimeEvent;
+    const [activity] = runtimeEventToActivities(event);
+    expect(activity).toEqual({
+      id: event.eventId,
+      createdAt: event.createdAt,
+      tone: "info",
+      kind: "skills.resolved",
+      summary: "Skills resolved: review, review",
+      turnId: null,
+      payload: {
+        ...receipt,
+        nativeEvent,
+        detail: `${keys[0]!.source_uuid}/review\n${keys[1]!.source_uuid}/review\nInjected bytes: 789`,
+      },
+    });
+    expect(activity?.payload).not.toHaveProperty("data");
+    expect(activity?.payload).not.toHaveProperty("itemType");
+    expect(activity?.payload).not.toHaveProperty("nativeSegmentId");
+  });
+
+  it("keeps a failure reason structured and displays an absent optional key honestly", () => {
+    const reason = { reason_type: "not_found", key: keys[1] };
+    const nativeEvent = {
+      ...nativeEnvelope,
+      payload: { type: "skill_resolution_failed", skill_key: null, reason },
+    };
+    const event = {
+      ...base,
+      provider: ProviderDriverKind.make("meerkat"),
+      type: "skills.resolution-failed",
+      eventId: EventId.make(receipt.nativeDeliveryId),
+      payload: { ...receipt, nativeEvent },
+    } satisfies ProviderRuntimeEvent;
+    const [activity] = runtimeEventToActivities(event);
+    expect(activity).toMatchObject({
+      tone: "error",
+      kind: "skills.resolution-failed",
+      summary: "Skill resolution failed",
+    });
+    expect(activity?.payload).toEqual({
+      ...receipt,
+      nativeEvent,
+      detail: `No skill key was supplied by the runtime.\nReason:\n${JSON.stringify(reason, null, 2)}`,
+    });
+    const futureNativeEvent = {
+      ...nativeEnvelope,
+      payload: {
+        type: "skill_resolution_failed",
+        skill_key: keys[0],
+        reason: { reason_type: "future_native_variant", nested: { values: [1, { exact: true }] } },
+      },
+    };
+    const [future] = runtimeEventToActivities({
+      ...event,
+      payload: { ...receipt, nativeEvent: futureNativeEvent },
+    });
+    expect(future?.payload).toMatchObject({ nativeEvent: futureNativeEvent });
+    expect(future?.payload).not.toHaveProperty("data");
+  });
+});
+
 describe("runtimeEventToActivities task progress", () => {
   it("persists usage independently from replaceable activity", () => {
     const taskId = RuntimeTaskId.make("agent-1");

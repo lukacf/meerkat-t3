@@ -41,9 +41,10 @@ export interface ProviderInstanceRegistryShape {
    */
   readonly listInstances: Effect.Effect<ReadonlyArray<ProviderInstance>>;
   /**
-   * Wire-shape shadow snapshots for instances whose driver is unknown to
-   * this build (or whose config failed to decode). Suitable for merging
-   * directly into `ProviderRegistry` output.
+   * Wire-shape snapshots for configured instances that cannot be used,
+   * including unknown drivers, invalid configs, creation failures, and
+   * pending or failed disposal. Suitable for merging directly into
+   * `ProviderRegistry` output.
    */
   readonly listUnavailable: Effect.Effect<ReadonlyArray<ServerProvider>>;
   /**

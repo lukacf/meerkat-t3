@@ -386,6 +386,7 @@ export function filterCommandPaletteGroups(input: {
   projectSearchItems: ReadonlyArray<CommandPaletteActionItem>;
   settingsSearchItems?: ReadonlyArray<CommandPaletteActionItem>;
   threadSearchItems: ReadonlyArray<CommandPaletteActionItem>;
+  agentSearchItems?: ReadonlyArray<CommandPaletteActionItem>;
 }): CommandPaletteGroup[] {
   const isActionsFilter = input.query.startsWith(">");
   const searchQuery = isActionsFilter ? input.query.slice(1) : input.query;
@@ -428,6 +429,9 @@ export function filterCommandPaletteGroups(input: {
         label: "Threads",
         items: input.threadSearchItems,
       });
+    }
+    if (input.agentSearchItems?.length) {
+      searchableGroups.push({ value: "agents-search", label: "Agent conversations", items: input.agentSearchItems });
     }
   }
 

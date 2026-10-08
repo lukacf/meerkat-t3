@@ -1,13 +1,21 @@
-import { AuthOrchestrationOperateScope, EnvironmentId } from "@t3tools/contracts";
+import {
+  AuthOrchestrationOperateScope,
+  EnvironmentId,
+  ProviderInstanceId,
+  ProviderDriverKind,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildProviderEnvironmentOptions,
+  buildProviderSettingsEdit,
   classifyProviderEnvironmentAccess,
   isProviderSettingsEnvironmentAvailable,
   resolvePrimaryOperateAccess,
   resolveRemoteOperateAccess,
   resolveSelectedProviderEnvironmentId,
+  selectProviderSettingsRow,
+  orderProviderSettingsRows,
 } from "./ProviderSettingsPanel.logic";
 
 const primaryId = EnvironmentId.make("primary");
@@ -19,6 +27,114 @@ const environments = [
   { environmentId: relayId, label: "Alpha Relay" },
   { environmentId: primaryId, label: "This device" },
 ] as const;
+
+describe("provider editor intents", () => {
+  const instanceId = ProviderInstanceId.make("work");
+  const previous = {
+    driver: ProviderDriverKind.make("codex"),
+    enabled: true,
+    displayName: "Work",
+    config: { binaryPath: "/old/codex", homePath: "/work", customModels: ["private-model"] },
+    environment: [{ name: "API_KEY", value: "", valueRedacted: true, sensitive: true }],
+  };
+
+  it("captures one field without resending configuration or stored credentials", () => {
+    expect(
+      buildProviderSettingsEdit(instanceId, previous, { ...previous, enabled: false }),
+    ).toEqual({
+      kind: "edit",
+      instanceId,
+      driver: "codex",
+      changes: { enabled: false },
+    });
+  });
+
+  it("distinguishes clearing a field from replacing the config blob", () => {
+    const { binaryPath: _removed, ...rest } = previous.config;
+    const { displayName: _name, ...withoutName } = previous;
+    expect(
+      buildProviderSettingsEdit(instanceId, previous, {
+        ...withoutName,
+        config: { ...rest, homePath: "/new/work" },
+      }),
+    ).toEqual({
+      kind: "edit",
+      instanceId,
+      driver: "codex",
+      changes: {
+        displayName: null,
+        config: { set: { homePath: "/new/work" }, remove: ["binaryPath"] },
+      },
+    });
+  });
+});
+
+describe("provider instance selection", () => {
+  const codex = {
+    instanceId: ProviderInstanceId.make("codex"),
+    instance: { driver: ProviderDriverKind.make("codex"), enabled: false, config: {} },
+  };
+  const meerkat = {
+    instanceId: ProviderInstanceId.make("meerkat"),
+    instance: { driver: ProviderDriverKind.make("meerkat"), enabled: true, config: {} },
+  };
+  const custom = { ...meerkat, instanceId: ProviderInstanceId.make("custom") };
+  const rows = [codex, meerkat, custom];
+  it("puts enabled native instances first, preserving peer order and all configured alternatives", () => {
+    const enabledCodex = {
+      ...codex,
+      instanceId: ProviderInstanceId.make("codex-enabled"),
+      instance: { ...codex.instance, enabled: true },
+    };
+    const disabledNative = {
+      ...custom,
+      instance: { ...custom.instance, config: { enabled: false } },
+    };
+    const original = [codex, enabledCodex, disabledNative, meerkat, custom];
+    expect(orderProviderSettingsRows(original)).toEqual([
+      meerkat,
+      custom,
+      enabledCodex,
+      codex,
+      disabledNative,
+    ]);
+    expect(original).toEqual([codex, enabledCodex, disabledNative, meerkat, custom]);
+    expect(selectProviderSettingsRow(orderProviderSettingsRows(original), codex.instanceId)).toBe(
+      codex,
+    );
+  });
+  it("opens the enabled runtime in a native profile without removing disabled providers", () => {
+    expect(selectProviderSettingsRow(rows, null)).toBe(meerkat);
+    expect(rows).toEqual([codex, meerkat, custom]);
+  });
+  it("preserves a valid explicit choice even when disabled or another provider becomes enabled", () => {
+    expect(selectProviderSettingsRow(rows, codex.instanceId)).toBe(codex);
+    expect(selectProviderSettingsRow(rows, custom.instanceId)).toBe(custom);
+    expect(selectProviderSettingsRow(rows, meerkat.instanceId, meerkat.instanceId)).toBe(meerkat);
+  });
+  it("retains missing explicit target errors and chooses an enabled fallback after an ordinary deletion", () => {
+    const deleted = ProviderInstanceId.make("deleted");
+    expect(selectProviderSettingsRow(rows, deleted, deleted)).toBeNull();
+    expect(selectProviderSettingsRow(rows, deleted)).toBe(meerkat);
+    expect(selectProviderSettingsRow([codex], null)).toBe(codex);
+    expect(selectProviderSettingsRow([], null)).toBeNull();
+  });
+  it("uses native driver defaults and legacy config disables before selecting a fallback", () => {
+    const grok = {
+      instanceId: ProviderInstanceId.make("grok"),
+      instance: { driver: ProviderDriverKind.make("grok"), config: {} },
+    };
+    const legacyDisabled = {
+      ...codex,
+      instance: { ...codex.instance, enabled: true, config: { enabled: false } },
+    };
+    const defaultCodex = { ...codex, instance: { driver: codex.instance.driver, config: {} } };
+    const explicitGrok = { ...grok, instance: { ...grok.instance, config: { enabled: true } } };
+    expect(selectProviderSettingsRow([grok, legacyDisabled, meerkat], null)).toBe(meerkat);
+    expect(selectProviderSettingsRow([grok, defaultCodex, meerkat], null)).toBe(defaultCodex);
+    expect(selectProviderSettingsRow([explicitGrok, meerkat], null)).toBe(explicitGrok);
+  });
+});
 
 describe("provider environment selection", () => {
   it("requires a connected environment with server config for searchable provider settings", () => {

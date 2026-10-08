@@ -5,6 +5,7 @@ import * as NodePath from "node:path";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import * as Electron from "electron";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
@@ -13,6 +14,12 @@ import * as DesktopEarlyElectronStartup from "./DesktopEarlyElectronStartup.ts";
 import { resolveDesktopAppBranding } from "./DesktopEnvironment.ts";
 import { renderUrlHandlerDesktopEntry } from "./DesktopLinuxUrlHandler.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
+import * as DesktopConfig from "./DesktopConfig.ts";
+import { DesktopUserDataDirectoryError } from "./DesktopAppIdentity.ts";
+import {
+  resolveDesktopAppDataDirectory,
+  resolveDesktopUserDataDirectoryName,
+} from "./DesktopStatePaths.ts";
 
 export interface DesktopPreReadyCommandLineReader {
   readonly hasSwitch: (switchName: string) => boolean;
@@ -45,13 +52,46 @@ export class DesktopPreReadyElectronOptions extends Context.Service<
   {
     readonly linux: DesktopEarlyElectronStartup.EarlyLinuxElectronOptions | null;
     readonly linuxPasswordStoreCommandLine: string | null;
+    readonly userDataPath: string;
   }
 >()("@t3tools/desktop/app/DesktopPreReadyPlatform/DesktopPreReadyElectronOptions") {}
 
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const platform = yield* HostProcessPlatform;
+  const config = yield* DesktopConfig.DesktopConfig;
   return yield* Effect.sync((): DesktopPreReadyElectronOptions["Service"] => {
+    const override = Option.getOrNull(config.userDataDirectoryOverride);
+    const userDataPath =
+      override ??
+      NodePath.join(
+        resolveDesktopAppDataDirectory({
+          platform,
+          homeDirectory: NodeOS.homedir(),
+          appDataDirectory: config.appDataDirectory,
+          xdgConfigHome: config.xdgConfigHome,
+          joinPath: NodePath.join,
+        }),
+        resolveDesktopUserDataDirectoryName(Option.isSome(config.devServerUrl)),
+      );
+    if (override !== null) {
+      if (!NodePath.isAbsolute(override)) {
+        throw new DesktopUserDataDirectoryError({
+          path: override,
+          cause: new Error("T3CODE_DESKTOP_USER_DATA_DIR must be an absolute path."),
+        });
+      }
+      try {
+        NodeFS.mkdirSync(override, { recursive: true });
+      } catch (cause) {
+        throw new DesktopUserDataDirectoryError({ path: override, cause });
+      }
+      // Chromium also uses the command-line path for its early child processes.
+      Electron.app.commandLine.appendSwitch("user-data-dir", override);
+    }
+    // Clerk registers its own scheme privileges. Nothing between this profile
+    // preparation and its bridge creation may yield to Electron's ready event.
+    Electron.app.setPath("userData", userDataPath);
     const linuxPasswordStoreCommandLine =
       platform === "linux"
         ? readCommandLineSwitchValue(Electron.app.commandLine, "password-store")
@@ -92,7 +132,7 @@ export const make = Effect.gen(function* () {
       }
     }
 
-    return { linux, linuxPasswordStoreCommandLine };
+    return { linux, linuxPasswordStoreCommandLine, userDataPath };
   });
 }).pipe(Effect.withSpan("desktop.electron.configureBeforeReady"));
 

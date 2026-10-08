@@ -22,10 +22,20 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import * as DesktopSshPasswordPrompts from "./DesktopSshPasswordPrompts.ts";
+
+export class DesktopSshUnavailableError extends Schema.TaggedError<DesktopSshUnavailableError>()(
+  "DesktopSshUnavailableError",
+  {},
+) {
+  override get message(): string {
+    return "SSH connections are not available in this prototype. Use this Mac.";
+  }
+}
 
 export type DesktopSshEnvironmentRuntimeServices =
   | ChildProcessSpawner.ChildProcessSpawner
@@ -35,6 +45,7 @@ export type DesktopSshEnvironmentRuntimeServices =
   | NetService.NetService;
 
 export type DesktopSshEnvironmentOperationError =
+  | DesktopSshUnavailableError
   | SshCommandError
   | SshInvalidTargetError
   | SshLaunchError
@@ -141,14 +152,12 @@ export const make = Effect.gen(function* () {
         Effect.provide(runtimeContext),
         Effect.withSpan("desktop.ssh.resolveHost"),
       ),
-    ensureEnvironment: (target, ensureOptions) =>
-      manager
-        .ensureEnvironment(target, ensureOptions)
-        .pipe(
-          Effect.provideService(SshAuth.SshPasswordPrompt, passwordPrompt),
-          Effect.provide(runtimeContext),
-          Effect.withSpan("desktop.ssh.ensureEnvironment"),
-        ),
+    // The inherited installer provisions T3, not the bundled Meerkat runtime.
+    // Guard saved-connection retries as well as the disabled setup card.
+    ensureEnvironment: () =>
+      Effect.fail(new DesktopSshUnavailableError()).pipe(
+        Effect.withSpan("desktop.ssh.ensureEnvironment"),
+      ),
     disconnectEnvironment: (target) =>
       manager
         .disconnectEnvironment(target)

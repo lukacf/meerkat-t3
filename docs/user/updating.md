@@ -1,77 +1,23 @@
-# Updating T3 Code
+# Updating Meerkat T3
 
-The app you use and the server running your agents can be on different machines.
-When a server is behind your web or desktop app, an update notice appears in the
-conversation and **Settings → Connections**. Update the machine named in that
-notice.
+## Prototype updates
 
-## Before you update
+The current build uses ad-hoc signing and **manual updates**. It does not download or install updates automatically, and **Check for Updates** may say that updates are unavailable. That does not mean a newer Meerkat build does not exist.
 
-Server updates restart the connection and can interrupt active agents and
-terminal commands. Saved threads, settings, and project files remain.
+Ask your prototype distributor for the next **Meerkat T3** build, its version, and checksum. Original T3 downloads, Homebrew packages, `t3 update`, and `npx t3` update a different product. They are not an update path for this app.
 
-**Settings → General → Continue threads after restarts** is off by default.
-Enable it to resume supported active threads after an update, crash, or machine
-restart. Changes are saved to connected environments that support this setting;
-update older servers first. If a supported environment was offline or has a
-different value, use **Apply to all** in Settings after it connects.
-T3 Code must start again on that machine;
-the setting does not enable automatic startup. Terminal commands may still be
-interrupted, and threads without saved provider resume state need a new message.
-If you previously enabled continuation for updates, enable this setting once
-to allow recovery without a connected client.
+## Replace the app safely
 
-## Update a connected server
+1. Finish or stop current work. Review any saved follow-up queue and remove work you do not want to run later. Commit important project changes.
+2. Verify the new DMG or ZIP using the [installation instructions](install.md#get-and-open-the-app). Record the current version from About and retain its matching app or download for recovery.
+3. Choose **Meerkat T3 (Prototype) > Quit Meerkat T3 (Prototype)** from the menu bar. Closing the window leaves the app running. Make an [offline profile backup](troubleshooting.md#make-an-offline-backup) while the app and any standalone server remain closed.
+4. Install the replacement app in Applications using the DMG or ZIP instructions. Replace the old application bundle, keeping your saved profile. If the supplied app name has changed, move the old app aside and update any Dock shortcut so it opens the replacement.
+5. Open the replacement from Applications, approve it in macOS if prompted as described in [installation](install.md#if-macos-asks-you-to-approve-the-app), and check its version. Check the provider connection, then reopen a saved task. Connect a saved specialist if needed; its current model and reasoning level become visible after connecting. Inspect recovery notices before retrying interrupted work.
 
-The offered action depends on how the server runs:
+Restarting can interrupt active agents and terminal commands. Saved history is not proof that an interrupted external action did or did not finish. Do not delete the profile as part of an update.
 
-| Action                     | What to do                                                                                                                                                                                      |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Update server**          | Keep the client open while it installs and reconnects. Supported background services update remotely. For a desktop-hosted server, this also closes and relaunches the desktop app on the host. |
-| **Update the desktop app** | Update the desktop app on the machine running the server, then reopen it if needed.                                                                                                             |
-| **Copy update command**    | Stop the command-line server on its host and relaunch with the copied command, keeping your usual startup options.                                                                              |
+## When an update fails
 
-On the host, run:
+Keep the error message, old application, and profile. Contact your distributor for a compatible build and recovery steps. Do not blindly run an older binary against a profile that a newer version has migrated. If you made an offline backup before updating, follow [Restore without overwriting the current profile](troubleshooting.md#restore-without-overwriting-the-current-profile) with the retained matching app build.
 
-```sh
-t3 update <client-version>
-```
-
-Replace `<client-version>` with the version shown in the notice. The command
-asks before restarting the background service; if you decline, run
-`t3 service restart` when you are ready. For a server you started by hand,
-stop it and start it again afterwards with your usual options such as `--host`
-or `--tailscale-serve`.
-
-If you run the server with `npx` rather than an installed `t3`, there is
-nothing to update on the host: stop the server and relaunch it as
-`npx t3@<client-version>` with the same subcommand and options.
-
-## If an update fails
-
-Keep the client open until it reconnects or reports a failure. A failed service
-update can roll back to the previous version. If the update still fails:
-
-1. Retry the offered action once.
-2. Check that you updated the server's machine, not only the device you are using.
-3. For a command-line server, stop it and relaunch the exact version shown in the notice.
-
-## Mobile updates
-
-To update an environment from your phone, open **Settings → Environments** and
-select it. **Check for updates** finds the latest release on that environment's
-current release channel. Keep the app open while the environment updates and
-reconnects. Hosts that cannot update remotely show instructions for updating on
-the machine instead.
-
-The same page lets you refresh provider status and update supported providers.
-These controls require a connected environment and permission to operate it.
-Provider update checks and restart continuation preferences are in
-**Settings → Maintenance**. If provider update checks are disabled, enable them
-there before refreshing to find newer versions.
-
-Install App Store or Google Play releases as usual. The mobile app can also
-download updates in the background and apply them when you next leave the app.
-It saves drafts and queued messages before restarting. If you keep the app open
-for a long time, it may ask to install immediately; choosing **Later** leaves the
-update queued for the next suitable moment.
+Use the Meerkat T3 version and release notes supplied with your replacement. The original T3 release history does not describe this app.

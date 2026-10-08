@@ -45,7 +45,10 @@ import { buildThreadFeed } from "../lib/threadActivity";
 import { acknowledgedThreadMessagesAtom } from "./acknowledged-thread-messages";
 import { appendPendingThreadMessages } from "../features/threads/pending-thread-feed";
 import { appAtomRegistry } from "../state/atom-registry";
-import { pendingThreadCreationMessage } from "./pending-thread-creation";
+import {
+  pendingThreadCreationMessage,
+  retireReleasedPreparedCreationOutcome,
+} from "./pending-thread-creation";
 import {
   appendComposerDraftAttachments,
   captureComposerDraftInsertion,
@@ -68,7 +71,12 @@ import { setPendingConnectionError } from "../state/use-remote-environment-regis
 import { useSelectedThreadDetail } from "../state/use-thread-detail";
 import { useThreadSelection } from "../state/use-thread-selection";
 import { enqueueThreadOutboxMessage } from "./thread-outbox";
-import { dispatchingQueuedMessageIdAtom, useThreadOutboxMessages } from "./use-thread-outbox";
+import {
+  dispatchingQueuedMessageIdAtom,
+  isPreparedRecoveryBlockingComposer,
+  readPreparedTurnForQueuedMessage,
+  useThreadOutboxMessages,
+} from "./use-thread-outbox";
 import { threadEnvironment } from "./threads";
 import { useAtomCommand } from "./use-atom-command";
 import {
@@ -331,11 +339,18 @@ export function useThreadComposerState() {
     // its id would strand the message: if the creation is rejected the thread
     // never appears and the drain drops the orphan. The composer disables its
     // send button too; this guard also covers the editor's submit key.
-    if (selectedThreadCreation !== null) {
+    if (selectedThreadCreation !== null && !selectedThreadDetail?.preparedTurn) {
       return null;
     }
 
     const threadKey = scopedThreadKey(selectedThreadShell.environmentId, selectedThreadShell.id);
+    if (
+      isPreparedRecoveryBlockingComposer({
+        environmentId: selectedThreadShell.environmentId,
+        threadId: selectedThreadShell.id,
+      })
+    )
+      return null;
     const draft = getComposerDraftSnapshot(threadKey);
     if (appAtomRegistry.get(composerContextImportsAtom)[threadKey]) return null;
     const thread = selectedThreadDetail ?? selectedThreadShell;
@@ -436,11 +451,19 @@ export function useThreadComposerState() {
     // the tap frame instead of after file I/O. If the write fails the message
     // is rolled out of the queue and the content is merged back into the
     // draft, preserving anything typed since.
+    const released = readPreparedTurnForQueuedMessage({
+      environmentId: selectedThreadShell.environmentId,
+      threadId: selectedThreadShell.id,
+    });
+    retireReleasedPreparedCreationOutcome(threadKey, released);
     const enqueuePromise = enqueueThreadOutboxMessage({
       environmentId: selectedThreadShell.environmentId,
       threadId: selectedThreadShell.id,
       messageId,
       commandId: CommandId.make(metadata.commandId),
+      ...(released?.phase === "released"
+        ? { replacesPreparedRecoveryId: released.recoveryId }
+        : {}),
       text,
       attachments,
       context: draft.context,

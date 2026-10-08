@@ -7,6 +7,32 @@ import { VcsDriverKind } from "./vcs.ts";
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const GIT_LIST_BRANCHES_MAX_LIMIT = 200;
 
+const GitAuthorValue = Schema.String.check(
+  Schema.isPattern(/\S/),
+  Schema.isMaxLength(256),
+  Schema.isPattern(/^[^\r\n\0]+(?![\s\S])/),
+);
+export const GitIdentityInput = Schema.Struct({ cwd: TrimmedNonEmptyString });
+export type GitIdentityInput = typeof GitIdentityInput.Type;
+export const GitIdentityUpdateInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  name: GitAuthorValue,
+  email: GitAuthorValue,
+});
+export type GitIdentityUpdateInput = typeof GitIdentityUpdateInput.Type;
+const GitAuthor = Schema.Struct({
+  name: Schema.NullOr(Schema.String),
+  email: Schema.NullOr(Schema.String),
+});
+export const GitIdentityResult = Schema.Struct({
+  repositoryRoot: Schema.NullOr(Schema.String),
+  ready: Schema.Boolean,
+  effective: GitAuthor,
+  local: GitAuthor,
+  global: GitAuthor,
+});
+export type GitIdentityResult = typeof GitIdentityResult.Type;
+
 // Domain Types
 
 export const GitStackedAction = Schema.Literals([
@@ -114,7 +140,24 @@ export const GitRunStackedActionInput = Schema.Struct({
   actionId: TrimmedNonEmptyStringSchema,
   cwd: TrimmedNonEmptyStringSchema,
   action: GitStackedAction,
+  /** Checked at admission, before mutation. Omit for clients without a captured branch. */
+  expectedBranch: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
   commitMessage: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(10_000))),
+  pullRequest: Schema.optional(
+    Schema.Union([
+      Schema.Struct({
+        title: TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(256)),
+        body: Schema.String.check(Schema.isMaxLength(65_536)),
+        draft: Schema.optional(Schema.Boolean),
+      }),
+      // Omit both content fields to use the configured writing provider.
+      Schema.Struct({
+        title: Schema.optional(Schema.Never),
+        body: Schema.optional(Schema.Never),
+        draft: Schema.optional(Schema.Boolean),
+      }),
+    ]),
+  ),
   featureBranch: Schema.optional(Schema.Boolean),
   filePaths: Schema.optional(
     Schema.Array(TrimmedNonEmptyStringSchema).check(Schema.isMinLength(1)),
@@ -320,6 +363,7 @@ export const GitRunStackedActionResult = Schema.Struct({
   }),
   pr: Schema.Struct({
     status: GitPrStepStatus,
+    linkStatus: Schema.optional(Schema.Literals(["linked", "pending", "not_saved"])),
     url: Schema.optional(Schema.String),
     number: Schema.optional(PositiveInt),
     baseBranch: Schema.optional(TrimmedNonEmptyStringSchema),

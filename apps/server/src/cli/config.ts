@@ -21,6 +21,7 @@ import * as SchemaTransformation from "effect/SchemaTransformation";
 import { Argument, Flag } from "effect/unstable/cli";
 
 import { readBootstrapEnvelope } from "../bootstrap.ts";
+import { DesktopParentLifetimeError } from "../desktopParentLifetime.ts";
 import * as ServerConfig from "../config.ts";
 import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
 
@@ -276,6 +277,15 @@ export const resolveServerConfig = (
         ? yield* readBootstrapEnvelope(DesktopBackendBootstrap, bootstrapFd)
         : Option.none();
     const bootstrap = Option.getOrUndefined(bootstrapEnvelope);
+    if (
+      bootstrap?.desktopParentLifetimeFd !== undefined &&
+      bootstrap.desktopParentLifetimeFd === bootstrapFd
+    ) {
+      return yield* new DesktopParentLifetimeError({
+        fd: bootstrap.desktopParentLifetimeFd,
+        cause: new Error("Desktop ownership and bootstrap channels must be distinct."),
+      });
+    }
 
     const mode: ServerConfig.RuntimeMode = Option.getOrElse(
       resolveOptionPrecedence(
@@ -436,8 +446,14 @@ export const resolveServerConfig = (
       noBrowser,
       startupPresentation,
       desktopBootstrapToken,
+      ...(bootstrap?.desktopAppVersion === undefined
+        ? {}
+        : { desktopAppVersion: bootstrap.desktopAppVersion }),
       desktopTelemetryFd,
       desktopTelemetryControlFd,
+      ...(bootstrap?.desktopParentLifetimeFd === undefined
+        ? {}
+        : { desktopParentLifetimeFd: bootstrap.desktopParentLifetimeFd }),
       resourceMonitorPath,
       autoBootstrapProjectFromCwd,
       logWebSocketEvents,

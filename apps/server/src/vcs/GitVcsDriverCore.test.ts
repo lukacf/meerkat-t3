@@ -43,7 +43,7 @@ const ServerConfigLayer = ServerConfig.layerTest(process.cwd(), {
   prefix: "t3-git-vcs-driver-test-",
 });
 const TestLayer = GitVcsDriver.layer.pipe(
-  Layer.provide(ServerConfigLayer),
+  Layer.provideMerge(ServerConfigLayer),
   Layer.provideMerge(NodeServices.layer),
 );
 
@@ -2114,13 +2114,56 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
       }),
     );
 
+    it.effect(
+      "creates and switches an unborn branch without changing staged or working files",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          yield* git(cwd, ["init", "--initial-branch=main"]);
+          yield* writeTextFile(cwd, "staged.txt", "staged contents\n");
+          yield* writeTextFile(cwd, "local.txt", "untracked contents\n");
+          yield* git(cwd, ["add", "staged.txt"]);
+
+          const result = yield* driver.createRef({
+            cwd,
+            refName: "feature/first-change",
+            switchRef: true,
+          });
+
+          assert.deepEqual(result, { refName: "feature/first-change" });
+          assert.equal(yield* git(cwd, ["symbolic-ref", "--short", "HEAD"]), result.refName);
+          assert.equal(yield* git(cwd, ["show", ":staged.txt"]), "staged contents");
+          assert.equal(yield* git(cwd, ["status", "--porcelain"]), "A  staged.txt\n?? local.txt");
+          const fs = yield* FileSystem.FileSystem;
+          const pathService = yield* Path.Path;
+          assert.equal(
+            yield* fs.readFileString(pathService.join(cwd, "local.txt")),
+            "untracked contents\n",
+          );
+          const head = yield* driver.execute({
+            operation: "GitVcsDriver.test.unbornHead",
+            cwd,
+            args: ["rev-parse", "--verify", "HEAD"],
+            allowNonZeroExit: true,
+          });
+          assert.notEqual(head.exitCode, 0);
+        }),
+    );
+
     it.effect("creates, checks out, renames, and lists refs", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();
-        yield* initRepoWithCommit(cwd);
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
         const driver = yield* GitVcsDriver.GitVcsDriver;
 
         yield* driver.createRef({ cwd, refName: "feature/original" });
+        assert.equal(yield* git(cwd, ["branch", "--show-current"]), initialBranch);
+        const duplicate = yield* driver
+          .createRef({ cwd, refName: "feature/original", switchRef: true })
+          .pipe(Effect.flip);
+        assert.equal(duplicate._tag, "GitCommandError");
+        assert.equal(yield* git(cwd, ["branch", "--show-current"]), initialBranch);
         const switchRef = yield* driver.switchRef({ cwd, refName: "feature/original" });
         assert.equal(switchRef.refName, "feature/original");
 
@@ -2212,6 +2255,92 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
   });
 
   describe("worktree operations", () => {
+    it.effect(
+      "records the computed destination before creation and claims it only afterwards",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          const path = yield* Path.Path;
+          const config = yield* ServerConfig;
+          const expectedPath = path.join(
+            config.worktreesDir,
+            path.basename(cwd),
+            "feature-record-first",
+          );
+          const observations = yield* Ref.make<
+            Array<{ phase: string; path: string; directoryExists: boolean; branchExists: boolean }>
+          >([]);
+          const observe = Effect.fnUntraced(function* (phase: string, destination: string) {
+            const branches = yield* driver.listLocalBranchNames(cwd);
+            yield* Ref.update(observations, (previous) => [
+              ...previous,
+              {
+                phase,
+                path: destination,
+                directoryExists: NodeFS.existsSync(destination),
+                branchExists: branches.includes("feature/record-first"),
+              },
+            ]);
+          });
+          const created = yield* driver.createWorktree(
+            { cwd, path: null, refName: initialBranch, newRefName: "feature/record-first" },
+            {
+              beforeWorktreeCreate: (destination) => observe("before", destination),
+              progress: {
+                onWorktreeClaimed: (destination) =>
+                  observe("claimed", destination).pipe(Effect.orDie),
+              },
+            },
+          );
+          assert.equal(created.worktree.path, expectedPath);
+          assert.deepEqual(yield* Ref.get(observations), [
+            { phase: "before", path: expectedPath, directoryExists: false, branchExists: false },
+            { phase: "claimed", path: expectedPath, directoryExists: true, branchExists: true },
+          ]);
+        }),
+    );
+
+    it.effect("does not create a directory or branch when recording the destination fails", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const path = yield* Path.Path;
+        const relativePath = "blocked-worktree";
+        const expectedPath = path.resolve(cwd, relativePath);
+        const destinations = yield* Ref.make<string[]>([]);
+        const claimed = yield* Ref.make(false);
+        const before = yield* git(cwd, ["worktree", "list", "--porcelain"]);
+        const failure = new GitCommandError({
+          operation: "persistPreparedWorktree",
+          command: "git worktree add",
+          cwd,
+          detail: "Recovery storage unavailable",
+        });
+        const result = yield* driver
+          .createWorktree(
+            { cwd, path: relativePath, refName: initialBranch, newRefName: "feature/blocked" },
+            {
+              beforeWorktreeCreate: (destination) =>
+                Ref.update(destinations, (previous) => [...previous, destination]).pipe(
+                  Effect.andThen(Effect.fail(failure)),
+                ),
+              progress: { onWorktreeClaimed: () => Ref.set(claimed, true) },
+            },
+          )
+          .pipe(Effect.result);
+        assert.isTrue(Result.isFailure(result));
+        if (Result.isFailure(result)) assert.equal(result.failure, failure);
+        assert.deepEqual(yield* Ref.get(destinations), [expectedPath]);
+        assert.isFalse(yield* Ref.get(claimed));
+        assert.isFalse(NodeFS.existsSync(expectedPath));
+        assert.notInclude(yield* driver.listLocalBranchNames(cwd), "feature/blocked");
+        assert.equal(yield* git(cwd, ["worktree", "list", "--porcelain"]), before);
+      }),
+    );
+
     it.effect("uses parallel checkout without skipping filters or hooks", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();

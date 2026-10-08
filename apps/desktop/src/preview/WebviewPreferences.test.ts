@@ -43,9 +43,9 @@ function parseWebPreferences(input: string): Record<string, unknown> {
 describe("PREVIEW_WEBVIEW_PREFERENCES", () => {
   const parsed = parseWebPreferences(PREVIEW_WEBVIEW_PREFERENCES);
 
-  it("contains exactly the three security-critical keys", () => {
+  it("contains the guest security and page-canvas preferences", () => {
     expect(Object.keys(parsed).toSorted()).toEqual(
-      ["contextIsolation", "nodeIntegration", "sandbox"].toSorted(),
+      ["contextIsolation", "nodeIntegration", "sandbox", "transparent"].toSorted(),
     );
   });
 
@@ -68,6 +68,10 @@ describe("PREVIEW_WEBVIEW_PREFERENCES", () => {
 
   it("disables nodeIntegration (defense in depth — page never gets Node)", () => {
     expect(parsed["nodeIntegration"]).toBe("false");
+  });
+
+  it("uses Chromium's opaque page canvas for preview captures", () => {
+    expect(parsed["transparent"]).toBe("false");
   });
 
   it("contains no whitespace (Electron's parser does not trim)", () => {

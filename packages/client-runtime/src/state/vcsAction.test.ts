@@ -656,11 +656,14 @@ describe("vcsActionState", () => {
 
         expect(registry.get(state).revision).toBe(0);
         const threadId = ThreadId.make("thread-stacked-action");
+        const pullRequest = { draft: true };
         const successfulResult = yield* Effect.promise(() =>
           manager.runStackedAction(targetKey).run(registry, {
             actionId: successfulActionId,
             action,
             threadId,
+            pullRequest,
+            expectedBranch: "main",
           }),
         );
 
@@ -669,19 +672,34 @@ describe("vcsActionState", () => {
         expect(removed).toEqual([`${environmentId}:*`]);
         // The server links a created pull request to this thread, so the id must ride along.
         expect(rpcInputs).toEqual([
-          { actionId: successfulTransportActionId, cwd, action, threadId },
+          {
+            actionId: successfulTransportActionId,
+            cwd,
+            action,
+            threadId,
+            pullRequest,
+            expectedBranch: "main",
+          },
         ]);
 
         const failedResult = yield* Effect.promise(() =>
           manager.runStackedAction(targetKey).run(registry, {
             actionId: failedActionId,
             action,
+            pullRequest: { title: "Manual title", body: "Manual body", draft: false },
+            expectedBranch: null,
           }),
         );
 
         expect(AsyncResult.isFailure(failedResult)).toBe(true);
         expect(registry.get(state).revision).toBe(2);
         expect(removed).toEqual([`${environmentId}:*`, `${environmentId}:*`]);
+        expect(rpcInputs[1]?.pullRequest).toEqual({
+          title: "Manual title",
+          body: "Manual body",
+          draft: false,
+        });
+        expect(rpcInputs[1]?.expectedBranch).toBeNull();
       }),
     ),
   );

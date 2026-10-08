@@ -1,3 +1,5 @@
+import { collectMeerkatSkillSelections } from "./meerkatSkills.ts";
+
 export type ComposerInlineToken =
   | {
       readonly type: "mention";
@@ -9,6 +11,7 @@ export type ComposerInlineToken =
   | {
       readonly type: "skill";
       readonly value: string;
+      readonly path?: string;
       readonly source: string;
       readonly start: number;
       readonly end: number;
@@ -106,7 +109,20 @@ export function collectComposerInlineTokens(
   text: string,
   options: CollectComposerInlineTokensOptions = {},
 ): ReadonlyArray<ComposerInlineToken> {
-  const matches = collectMentionTokens(text);
+  const nativeSkills = collectMeerkatSkillSelections(text);
+  const matches: ComposerInlineToken[] = [
+    ...collectMentionTokens(text).filter(
+      (token) => !nativeSkills.some((skill) => token.start < skill.end && token.end > skill.start),
+    ),
+    ...nativeSkills.map((skill) => ({
+      type: "skill" as const,
+      value: skill.key.skill_name,
+      path: skill.path,
+      source: skill.source,
+      start: skill.start,
+      end: skill.end,
+    })),
+  ];
 
   for (const match of text.matchAll(SKILL_TOKEN_REGEX)) {
     const fullMatch = match[0];
@@ -117,6 +133,7 @@ export function collectComposerInlineTokens(
     }
     const start = (match.index ?? 0) + prefix.length;
     const end = start + fullMatch.length - prefix.length;
+    if (nativeSkills.some((skill) => start < skill.end && end > skill.start)) continue;
     matches.push({
       type: "skill",
       value,

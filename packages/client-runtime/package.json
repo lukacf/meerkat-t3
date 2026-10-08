@@ -95,6 +95,10 @@
       "types": "./src/providerSkills.ts",
       "default": "./src/providerSkills.ts"
     },
+    "./providerWorkspaceReadiness": {
+      "types": "./src/providerWorkspaceReadiness.ts",
+      "default": "./src/providerWorkspaceReadiness.ts"
+    },
     "./voice-input": {
       "types": "./src/voice-input/index.ts",
       "default": "./src/voice-input/index.ts"
@@ -138,6 +142,14 @@
     "./state/git": {
       "types": "./src/state/git.ts",
       "default": "./src/state/git.ts"
+    },
+    "./state/meerkatControls": {
+      "types": "./src/state/meerkatControls.ts",
+      "default": "./src/state/meerkatControls.ts"
+    },
+    "./state/meerkatTeam": {
+      "types": "./src/state/meerkatTeam.ts",
+      "default": "./src/state/meerkatTeam.ts"
     },
     "./state/models": {
       "types": "./src/state/models.ts",
@@ -302,6 +314,14 @@
     "./device/duo-control": {
       "types": "./src/device/duoControl.ts",
       "default": "./src/device/duoControl.ts"
+    },
+    "./state/meerkatMedia": {
+      "types": "./src/state/meerkatMedia.ts",
+      "default": "./src/state/meerkatMedia.ts"
+    },
+    "./state/projectTerminal": {
+      "types": "./src/state/projectTerminal.ts",
+      "default": "./src/state/projectTerminal.ts"
     }
   },
   "scripts": {

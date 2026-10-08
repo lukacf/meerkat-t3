@@ -31,6 +31,41 @@ function model(input: {
 }
 
 describe("getProviderModelCapabilities", () => {
+  it("removes automatic cache controls from a cached Meerkat catalog", () => {
+    const models = [
+      model({
+        slug: "openai:model",
+        capabilities: {
+          optionDescriptors: [
+            {
+              id: "prompt_cache_enabled",
+              label: "Prompt caching",
+              type: "boolean",
+              currentValue: false,
+            },
+            {
+              id: "reasoning_effort",
+              label: "Reasoning",
+              type: "select",
+              options: [{ id: "high", label: "High" }],
+            },
+          ],
+        },
+      }),
+    ];
+    expect(
+      getProviderModelCapabilities(models, "openai:model", ProviderDriverKind.make("meerkat")),
+    ).toEqual({
+      optionDescriptors: [
+        {
+          id: "reasoning_effort",
+          label: "Reasoning level",
+          type: "select",
+          options: [{ id: "high", label: "High" }],
+        },
+      ],
+    });
+  });
   it("resolves model-declared aliases", () => {
     const aliasCapabilities = capabilities("aliased-option");
     const models = [

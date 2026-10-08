@@ -79,6 +79,11 @@ import {
 } from "./useScopedSettings";
 import { useScopedModelDisabledReason } from "./useScopedModelAvailability";
 import { useSettingsScope } from "./SettingsScopeContext";
+import { useSettingsProviderReadiness } from "./useSettingsProviderReadiness";
+import {
+  preserveSettingsNativeModelSelection,
+  settingsModelUnavailableLabel,
+} from "./settingsProviderReadiness";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
@@ -275,6 +280,7 @@ function AboutVersionSection() {
   const [isUpdateActionPending, setIsUpdateActionPending] = useState(false);
 
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
+  const updatesEnabled = updateState?.enabled === true && updateState.status !== "disabled";
   const selectedUpdateChannel = updateState?.channel ?? "latest";
   const selectedHostedAppChannel = hasDesktopBridge ? null : HOSTED_APP_CHANNEL;
 
@@ -283,6 +289,7 @@ function AboutVersionSection() {
       const bridge = window.desktopBridge;
       if (
         !bridge ||
+        !updatesEnabled ||
         typeof bridge.setUpdateChannel !== "function" ||
         channel === selectedUpdateChannel
       ) {
@@ -305,7 +312,7 @@ function AboutVersionSection() {
           setIsChangingUpdateChannel(false);
         });
     },
-    [selectedUpdateChannel],
+    [selectedUpdateChannel, updatesEnabled],
   );
 
   const handleButtonClick = useCallback(async () => {
@@ -436,7 +443,7 @@ function AboutVersionSection() {
           </Tooltip>
         }
       />
-      {hasDesktopBridge ? (
+      {hasDesktopBridge && updatesEnabled ? (
         <SettingsRow
           title="Update track"
           description="Use stable releases or nightly builds. Switch back anytime."
@@ -466,6 +473,25 @@ function AboutVersionSection() {
                 </SelectItem>
               </SelectPopup>
             </Select>
+          }
+        />
+      ) : hasDesktopBridge ? (
+        <SettingsRow
+          title={updateState ? "Manual updates" : "Update status unavailable"}
+          description={
+            updateState
+              ? (updateState.message ??
+                "Automatic updates are unavailable. Ask your prototype distributor for the next build.")
+              : "Update status is not available yet. The update guide explains manual updates."
+          }
+          control={
+            <Button
+              size="sm"
+              variant="outline"
+              render={<Link to="/help" search={{ topic: "updates" }} />}
+            >
+              Update guide
+            </Button>
           }
         />
       ) : selectedHostedAppChannel ? (
@@ -2109,7 +2135,7 @@ export function GeneralSettingsPanel() {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const navigate = useNavigate();
-  const { scope, environment, connectedEnvironments } = useSettingsScope();
+  const { scope, search, environment, connectedEnvironments } = useSettingsScope();
   // The representative environment supplies the provider list for pickers;
   // a fanned-out model choice is validated against every target before it
   // is written. Per-machine tuning (background activity overrides) still
@@ -2123,7 +2149,14 @@ export function GeneralSettingsPanel() {
   const lastEnabledProjectGroupingMode = useRef<SidebarProjectGroupingMode>(
     readLastEnabledProjectGroupingMode(),
   );
-  const serverProviders = environment?.serverConfig?.providers ?? EMPTY_SERVER_PROVIDERS;
+  const {
+    providers: serverProviders,
+    pendingInstanceIds,
+    pendingMessage,
+  } = useSettingsProviderReadiness(
+    environmentId,
+    environment?.serverConfig?.providers ?? EMPTY_SERVER_PROVIDERS,
+  );
   const supportsAutoSettlement =
     connectedEnvironments.length > 0 &&
     connectedEnvironments.every(
@@ -2138,9 +2171,14 @@ export function GeneralSettingsPanel() {
   const textGenerationProviders = serverProviders.filter(
     (provider) => provider.supportsTextGeneration !== false,
   );
-  const textGenerationModelSelection = resolveAppModelSelectionState(
-    settings,
+  const textGenerationModelSelection = preserveSettingsNativeModelSelection(
     textGenerationProviders,
+    settings.textGenerationModelSelection,
+    resolveAppModelSelectionState(settings, textGenerationProviders),
+  );
+  const unavailableModelLabel = settingsModelUnavailableLabel(
+    textGenerationProviders,
+    textGenerationModelSelection,
   );
   const textGenInstanceId = textGenerationModelSelection.instanceId;
   const textGenModel = textGenerationModelSelection.model;
@@ -3103,7 +3141,9 @@ export function GeneralSettingsPanel() {
               </span>
             ) : !hasTextGenerationProvider ? (
               <span className="text-sm text-muted-foreground">
-                No text generation providers available.
+                {pendingInstanceIds.size > 0
+                  ? pendingMessage
+                  : "No text generation providers available."}
               </span>
             ) : (
               <div className="flex flex-wrap items-center justify-end gap-1.5">
@@ -3114,14 +3154,18 @@ export function GeneralSettingsPanel() {
                   instanceEntries={textGenerationModelInstanceEntries}
                   modelOptionsByInstance={textGenerationModelOptionsByInstance}
                   triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                  {...(mixedTextGenerationModel ? { triggerLabel: "Mixed" } : {})}
+                  {...(mixedTextGenerationModel
+                    ? { triggerLabel: "Mixed" }
+                    : unavailableModelLabel
+                      ? { triggerLabel: unavailableModelLabel }
+                      : {})}
                   getModelDisabledReason={textGenerationModelDisabledReason}
                   {...(environmentId
                     ? {
                         onOpenProviderSetup: (instanceId: ProviderInstanceId) => {
                           void navigate({
                             to: "/settings/providers",
-                            search: { environmentId, instanceId },
+                            search: { ...search, environmentId, instanceId },
                           });
                         },
                       }
@@ -3147,7 +3191,7 @@ export function GeneralSettingsPanel() {
                     });
                   }}
                 />
-                {textGenInstanceEntry ? (
+                {textGenInstanceEntry && !mixedTextGenerationModel && !unavailableModelLabel ? (
                   <TraitsPicker
                     provider={textGenProvider}
                     models={
@@ -3165,6 +3209,18 @@ export function GeneralSettingsPanel() {
                     planModeEnabled={settings.planModeEnabled}
                     triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
                     onModelOptionsChange={(nextOptions) => {
+                      const reason = textGenerationModelDisabledReason(
+                        textGenInstanceId,
+                        textGenModel,
+                      );
+                      if (reason) {
+                        toastManager.add({
+                          type: "error",
+                          title: "Text generation model not saved",
+                          description: reason,
+                        });
+                        return;
+                      }
                       updateSettings({
                         textGenerationModelSelection: resolveAppModelSelectionState(
                           {
@@ -3219,7 +3275,7 @@ export function GeneralSettingsPanel() {
         />
         <SettingsRow
           {...searchableSetting("open-source-licenses")}
-          description="Notices for dependencies, assets, and optional tools used by T3 Code."
+          description="License notices for Meerkat T3 and its bundled software and assets."
           control={
             <Button
               render={<Link to="/settings/open-source-licenses" />}

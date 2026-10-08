@@ -2,7 +2,7 @@
 
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
 import { CheckIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ProviderInstanceId,
   ProviderDriverKind,
@@ -10,7 +10,9 @@ import {
   type ProviderInstanceConfig,
 } from "@t3tools/contracts";
 
-import { useEnvironmentSettings, useUpdateEnvironmentSettings } from "../../hooks/useSettings";
+import { useEnvironmentSettings } from "../../hooks/useSettings";
+import { serverEnvironment } from "../../state/server";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { cn } from "../../lib/utils";
 import { normalizeProviderAccentColor } from "../../providerInstances";
 import { Button } from "../ui/button";
@@ -116,14 +118,30 @@ interface AddProviderInstanceDialogProps {
   readonly onOpenChange: (open: boolean) => void;
 }
 
-export function AddProviderInstanceDialog({
+export function AddProviderInstanceDialog(props: AddProviderInstanceDialogProps) {
+  return <InstanceDialog key={props.environmentId} {...props} />;
+}
+
+function InstanceDialog({
   open,
   environmentId,
   environmentLabel,
   onOpenChange,
 }: AddProviderInstanceDialogProps) {
   const settings = useEnvironmentSettings(environmentId);
-  const updateSettings = useUpdateEnvironmentSettings(environmentId);
+  const updateSettings = useAtomCommand(serverEnvironment.updateProviderSettings, {
+    reportFailure: false,
+  });
+  const [pending, setPending] = useState(false);
+  const [saveError, setSaveError] = useState(false);
+  const pendingRef = useRef(false);
+  const activeRef = useRef(true);
+  useLayoutEffect(() => {
+    activeRef.current = true;
+    return () => {
+      activeRef.current = false;
+    };
+  }, []);
 
   const [wizardStep, setWizardStep] = useState(0);
   const [driver, setDriver] = useState<ProviderDriverKind>(DEFAULT_DRIVER_KIND);
@@ -167,6 +185,7 @@ export function AddProviderInstanceDialog({
   };
 
   const applyWizardNavigation = (navigation: WizardNavigation) => {
+    if (pendingRef.current) return;
     if (navigation.kind === "blocked") {
       setHasAttemptedSubmit(true);
     }
@@ -181,7 +200,8 @@ export function AddProviderInstanceDialog({
     );
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    if (!activeRef.current || pendingRef.current) return;
     setHasAttemptedSubmit(true);
     if (instanceIdError !== null) return;
 
@@ -201,222 +221,263 @@ export function AddProviderInstanceDialog({
     // keeps the type boundary honest and guards against any future drift in
     // the slug rules.
     const brandedId = ProviderInstanceId.make(instanceId);
-    const nextMap = {
-      ...settings.providerInstances,
-      [brandedId]: nextInstance,
-    };
+    pendingRef.current = true;
+    setPending(true);
+    setSaveError(false);
     try {
-      updateSettings({ providerInstances: nextMap });
+      const result = await updateSettings({
+        environmentId,
+        input: { kind: "add", instanceId: brandedId, instance: nextInstance },
+      });
+      if (!activeRef.current) return;
+      if (result._tag === "Failure") {
+        setSaveError(true);
+        return;
+      }
       toastManager.add({
         type: "success",
         title: "Provider instance added",
         description: `${driverOption.label} instance '${instanceId}' was added.`,
       });
       onOpenChange(false);
-    } catch (error) {
-      toastManager.add({
-        type: "error",
-        title: "Could not add provider instance",
-        description: error instanceof Error ? error.message : "Update failed.",
-      });
+    } catch {
+      if (activeRef.current) setSaveError(true);
+    } finally {
+      pendingRef.current = false;
+      if (activeRef.current) setPending(false);
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen, event) => {
+        // A dismissed in-flight save could succeed after the user starts again.
+        if (pendingRef.current) {
+          event.cancel();
+          return;
+        }
+        onOpenChange(nextOpen);
+      }}
+    >
       <WizardPopup>
-        <WizardHeader
-          title="Add provider instance"
-          description={
-            <>
-              Configure an additional provider instance on {environmentLabel} — for example, a
-              second Codex install pointed at a different workspace.
-            </>
-          }
-        >
-          <AddProviderInstanceWizardSteps
-            currentStep={wizardStep}
-            summaries={wizardStepSummaries}
-            instanceIdError={instanceIdError}
-            onNavigation={applyWizardNavigation}
-          />
-        </WizardHeader>
-
-        <WizardPanel>
-          <div className={cn("grid gap-2", wizardStep !== 0 && "hidden")}>
-            <div id="add-instance-driver-label" className="text-sm font-medium text-foreground">
-              Driver
-            </div>
-            <RadioGroup
-              value={driver}
-              onValueChange={(value) => setDriver(ProviderDriverKind.make(value))}
-              aria-labelledby="add-instance-driver-label"
-              className="grid grid-cols-1 sm:grid-cols-2"
-            >
-              {DRIVER_OPTIONS.map((option) => {
-                const IconComponent = option.icon;
-                return (
-                  <RadioPrimitive.Root
-                    key={option.value}
-                    value={option.value}
-                    className="relative flex cursor-pointer items-center gap-3 rounded-lg bg-card px-3 py-3 text-left text-muted-foreground outline-none ring-1 ring-black/5 hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring data-checked:bg-primary/8 data-checked:text-foreground data-checked:ring-2 data-checked:ring-primary data-checked:hover:bg-primary/8 dark:bg-white/3 dark:ring-white/5 dark:hover:bg-white/5 dark:data-checked:bg-primary/15 dark:data-checked:ring-primary dark:data-checked:hover:bg-primary/15"
-                  >
-                    <IconComponent className="size-4 shrink-0" aria-hidden />
-                    <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
-                      {option.label}
-                    </span>
-                    <RadioPrimitive.Indicator
-                      className="grid size-5 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground"
-                      aria-hidden
-                    >
-                      <CheckIcon className="size-3.5 shrink-0" />
-                    </RadioPrimitive.Indicator>
-                    {option.badgeLabel ? (
-                      <Badge variant="warning" size="sm">
-                        {option.badgeLabel}
-                      </Badge>
-                    ) : null}
-                  </RadioPrimitive.Root>
-                );
-              })}
-              {COMING_SOON_DRIVER_OPTIONS.map((option) => {
-                const IconComponent = option.icon;
-                return (
-                  <RadioPrimitive.Root
-                    key={option.value}
-                    value={option.value}
-                    disabled
-                    className={cn(
-                      "relative flex cursor-not-allowed items-center gap-3 rounded-lg bg-card/60 px-3 py-3 text-left opacity-64 outline-none ring-1 ring-black/5 dark:bg-white/2 dark:ring-white/5",
-                    )}
-                  >
-                    <IconComponent className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-                    <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
-                      {option.label}
-                    </span>
-                    <Badge variant="warning" size="sm">
-                      Coming Soon
-                    </Badge>
-                  </RadioPrimitive.Root>
-                );
-              })}
-            </RadioGroup>
-          </div>
-
-          <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
-            <span className="text-xs font-medium text-foreground">Label</span>
-            <Input
-              placeholder="e.g. Work"
-              value={label}
-              onChange={(event) => setLabel(event.target.value)}
+        <fieldset disabled={pending} className="contents">
+          <WizardHeader
+            title="Add provider instance"
+            description={
+              <>
+                Configure an additional provider instance on {environmentLabel} — for example, a
+                second Codex install pointed at a different workspace.
+              </>
+            }
+          >
+            <AddProviderInstanceWizardSteps
+              currentStep={wizardStep}
+              summaries={wizardStepSummaries}
+              instanceIdError={instanceIdError}
+              onNavigation={applyWizardNavigation}
             />
-            <span className="text-2xs text-muted-foreground">
-              Shown in the provider list. Optional.
-            </span>
-          </label>
+          </WizardHeader>
 
-          <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
-            <span className="text-xs font-medium text-foreground">Instance ID</span>
-            <Input
-              placeholder={`${driver}_work`}
-              value={instanceId}
-              onChange={(event) => {
-                setInstanceIdOverride(event.target.value);
-              }}
-              aria-invalid={showInstanceIdError}
-            />
-            {showInstanceIdError ? (
-              <span className="text-2xs text-destructive">{instanceIdError}</span>
-            ) : (
-              <span className="text-2xs text-muted-foreground">
-                Routing key used by threads and sessions. Letters, digits, '-', or '_'.
-              </span>
-            )}
-          </label>
-
-          <div className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
-            <span className="text-xs font-medium text-foreground">Accent color</span>
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              <ProviderAccentColorPicker
-                displayName={label || driverOption.label}
-                value={accentColor || undefined}
-                onCommit={setAccentColor}
-                layout="inline"
-              />
-              <div className="flex flex-wrap gap-1.5">
-                {PROVIDER_ACCENT_SWATCHES.map((swatch) => {
-                  const selected = accentColor.toLowerCase() === swatch;
+          <WizardPanel>
+            <div className={cn("grid gap-2", wizardStep !== 0 && "hidden")}>
+              <div id="add-instance-driver-label" className="text-sm font-medium text-foreground">
+                Driver
+              </div>
+              <RadioGroup
+                value={driver}
+                onValueChange={(value) => setDriver(ProviderDriverKind.make(value))}
+                aria-labelledby="add-instance-driver-label"
+                className="grid grid-cols-1 sm:grid-cols-2"
+              >
+                {DRIVER_OPTIONS.map((option) => {
+                  const IconComponent = option.icon;
                   return (
-                    <button
-                      key={swatch}
-                      type="button"
-                      className={cn(
-                        "size-6 cursor-pointer rounded-full border transition",
-                        selected
-                          ? "scale-110 border-foreground ring-2 ring-ring ring-offset-1 ring-offset-background"
-                          : "border-black/10 hover:scale-105 dark:border-white/20",
-                      )}
-                      style={{ backgroundColor: swatch }}
-                      onClick={() => setAccentColor(swatch)}
-                      aria-label={`Use ${swatch} accent`}
-                    />
+                    <RadioPrimitive.Root
+                      key={option.value}
+                      value={option.value}
+                      className="relative flex cursor-pointer items-center gap-3 rounded-lg bg-card px-3 py-3 text-left text-muted-foreground outline-none ring-1 ring-black/5 hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring data-checked:bg-primary/8 data-checked:text-foreground data-checked:ring-2 data-checked:ring-primary data-checked:hover:bg-primary/8 dark:bg-white/3 dark:ring-white/5 dark:hover:bg-white/5 dark:data-checked:bg-primary/15 dark:data-checked:ring-primary dark:data-checked:hover:bg-primary/15"
+                    >
+                      <IconComponent className="size-4 shrink-0" aria-hidden />
+                      <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
+                        {option.label}
+                      </span>
+                      <RadioPrimitive.Indicator
+                        className="grid size-5 shrink-0 place-items-center rounded-full bg-primary text-primary-foreground"
+                        aria-hidden
+                      >
+                        <CheckIcon className="size-3.5 shrink-0" />
+                      </RadioPrimitive.Indicator>
+                      {option.badgeLabel ? (
+                        <Badge variant="warning" size="sm">
+                          {option.badgeLabel}
+                        </Badge>
+                      ) : null}
+                    </RadioPrimitive.Root>
                   );
                 })}
-              </div>
-              {accentColor ? (
-                <Button
-                  type="button"
-                  size="xs"
-                  variant="ghost-muted"
-                  onClick={() => setAccentColor("")}
-                >
-                  Clear
-                </Button>
-              ) : null}
+                {COMING_SOON_DRIVER_OPTIONS.map((option) => {
+                  const IconComponent = option.icon;
+                  return (
+                    <RadioPrimitive.Root
+                      key={option.value}
+                      value={option.value}
+                      disabled
+                      className={cn(
+                        "relative flex cursor-not-allowed items-center gap-3 rounded-lg bg-card/60 px-3 py-3 text-left opacity-64 outline-none ring-1 ring-black/5 dark:bg-white/2 dark:ring-white/5",
+                      )}
+                    >
+                      <IconComponent
+                        className="size-4 shrink-0 text-muted-foreground"
+                        aria-hidden
+                      />
+                      <span className="min-w-0 flex-1 truncate text-sm font-medium text-foreground">
+                        {option.label}
+                      </span>
+                      <Badge variant="warning" size="sm">
+                        Coming Soon
+                      </Badge>
+                    </RadioPrimitive.Root>
+                  );
+                })}
+              </RadioGroup>
             </div>
-            <span className="text-2xs text-muted-foreground">
-              Optional marker shown in the picker.
-            </span>
-          </div>
 
-          {driverSettingsFields.length > 0 ? (
-            <div className={cn("grid gap-4", wizardStep !== 2 && "hidden")}>
-              <ProviderSettingsForm
-                definition={driverOption}
-                value={configDraft}
-                idPrefix={`add-provider-${driver}`}
-                variant="dialog"
-                onChange={setConfigDraft}
+            <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
+              <span className="text-xs font-medium text-foreground">Label</span>
+              <Input
+                placeholder="e.g. Work"
+                value={label}
+                onChange={(event) => setLabel(event.target.value)}
               />
-            </div>
-          ) : wizardStep === 2 ? (
-            <div className="grid gap-2">
-              <p className="text-sm text-muted-foreground">
-                This driver has no required configuration. You can add the instance now.
-              </p>
-            </div>
-          ) : null}
-        </WizardPanel>
+              <span className="text-2xs text-muted-foreground">
+                Shown in the provider list. Optional.
+              </span>
+            </label>
 
-        <WizardFooter>
-          <Button
-            variant="outline"
-            onClick={() => {
-              if (wizardStep === 0) {
-                onOpenChange(false);
-                return;
-              }
-              setWizardStep((step) => Math.max(0, step - 1));
-            }}
-          >
-            {wizardStep === 0 ? "Cancel" : "Back"}
-          </Button>
-          {wizardStep < ADD_PROVIDER_WIZARD_STEPS.length - 1 ? (
-            <Button onClick={() => navigateToStep(wizardStep + 1)}>Next</Button>
-          ) : (
-            <Button onClick={handleSave}>Add instance</Button>
-          )}
-        </WizardFooter>
+            <label className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
+              <span className="text-xs font-medium text-foreground">Instance ID</span>
+              <Input
+                placeholder={`${driver}_work`}
+                value={instanceId}
+                onChange={(event) => {
+                  setInstanceIdOverride(event.target.value);
+                }}
+                aria-invalid={showInstanceIdError}
+              />
+              {showInstanceIdError ? (
+                <span className="text-2xs text-destructive">{instanceIdError}</span>
+              ) : (
+                <span className="text-2xs text-muted-foreground">
+                  Routing key used by threads and sessions. Letters, digits, '-', or '_'.
+                </span>
+              )}
+            </label>
+
+            <div className={cn("grid gap-2", wizardStep !== 1 && "hidden")}>
+              <span className="text-xs font-medium text-foreground">Accent color</span>
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                <ProviderAccentColorPicker
+                  displayName={label || driverOption.label}
+                  value={accentColor || undefined}
+                  onCommit={setAccentColor}
+                  layout="inline"
+                />
+                <div className="flex flex-wrap gap-1.5">
+                  {PROVIDER_ACCENT_SWATCHES.map((swatch) => {
+                    const selected = accentColor.toLowerCase() === swatch;
+                    return (
+                      <button
+                        key={swatch}
+                        type="button"
+                        className={cn(
+                          "size-6 cursor-pointer rounded-full border transition",
+                          selected
+                            ? "scale-110 border-foreground ring-2 ring-ring ring-offset-1 ring-offset-background"
+                            : "border-black/10 hover:scale-105 dark:border-white/20",
+                        )}
+                        style={{ backgroundColor: swatch }}
+                        onClick={() => setAccentColor(swatch)}
+                        aria-label={`Use ${swatch} accent`}
+                      />
+                    );
+                  })}
+                </div>
+                {accentColor ? (
+                  <Button
+                    type="button"
+                    size="xs"
+                    variant="ghost-muted"
+                    onClick={() => setAccentColor("")}
+                  >
+                    Clear
+                  </Button>
+                ) : null}
+              </div>
+              <span className="text-2xs text-muted-foreground">
+                Optional marker shown in the picker.
+              </span>
+            </div>
+
+            {driverSettingsFields.length > 0 ? (
+              <div className={cn("grid gap-4", wizardStep !== 2 && "hidden")}>
+                <ProviderSettingsForm
+                  definition={driverOption}
+                  value={configDraft}
+                  idPrefix={`add-provider-${driver}`}
+                  variant="dialog"
+                  onChange={setConfigDraft}
+                />
+              </div>
+            ) : wizardStep === 2 ? (
+              <div className="grid gap-2">
+                <p className="text-sm text-muted-foreground">
+                  {driverOption.runtimeDescription ??
+                    "This driver has no required configuration. You can add the instance now."}
+                </p>
+              </div>
+            ) : null}
+            {saveError ? (
+              <p role="alert" className="text-sm text-destructive">
+                Could not add this provider instance on {environmentLabel}. Your entries are kept
+                here. Try again when the device can save settings.
+              </p>
+            ) : null}
+            {pending ? (
+              <p role="status" className="text-sm text-muted-foreground">
+                Saving the provider instance on {environmentLabel}...
+              </p>
+            ) : null}
+          </WizardPanel>
+
+          <WizardFooter>
+            <Button
+              variant="outline"
+              disabled={pending}
+              onClick={() => {
+                if (pendingRef.current) return;
+                if (wizardStep === 0) {
+                  onOpenChange(false);
+                  return;
+                }
+                setWizardStep((step) => Math.max(0, step - 1));
+              }}
+            >
+              {wizardStep === 0 ? "Cancel" : "Back"}
+            </Button>
+            {wizardStep < ADD_PROVIDER_WIZARD_STEPS.length - 1 ? (
+              <Button onClick={() => navigateToStep(wizardStep + 1)}>Next</Button>
+            ) : (
+              <Button disabled={pending} onClick={() => void handleSave()}>
+                {pending
+                  ? "Adding instance..."
+                  : saveError
+                    ? "Retry adding instance"
+                    : "Add instance"}
+              </Button>
+            )}
+          </WizardFooter>
+        </fieldset>
       </WizardPopup>
     </Dialog>
   );

@@ -1,3 +1,6 @@
+import { meerkatCheckpointStoreLayer } from "./provider/meerkat/MeerkatCheckpointStore.ts";
+import { openRestoreReview, ProfileRestoreReview } from "./restoreReview.ts";
+import serverPackage from "../package.json" with { type: "json" };
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeHttp from "node:http";
 
@@ -6,6 +9,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   EnvironmentHttpApi,
   ProviderDriverKind,
+  RestoreReviewError,
   type RepositoryIdentity,
 } from "@t3tools/contracts";
 import type { RelayManagedEndpointRuntimeConfig } from "@t3tools/contracts/relay";
@@ -79,6 +83,7 @@ import * as PreviewManager from "./preview/Manager.ts";
 import * as PortScanner from "./preview/PortScanner.ts";
 import * as ProcessRunner from "./processRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
+import * as CreatedPullRequestLinkStore from "./git/CreatedPullRequestLinkStore.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
@@ -110,6 +115,7 @@ import * as VcsProcess from "./vcs/VcsProcess.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
+import * as ProjectCloneIntentStore from "./project/ProjectCloneIntentStore.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as SourceControlProviderRegistry from "./sourceControl/SourceControlProviderRegistry.ts";
@@ -377,6 +383,7 @@ const SourceControlRepositoryServiceLayerLive = SourceControlRepositoryService.l
 
 const ProjectCloneTrackerLayerLive = ProjectCloneTracker.layer.pipe(
   Layer.provide(SourceControlRepositoryServiceLayerLive),
+  Layer.provide(ProjectCloneIntentStore.layer),
 );
 
 const ReviewLayerLive = ReviewService.layer.pipe(
@@ -510,6 +517,7 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   ),
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
+  Layer.provideMerge(CreatedPullRequestLinkStore.layer),
   Layer.provideMerge(ProviderRuntimeLayerLive),
   Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, PreviewLayerLive, DeviceLayerLive)),
   Layer.provideMerge(PersistenceLayerLive),
@@ -544,6 +552,13 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // no longer transitively provides it. Exposing it at the runtime level
   // keeps a single Live for all opencode consumers.
   Layer.provideMerge(OpenCodeRuntime.OpenCodeRuntimeLive),
+  Layer.provideMerge(
+    meerkatCheckpointStoreLayer.pipe(
+      Layer.provide(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistryLayerLive))),
+      Layer.provide(SourceControlProviderRegistryLayerLive),
+      Layer.provide(PersistenceLayerLive),
+    ),
+  ),
   Layer.provideMerge(WorkspaceLayerLive),
   Layer.provideMerge(Layer.mergeAll(NativeAppIconResolver.layer, ProjectFaviconResolverLayerLive)),
   Layer.provideMerge(RepositoryIdentityResolverLayerLive),
@@ -614,6 +629,12 @@ export const makeRoutesLayer = Layer.mergeAll(
 const makeServerLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
+    const restoreReview = yield* Effect.tryPromise({
+      try: () =>
+        openRestoreReview(config.baseDir, config.desktopAppVersion ?? serverPackage.version),
+      catch: () =>
+        new RestoreReviewError({ message: "Could not initialize profile recovery protection." }),
+    });
     const activation = yield* Deferred.make<void>();
     const awaitActivation = Deferred.await(activation);
     const activationLayer = Layer.succeed(ServerActivation, awaitActivation);
@@ -961,6 +982,7 @@ const makeServerLayer = Layer.unwrap(
 
     return serverApplicationLayer.pipe(
       Layer.provideMerge(runtimeServicesLive),
+      Layer.provide(Layer.succeed(ProfileRestoreReview, restoreReview)),
       Layer.provide(activationLayer),
       Layer.provideMerge(serverRelayBrokerTracingLayer),
       Layer.provideMerge(HttpServerLive),

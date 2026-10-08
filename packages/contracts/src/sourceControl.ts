@@ -85,6 +85,14 @@ export const SourceControlCloneRepositoryResult = Schema.Struct({
 });
 export type SourceControlCloneRepositoryResult = typeof SourceControlCloneRepositoryResult.Type;
 
+export const SourceControlPublishResume = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  repository: SourceControlRepositoryInfo,
+  remoteName: TrimmedNonEmptyString,
+  remoteUrl: TrimmedNonEmptyString,
+});
+export type SourceControlPublishResume = typeof SourceControlPublishResume.Type;
+
 export const SourceControlPublishRepositoryInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   provider: SourceControlProviderKind,
@@ -92,20 +100,42 @@ export const SourceControlPublishRepositoryInput = Schema.Struct({
   visibility: SourceControlRepositoryVisibility,
   remoteName: Schema.optional(TrimmedNonEmptyString),
   protocol: Schema.optional(SourceControlCloneProtocol),
+  /** Continue only a repository whose creation returned a successful receipt. */
+  resume: Schema.optional(SourceControlPublishResume),
 });
 export type SourceControlPublishRepositoryInput = typeof SourceControlPublishRepositoryInput.Type;
 
-export const SourceControlPublishStatus = Schema.Literals(["pushed", "remote_added"]);
+export const SourceControlPublishStatus = Schema.Literals([
+  "pushed",
+  "remote_added",
+  "remote_pending",
+  "push_pending",
+]);
 export type SourceControlPublishStatus = typeof SourceControlPublishStatus.Type;
 
-export const SourceControlPublishRepositoryResult = Schema.Struct({
+const SourceControlPublishResultFields = {
   repository: SourceControlRepositoryInfo,
   remoteName: TrimmedNonEmptyString,
   remoteUrl: TrimmedNonEmptyString,
-  branch: TrimmedNonEmptyString,
-  upstreamBranch: Schema.optional(TrimmedNonEmptyString),
-  status: SourceControlPublishStatus,
+} as const;
+
+export const SourceControlPublishPendingResult = Schema.Struct({
+  ...SourceControlPublishResultFields,
+  status: Schema.Literals(["remote_pending", "push_pending"]),
+  resume: SourceControlPublishResume,
+  detail: TrimmedNonEmptyString,
 });
+export type SourceControlPublishPendingResult = typeof SourceControlPublishPendingResult.Type;
+
+export const SourceControlPublishRepositoryResult = Schema.Union([
+  Schema.Struct({
+    ...SourceControlPublishResultFields,
+    branch: TrimmedNonEmptyString,
+    upstreamBranch: Schema.optional(TrimmedNonEmptyString),
+    status: Schema.Literals(["pushed", "remote_added"]),
+  }),
+  SourceControlPublishPendingResult,
+]);
 export type SourceControlPublishRepositoryResult = typeof SourceControlPublishRepositoryResult.Type;
 
 export const SourceControlDiscoveryStatus = Schema.Literals(["available", "missing"]);

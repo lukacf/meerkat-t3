@@ -5,6 +5,9 @@ export interface FileSaveCoordinatorOptions<A, E> {
   readonly persist: (contents: string) => Promise<AtomCommandResult<A, E>>;
   readonly onPendingChange: (pending: boolean) => void;
   readonly onConfirmed: (contents: string) => void;
+  readonly onSaveFailed?: (contents: string) => void;
+  /** No write or close-time retry remains; failed disposed contents may still be unsaved. */
+  readonly onSaveSettled?: () => void;
 }
 
 export class FileSaveCoordinator<A = unknown, E = unknown> {
@@ -28,6 +31,7 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
   }
 
   dispose(): void {
+    if (this.disposed) return;
     this.disposed = true;
     this.clearTimer();
     if (this.latestRevision > 0) void this.persistLatest();
@@ -62,6 +66,10 @@ export class FileSaveCoordinator<A = unknown, E = unknown> {
 
     this.saving = false;
     if (revision === this.latestRevision) {
+      if (!succeeded) this.options.onSaveFailed?.(contents);
+      // A mounted failed editor can still retry on close, even if another
+      // editor has replaced its shared optimistic overlay in the meantime.
+      if (succeeded || this.disposed) this.options.onSaveSettled?.();
       if (succeeded) this.options.onPendingChange(false);
       return;
     }

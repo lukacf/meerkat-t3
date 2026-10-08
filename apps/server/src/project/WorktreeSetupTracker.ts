@@ -1,4 +1,5 @@
 import type {
+  CommandId,
   ThreadId,
   WorktreeSetupSnapshot,
   WorktreeSetupStage,
@@ -6,6 +7,7 @@ import type {
   WorktreeSetupStageStatus,
 } from "@t3tools/contracts";
 import {
+  OrchestrationDispatchCommandError,
   WORKTREE_SETUP_DETAIL_MAX_LENGTH,
   WORKTREE_SETUP_ERROR_MAX_LENGTH,
   WORKTREE_SETUP_STAGE_ORDER,
@@ -13,6 +15,7 @@ import {
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
@@ -34,6 +37,11 @@ import * as Stream from "effect/Stream";
 export class WorktreeSetupTracker extends Context.Service<
   WorktreeSetupTracker,
   {
+    /** Shares one active request across connections; durable state owns later retries. */
+    readonly runBootstrapOnce: <R>(
+      input: { readonly threadId: ThreadId; readonly commandId: CommandId },
+      operation: Effect.Effect<BootstrapResult, OrchestrationDispatchCommandError, R>,
+    ) => Effect.Effect<BootstrapResult, OrchestrationDispatchCommandError, R>;
     /** Creates a fresh running snapshot for the thread, replacing any prior one. */
     readonly begin: (input: {
       readonly threadId: ThreadId;
@@ -105,6 +113,15 @@ interface TrackedSetup {
   readonly fiber: Fiber.Fiber<unknown, unknown> | null;
 }
 
+interface BootstrapResult {
+  readonly sequence: number;
+}
+
+interface BootstrapReservation {
+  readonly commandId: CommandId;
+  readonly result: Deferred.Deferred<BootstrapResult, OrchestrationDispatchCommandError>;
+}
+
 function emptyStage(id: WorktreeSetupStageId): WorktreeSetupStage {
   return {
     id,
@@ -118,6 +135,7 @@ function emptyStage(id: WorktreeSetupStageId): WorktreeSetupStage {
 }
 
 export const make = Effect.gen(function* () {
+  const bootstraps = new Map<ThreadId, BootstrapReservation>();
   const setups = yield* Ref.make(new Map<ThreadId, TrackedSetup>());
   const changes = yield* PubSub.unbounded<{
     readonly threadId: ThreadId;
@@ -127,6 +145,47 @@ export const make = Effect.gen(function* () {
   // Sequences keep increasing across setups of the same thread so a stream
   // opened during a previous setup still accepts the next one's first snapshot.
   const lastSequenceByThread = new Map<ThreadId, number>();
+
+  const runBootstrapOnce: WorktreeSetupTracker["Service"]["runBootstrapOnce"] = (
+    input,
+    operation,
+  ) =>
+    Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const candidate: BootstrapReservation = {
+          commandId: input.commandId,
+          result: yield* Deferred.make<BootstrapResult, OrchestrationDispatchCommandError>(),
+        };
+        const reservation = yield* Effect.sync(() => {
+          const existing = bootstraps.get(input.threadId);
+          if (existing) return existing;
+          bootstraps.set(input.threadId, candidate);
+          return candidate;
+        });
+        if (reservation.commandId !== input.commandId) {
+          return yield* new OrchestrationDispatchCommandError({
+            message:
+              "Another request is already preparing this thread. Wait for its result before retrying.",
+          });
+        }
+        if (reservation === candidate) {
+          // Reservation and fork cannot be interrupted apart. Only this owned
+          // operation settles the entry; disconnecting a waiter cannot release it.
+          yield* operation.pipe(
+            Effect.interruptible,
+            Effect.exit,
+            Effect.flatMap((exit) =>
+              Effect.sync(() => {
+                if (bootstraps.get(input.threadId) === reservation)
+                  bootstraps.delete(input.threadId);
+              }).pipe(Effect.andThen(Deferred.done(reservation.result, exit))),
+            ),
+            Effect.forkDetach,
+          );
+        }
+        return yield* restore(Deferred.await(reservation.result));
+      }),
+    );
 
   const publish = (threadId: ThreadId, snapshot: WorktreeSetupSnapshot | null) =>
     PubSub.publish(changes, { threadId, snapshot }).pipe(Effect.asVoid);
@@ -350,6 +409,7 @@ export const make = Effect.gen(function* () {
     );
 
   return WorktreeSetupTracker.of({
+    runBootstrapOnce,
     begin,
     update,
     stage,

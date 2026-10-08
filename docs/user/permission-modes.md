@@ -1,33 +1,33 @@
-# Permission modes
+# Permissions and access
 
-Permission modes control when an agent needs your approval to act. Choose a mode in the message
-composer; it applies to that thread.
+The agent works on the computer and checkout shown by the app. Permissions decide which tools it may use and when you approve them; a role name or a request to "only review" is not an enforced permission boundary.
 
-Set the default for new threads in **Settings → General → New threads → Permissions**.
-Projects can override the environment default. New threads use this setting rather than the
-mode of the thread you were viewing. The initial default is **Full access**; existing threads
-and modes you choose in a draft keep their permissions.
+## Task threads
 
-| Mode                  | Behavior                                                                              |
-| --------------------- | ------------------------------------------------------------------------------------- |
-| **Supervised**        | Requests approval for commands and file changes.                                      |
-| **Auto-accept edits** | Approves file edits automatically; other actions can still require approval.          |
-| **Auto**              | Uses the provider's automatic review to approve routine actions and ask about others. |
-| **Full access**       | Allows commands and edits without approval prompts.                                   |
+Choose the permission mode in the composer before sending. Set a default in **Settings > General > New threads > Permissions**; a project's settings can override it.
 
-Approve or reject requests in the conversation to let the agent continue. Permission modes do
-not prevent the agent from asking questions about the task.
+For Meerkat task threads:
 
-## Provider differences
+| Mode | Effect |
+| --- | --- |
+| Read-only | Native policy restricts the agent to read-only tools. |
+| Supervised | Requests approval before tool calls. Read and approve or reject each request in the conversation. |
+| Full access | Allows available commands and edits without tool-approval prompts. |
 
-Providers enforce permissions differently. Some read-only actions can proceed in **Supervised**.
-**Auto** uses automatic review on Codex, Claude, and Cursor; providers without an equivalent,
-including OpenCode and Antigravity, fall back to asking.
+Other inherited providers may offer additional modes. A mode is available only when that provider implements it. Changing a default does not retroactively change an existing agent's permissions.
 
-For Grok, **Always allow this session** remembers the matching command or tool input. Other
-actions still require approval.
+## Persistent project agents
 
-Antigravity can still send native approval requests in **Full access**. It only offers remembered
-approvals for actions that support them.
+Project specialists are separate from task threads. Check their access mode at creation and in their conversation; a thread's Supervised choice does not supervise its connected specialists.
 
-See the [provider guides](./install.md#providers) for setup and provider-specific limits.
+- **Read-only** allows file inspection and direct replies to you. Native policy blocks shell commands, file changes, and sending messages to peers. It cannot automatically return a review to the coordinator.
+- **Full access** allows peer collaboration, commands, and edits. The current policy cannot grant peer messaging alone while enforcing read-only file access.
+- **Supervised is not available for persistent project agents in this prototype.** A Reviewer role is not inherently read-only.
+
+The choice is retained across reconnects and responsibility changes. Create a new specialist to use a different mode. A new repository-study proposal runs Read-only; that does not set the access of the specialists you later create from the proposal. Check their creation choice before confirming.
+
+## Browser and device access
+
+Browser control needs both a compatible access mode and an explicitly shared browser workspace. Read-only agents cannot use the browser tools in this prototype. For a project specialist, use Full access if it needs browser control. Check **Settings > Integrations** and the conversation's Browser controls before granting access. Revoke sharing when it is no longer needed. Device access is optional and off by default.
+
+Before running work, confirm the model account, actual checkout, permissions, and any shared browser. These choices can differ between a task and a connected project specialist.

@@ -21,6 +21,8 @@ import { expect } from "vite-plus/test";
 import type {
   GitActionProgressEvent,
   GitPreparePullRequestThreadInput,
+  GitRunStackedActionInput,
+  ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
 
@@ -42,13 +44,17 @@ import {
   ForgejoPullRequestSchema,
   toForgejoChangeRequest,
 } from "../sourceControl/forgejoPullRequests.ts";
-import type { SourceControlProvider } from "../sourceControl/SourceControlProvider.ts";
+import type {
+  CreatedChangeRequest,
+  SourceControlProvider,
+} from "../sourceControl/SourceControlProvider.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ProviderRegistry from "../provider/Services/ProviderRegistry.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitManager from "./GitManager.ts";
+import { createdPullRequestKey } from "./linkCreatedPullRequest.ts";
 
 const encodeCliJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const decodeForgejoPullRequest = Schema.decodeEffect(ForgejoPullRequestSchema);
@@ -58,6 +64,9 @@ interface FakeGhScenario {
   prListByHeadSelector?: Record<string, string>;
   prListSequenceByHeadSelector?: Record<string, string[]>;
   createdPrUrl?: string;
+  /** Omission exercises compatibility with providers returning no creation identity. */
+  createdPrIdentity?: CreatedChangeRequest;
+  prListAfterCreateFailure?: GitHubCli.GitHubCliError;
   defaultBranch?: string;
   pullRequest?: {
     number: number;
@@ -373,6 +382,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
     ]),
   );
   const ghCalls: string[] = [];
+  let created = false;
 
   const execute: GitHubCli.GitHubCli["Service"]["execute"] = (input) => {
     const args = [...input.args];
@@ -383,6 +393,8 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
     }
 
     if (args[0] === "pr" && args[1] === "list") {
+      if (created && scenario.prListAfterCreateFailure)
+        return Effect.fail(scenario.prListAfterCreateFailure);
       const headSelectorIndex = args.findIndex((value) => value === "--head");
       const headSelector =
         headSelectorIndex >= 0 && headSelectorIndex < args.length - 1
@@ -401,6 +413,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
     }
 
     if (args[0] === "pr" && args[1] === "create") {
+      created = true;
       return Effect.succeed(
         fakeGhOutput(
           (scenario.createdPrUrl ?? "https://github.com/pingdotgg/codething-mvp/pull/101") + "\n",
@@ -547,8 +560,9 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
             input.title,
             "--body-file",
             input.bodyFile,
+            ...(input.draft ? ["--draft"] : []),
           ],
-        }).pipe(Effect.asVoid),
+        }).pipe(Effect.as(scenario.createdPrIdentity)),
       getDefaultBranch: (input) =>
         execute({
           cwd: input.cwd,
@@ -602,7 +616,9 @@ function runStackedAction(
     action: "commit" | "push" | "create_pr" | "commit_push" | "commit_push_pr";
     actionId?: string;
     commitMessage?: string;
+    pullRequest?: GitRunStackedActionInput["pullRequest"];
     featureBranch?: boolean;
+    expectedBranch?: string | null;
     filePaths?: readonly string[];
   },
   options?: Parameters<GitManager.GitManager["Service"]["runStackedAction"]>[1],
@@ -637,6 +653,13 @@ function makeManager(input?: {
   serverSettings?: Parameters<typeof ServerSettings.layerTest>[0];
   setupScriptRunner?: ProjectSetupScriptRunner.ProjectSetupScriptRunner["Service"];
   gitConfigReads?: string[];
+  gitStatusDetails?: (
+    read: GitVcsDriver.GitVcsDriver["Service"]["statusDetails"],
+  ) => GitVcsDriver.GitVcsDriver["Service"]["statusDetails"];
+  providerRegistry?: Pick<
+    ProviderRegistry.ProviderRegistry["Service"],
+    "getProviders" | "refreshWorkspaceSnapshot"
+  >;
 }) {
   const { service: gitHubCli, ghCalls } = createGitHubCliWithFakeGh(input?.ghScenario);
   const textGeneration = createTextGeneration(input?.textGeneration);
@@ -646,30 +669,33 @@ function makeManager(input?: {
 
   const serverSettingsLayer = ServerSettings.ServerSettingsService.layerTest(input?.serverSettings);
 
-  const vcsDriverLayer = input?.gitConfigReads
-    ? Layer.effect(
-        GitVcsDriver.GitVcsDriver,
-        GitVcsDriver.make.pipe(
-          Effect.map((service) =>
-            GitVcsDriver.GitVcsDriver.of({
-              ...service,
-              readConfigValue: (cwd, key) =>
-                Effect.sync(() => input.gitConfigReads?.push(key)).pipe(
-                  Effect.andThen(service.readConfigValue(cwd, key)),
-                ),
-            }),
+  const vcsDriverLayer =
+    input?.gitConfigReads || input?.gitStatusDetails
+      ? Layer.effect(
+          GitVcsDriver.GitVcsDriver,
+          GitVcsDriver.make.pipe(
+            Effect.map((service) =>
+              GitVcsDriver.GitVcsDriver.of({
+                ...service,
+                statusDetails:
+                  input.gitStatusDetails?.(service.statusDetails) ?? service.statusDetails,
+                readConfigValue: (cwd, key) =>
+                  Effect.sync(() => input.gitConfigReads?.push(key)).pipe(
+                    Effect.andThen(service.readConfigValue(cwd, key)),
+                  ),
+              }),
+            ),
           ),
-        ),
-      ).pipe(
-        Layer.provideMerge(VcsProcess.layer),
-        Layer.provideMerge(NodeServices.layer),
-        Layer.provideMerge(serverConfigLayer),
-      )
-    : GitVcsDriver.layer.pipe(
-        Layer.provideMerge(VcsProcess.layer),
-        Layer.provideMerge(NodeServices.layer),
-        Layer.provideMerge(serverConfigLayer),
-      );
+        ).pipe(
+          Layer.provideMerge(VcsProcess.layer),
+          Layer.provideMerge(NodeServices.layer),
+          Layer.provideMerge(serverConfigLayer),
+        )
+      : GitVcsDriver.layer.pipe(
+          Layer.provideMerge(VcsProcess.layer),
+          Layer.provideMerge(NodeServices.layer),
+          Layer.provideMerge(serverConfigLayer),
+        );
   const sourceControlRegistryLayer = Layer.effect(
     SourceControlProviderRegistry.SourceControlProviderRegistry,
     (input?.sourceControlProvider === undefined
@@ -693,6 +719,7 @@ function makeManager(input?: {
     Layer.succeed(TextGeneration.TextGeneration, textGeneration),
     Layer.mock(ProviderRegistry.ProviderRegistry)({
       getProviders: Effect.succeed([]),
+      ...input?.providerRegistry,
     }),
     Layer.succeed(
       ProjectSetupScriptRunner.ProjectSetupScriptRunner,
@@ -711,6 +738,33 @@ function makeManager(input?: {
 }
 
 const asThreadId = (threadId: string) => threadId as ThreadId;
+
+function nativeWritingProvider(): ServerProvider {
+  return {
+    instanceId: ProviderInstanceId.make("meerkat-writer"),
+    driver: ProviderDriverKind.make("meerkat"),
+    enabled: true,
+    installed: true,
+    version: null,
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-10-04T00:00:00.000Z",
+    availability: "available",
+    supportsTextGeneration: true,
+    supportsWorkspaceReadiness: true,
+    models: [
+      {
+        slug: "openai:realm-a",
+        name: "Realm A",
+        isDefault: true,
+        isCustom: false,
+        capabilities: null,
+      },
+    ],
+    skills: [],
+    slashCommands: [],
+  };
+}
 
 const GitManagerTestLayer = GitVcsDriver.layer.pipe(
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-git-manager-test-" })),
@@ -2853,6 +2907,112 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("generates commit text with the acted-on checkout's native fallback", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "README.md"), "hello\ncheckout b\n");
+      const initial = nativeWritingProvider();
+      let provider = initial;
+      const probes: string[] = [];
+      let generated:
+        | Pick<TextGeneration.CommitMessageGenerationInput, "cwd" | "modelSelection">
+        | undefined;
+      const { manager } = yield* makeManager({
+        serverSettings: {
+          providerInstances: {
+            [ProviderInstanceId.make("codex")]: {
+              driver: ProviderDriverKind.make("codex"),
+              enabled: false,
+            },
+            [initial.instanceId]: { driver: initial.driver, enabled: true },
+          },
+        },
+        providerRegistry: {
+          getProviders: Effect.sync(() => [provider]),
+          refreshWorkspaceSnapshot: ({ cwd }) =>
+            Effect.sync(() => {
+              probes.push(cwd);
+              provider = {
+                ...initial,
+                workspaceSnapshots: [
+                  {
+                    cwd,
+                    checkedAt: initial.checkedAt,
+                    skills: [],
+                    slashCommands: [],
+                    readiness: {
+                      status: "ready",
+                      auth: { status: "authenticated" },
+                      models: [
+                        {
+                          slug: "anthropic:realm-b",
+                          name: "Realm B",
+                          isDefault: true,
+                          isCustom: false,
+                          capabilities: null,
+                          credentialState: "connected",
+                        },
+                      ],
+                    },
+                  },
+                ],
+              };
+              return [provider];
+            }),
+        },
+        textGeneration: {
+          generateCommitMessage: (input) => {
+            generated = { cwd: input.cwd, modelSelection: input.modelSelection };
+            return Effect.succeed({ subject: "Use checkout B writer", body: "" });
+          },
+        },
+      });
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "commit" });
+      expect(result.commit.status).toBe("created");
+      expect(generated).toEqual({
+        cwd: repoDir,
+        modelSelection: { instanceId: initial.instanceId, model: "anthropic:realm-b" },
+      });
+      expect(probes).toEqual([repoDir]);
+    }),
+  );
+
+  it.effect("commits a manual message without checking an unavailable writing account", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "README.md"), "hello\nmanual change\n");
+      const provider = nativeWritingProvider();
+      const { manager } = yield* makeManager({
+        serverSettings: {
+          providerInstances: {
+            [ProviderInstanceId.make("codex")]: {
+              driver: ProviderDriverKind.make("codex"),
+              enabled: false,
+            },
+            [provider.instanceId]: { driver: provider.driver, enabled: true },
+          },
+        },
+        providerRegistry: {
+          getProviders: Effect.die("Manual commit must not resolve a writing provider"),
+          refreshWorkspaceSnapshot: () =>
+            Effect.die("Manual commit must not probe a model account"),
+        },
+        textGeneration: {
+          generateCommitMessage: () => Effect.die("Manual commit must not generate text"),
+        },
+      });
+      const result = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "commit",
+        commitMessage: "Keep the manual message",
+      });
+      expect(result.commit.status).toBe("created");
+      expect(result.commit).toMatchObject({ subject: "Keep the manual message" });
+    }),
+  );
+
   it.effect("preserves custom style when instructions are empty", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
@@ -3039,6 +3199,68 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect(
+    "creates the first commit on a feature branch with the selected files and manual message",
+    () =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-git-manager-");
+        yield* runGit(repoDir, ["init", "--initial-branch=main"]);
+        yield* runGit(repoDir, ["config", "user.email", "first-commit@example.com"]);
+        yield* runGit(repoDir, ["config", "user.name", "First Commit User"]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "selected.txt"), "first selected change\n");
+        NodeFS.writeFileSync(NodePath.join(repoDir, "unselected.txt"), "keep this local\n");
+        let generatedCount = 0;
+        const { manager, ghCalls } = yield* makeManager({
+          textGeneration: {
+            generateCommitMessage: () =>
+              Effect.sync(() => {
+                generatedCount += 1;
+                return { subject: "unused", body: "", branch: "feature/unused" };
+              }),
+          },
+        });
+
+        const result = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "commit",
+          featureBranch: true,
+          commitMessage: "feat: first local change\n\nKeep the manual details.",
+          filePaths: ["selected.txt"],
+        });
+
+        expect(result.branch).toEqual({
+          status: "created",
+          name: "feature/feat-first-local-change",
+        });
+        expect(result.commit).toMatchObject({
+          status: "created",
+          subject: "feat: first local change",
+        });
+        expect(result.push.status).toBe("skipped_not_requested");
+        expect(generatedCount).toBe(0);
+        expect(ghCalls).toEqual([]);
+        expect((yield* runGit(repoDir, ["symbolic-ref", "--short", "HEAD"])).stdout.trim()).toBe(
+          result.branch.name,
+        );
+        expect((yield* runGit(repoDir, ["rev-list", "--count", "HEAD"])).stdout.trim()).toBe("1");
+        expect(
+          (yield* runGit(repoDir, ["log", "-1", "--format=%an <%ae>%n%B"])).stdout.trim(),
+        ).toBe(
+          "First Commit User <first-commit@example.com>\nfeat: first local change\n\nKeep the manual details.",
+        );
+        expect((yield* runGit(repoDir, ["ls-tree", "--name-only", "HEAD"])).stdout.trim()).toBe(
+          "selected.txt",
+        );
+        expect((yield* runGit(repoDir, ["status", "--porcelain"])).stdout.trim()).toBe(
+          "?? unselected.txt",
+        );
+        expect(
+          (yield* runGit(repoDir, ["show-ref", "--verify", "--quiet", "refs/heads/main"], true))
+            .exitCode,
+        ).not.toBe(0);
+      }),
+  );
+
   it.effect("creates feature branch, commits, and pushes with featureBranch option", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
@@ -3065,6 +3287,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       const result = yield* runStackedAction(manager, {
         cwd: repoDir,
         action: "commit_push",
+        expectedBranch: "main",
         featureBranch: true,
       });
 
@@ -3284,6 +3507,84 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("rejects a stale expected branch before any commit, branch, push or PR mutation", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/other"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "new-work.txt"), "Do not commit this\n");
+      const beforeRefs = yield* runGit(repoDir, [
+        "for-each-ref",
+        "--format=%(refname) %(objectname)",
+      ]);
+      const beforeStatus = yield* runGit(repoDir, ["status", "--porcelain"]);
+      const { manager, ghCalls } = yield* makeManager();
+
+      for (const action of ["push", "create_pr", "commit_push_pr"] as const) {
+        const error = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action,
+          expectedBranch: "main",
+          ...(action === "commit_push_pr"
+            ? { featureBranch: true, commitMessage: "Do not run" }
+            : {}),
+        }).pipe(Effect.flip);
+        expect(error.message).toContain("checked-out branch changed");
+      }
+
+      expect((yield* runGit(repoDir, ["symbolic-ref", "--short", "HEAD"])).stdout.trim()).toBe(
+        "feature/other",
+      );
+      expect(
+        (yield* runGit(repoDir, ["for-each-ref", "--format=%(refname) %(objectname)"])).stdout,
+      ).toBe(beforeRefs.stdout);
+      expect((yield* runGit(repoDir, ["status", "--porcelain"])).stdout).toBe(beforeStatus.stdout);
+      expect((yield* runGit(remoteDir, ["for-each-ref"])).stdout).toBe("");
+      expect(ghCalls).toEqual([]);
+    }),
+  );
+
+  it.effect("keeps confirmed commit selection when later files appear on the expected branch", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "selected.txt"), "Selected\n");
+      NodeFS.writeFileSync(NodePath.join(repoDir, "later.txt"), "Later\n");
+      const { manager } = yield* makeManager();
+      const result = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "commit",
+        expectedBranch: "main",
+        commitMessage: "Only selected work",
+        filePaths: ["selected.txt"],
+      });
+      expect(result.commit.status).toBe("created");
+      expect(
+        (yield* runGit(repoDir, ["show", "--pretty=", "--name-only", "HEAD"])).stdout.trim(),
+      ).toBe("selected.txt");
+      expect((yield* runGit(repoDir, ["status", "--porcelain"])).stdout.trim()).toBe(
+        "?? later.txt",
+      );
+    }),
+  );
+
+  it.effect("rejects a detached expected branch after checkout", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-git-manager-");
+      yield* initRepo(repoDir);
+      const { manager } = yield* makeManager();
+      const error = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "commit",
+        expectedBranch: null,
+        commitMessage: "Do not run",
+      }).pipe(Effect.flip);
+      expect(error.message).toContain("checked-out branch changed");
+    }),
+  );
+
   it.effect("pushes existing clean commits without rerunning commit logic", () =>
     Effect.gen(function* () {
       const repoDir = yield* makeTempDir("t3code-git-manager-");
@@ -3329,6 +3630,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       const result = yield* runStackedAction(manager, {
         cwd: repoDir,
         action: "push",
+        expectedBranch: "feature/push-dirty",
       });
 
       expect(result.commit.status).toBe("skipped_not_requested");
@@ -3379,6 +3681,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       const result = yield* runStackedAction(manager, {
         cwd: repoDir,
         action: "create_pr",
+        expectedBranch: "feature/create-pr-only",
       });
 
       expect(result.commit.status).toBe("skipped_not_requested");
@@ -3499,6 +3802,9 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       yield* runGit(repoDir, ["push", "-u", "origin", "feature/existing-pr"]);
 
       const { manager, ghCalls } = yield* makeManager({
+        textGeneration: {
+          generatePrContent: () => Effect.die("An existing PR must not call a writing model"),
+        },
         ghScenario: {
           prListSequence: [
             // @effect-diagnostics-next-line preferSchemaOverJson:off
@@ -3517,6 +3823,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       const result = yield* runStackedAction(manager, {
         cwd: repoDir,
         action: "commit_push_pr",
+        pullRequest: { draft: true },
       });
 
       expect(result.branch.status).toBe("skipped_not_requested");
@@ -3532,6 +3839,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         },
       });
       expect(ghCalls.some((call) => call.startsWith("pr view "))).toBe(false);
+      expect(ghCalls.some((call) => call.startsWith("pr create "))).toBe(false);
     }),
   );
 
@@ -4051,6 +4359,334 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
         ghCalls.some((call) => call.includes("pr create --base main --head feature-create-pr")),
       ).toBe(true);
       expect(ghCalls.some((call) => call.startsWith("pr view "))).toBe(false);
+    }),
+  );
+
+  it.effect.each(["empty", "failed"] as const)(
+    "keeps direct PR creation identity when a following lookup would be %s",
+    (lookup) =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-created-pr-identity-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["checkout", "-b", "feature/direct-pr"]);
+        const remoteDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "changes.txt"), "review delivery\n");
+        yield* runGit(repoDir, ["add", "changes.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Prepare delivery"]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "feature/direct-pr"]);
+        yield* runGit(repoDir, ["config", "branch.feature/direct-pr.gh-merge-base", "main"]);
+        const identity = {
+          url: "https://github.acme.test/delivery/actual-target/pull/904",
+          number: 904,
+        };
+        const { manager, ghCalls } = yield* makeManager({
+          textGeneration: { generatePrContent: () => Effect.die("Manual PR must not use a model") },
+          ghScenario: {
+            createdPrIdentity: identity,
+            prListSequence: ["[]", "[]"],
+            ...(lookup === "failed"
+              ? {
+                  prListAfterCreateFailure: new GitHubCli.GitHubCliRateLimitError({
+                    command: "gh",
+                    cwd: repoDir,
+                    cause: new Error("Read quota exhausted after successful creation"),
+                  }),
+                }
+              : {}),
+          },
+        });
+        const events: GitActionProgressEvent[] = [];
+        const result = yield* runStackedAction(
+          manager,
+          {
+            cwd: repoDir,
+            action: "create_pr",
+            pullRequest: { title: "Deliver parser repair", body: "Exact user-authored context" },
+          },
+          { progressReporter: { publish: (event) => Effect.sync(() => void events.push(event)) } },
+        );
+        expect(result.pr).toEqual({
+          status: "created",
+          ...identity,
+          baseBranch: "main",
+          headBranch: "feature/direct-pr",
+          title: "Deliver parser repair",
+        });
+        expect(result.toast.cta).toEqual({ kind: "open_pr", label: "View PR", url: identity.url });
+        expect(events.at(-1)).toMatchObject({ kind: "action_finished", result });
+        expect(ghCalls.filter((call) => call.startsWith("pr list "))).toHaveLength(1);
+        expect(ghCalls.filter((call) => call.startsWith("pr create "))).toHaveLength(1);
+        expect(ghCalls.some((call) => call.startsWith("pr view "))).toBe(false);
+      }),
+  );
+
+  it.effect.each(["created", "opened_existing"] as const)(
+    "preserves a %s PR result when post-action status is unavailable",
+    (outcome) =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-pr-final-status-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["checkout", "-b", "feature/final-status"]);
+        const remoteDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "feature/final-status"]);
+        yield* runGit(repoDir, ["config", "branch.feature/final-status.gh-merge-base", "main"]);
+        const identity = {
+          url: "https://code.fixture.invalid/actual-owner/delivery/pull/905",
+          number: 905,
+        };
+        const statusFailure = new GitCommandError({
+          operation: "statusDetails",
+          command: "git",
+          cwd: repoDir,
+          detail: "Checkout status became unavailable after the hosting response.",
+        });
+        let hostCalls: readonly string[] = [];
+        let postHostStatusReads = 0;
+        const { manager, ghCalls } = yield* makeManager({
+          textGeneration: { generatePrContent: () => Effect.die("No writing model expected") },
+          ghScenario: {
+            createdPrIdentity: identity,
+            prListSequence: [
+              encodeCliJson(
+                outcome === "opened_existing"
+                  ? [
+                      {
+                        ...identity,
+                        title: "Keep the delivery link",
+                        baseRefName: "main",
+                        headRefName: "feature/final-status",
+                      },
+                    ]
+                  : [],
+              ),
+            ],
+          },
+          gitStatusDetails: (read) => (cwd) =>
+            Effect.suspend(() => {
+              if (hostCalls.some((call) => call.startsWith("pr "))) {
+                postHostStatusReads++;
+                return Effect.fail(statusFailure);
+              }
+              return read(cwd);
+            }),
+        });
+        hostCalls = ghCalls;
+        const events: GitActionProgressEvent[] = [];
+        const result = yield* runStackedAction(
+          manager,
+          {
+            cwd: repoDir,
+            action: "create_pr",
+            pullRequest: {
+              title: "Keep the delivery link",
+              body: "Exact delivery context",
+              draft: true,
+            },
+          },
+          { progressReporter: { publish: (event) => Effect.sync(() => void events.push(event)) } },
+        );
+        expect(result.pr).toEqual({
+          status: outcome,
+          ...identity,
+          baseBranch: "main",
+          headBranch: "feature/final-status",
+          title: "Keep the delivery link",
+        });
+        expect(result.toast.cta).toEqual({ kind: "open_pr", label: "View PR", url: identity.url });
+        expect(createdPullRequestKey(result, undefined)).toEqual({
+          host: "code.fixture.invalid",
+          repository: "actual-owner/delivery",
+          ...identity,
+        });
+        expect(events.at(-1)).toMatchObject({ kind: "action_finished", result });
+        expect(events.some((event) => event.kind === "action_failed")).toBe(false);
+        expect(postHostStatusReads).toBe(0);
+        expect(ghCalls.filter((call) => call.startsWith("pr create "))).toHaveLength(
+          outcome === "created" ? 1 : 0,
+        );
+      }),
+  );
+
+  it.effect("preserves post-action status failure for actions without a confirmed PR", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-push-final-status-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/status-control"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/status-control"]);
+      const statusFailure = new GitCommandError({
+        operation: "statusDetails",
+        command: "git",
+        cwd: repoDir,
+        detail: "Final checkout status unavailable.",
+      });
+      let reads = 0;
+      const { manager } = yield* makeManager({
+        gitStatusDetails: (read) => (cwd) =>
+          Effect.suspend(() => (++reads === 1 ? read(cwd) : Effect.fail(statusFailure))),
+      });
+      const events: GitActionProgressEvent[] = [];
+      const error = yield* runStackedAction(
+        manager,
+        { cwd: repoDir, action: "push" },
+        { progressReporter: { publish: (event) => Effect.sync(() => void events.push(event)) } },
+      ).pipe(Effect.flip);
+      expect(error).toBe(statusFailure);
+      expect(events.at(-1)).toMatchObject({ kind: "action_failed", phase: "push" });
+      expect(events.some((event) => event.kind === "action_finished")).toBe(false);
+    }),
+  );
+
+  it.effect.each(["failed", "unconfirmed"] as const)(
+    "does not turn %s creation into success even when a receipt was expected",
+    (outcome) =>
+      Effect.gen(function* () {
+        const repoDir = yield* makeTempDir("t3code-failed-pr-identity-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["checkout", "-b", "feature/failed-pr"]);
+        const remoteDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "feature/failed-pr"]);
+        yield* runGit(repoDir, ["config", "branch.feature/failed-pr.gh-merge-base", "main"]);
+        const fields = {
+          command: "gh",
+          cwd: repoDir,
+          cause: new Error("Create did not confirm success"),
+        } as const;
+        const cause =
+          outcome === "failed"
+            ? new GitHubCli.GitHubCliCommandError(fields)
+            : new GitHubCli.GitHubPullRequestCreationUnconfirmedError(fields);
+        const { manager, ghCalls } = yield* makeManager({
+          ghScenario: {
+            createdPrIdentity: { url: "https://github.com/acme/web/pull/904", number: 904 },
+            prListSequence: ["[]"],
+            failWith: cause,
+            failAfterCalls: 1,
+          },
+        });
+        const events: GitActionProgressEvent[] = [];
+        const error = yield* runStackedAction(
+          manager,
+          {
+            cwd: repoDir,
+            action: "create_pr",
+            pullRequest: { title: "Unconfirmed delivery", body: "Keep the request" },
+          },
+          { progressReporter: { publish: (event) => Effect.sync(() => void events.push(event)) } },
+        ).pipe(Effect.flip);
+        if (error._tag !== "SourceControlProviderError") {
+          return yield* Effect.die(
+            `Expected a source control creation error, received ${error._tag}`,
+          );
+        }
+        expect(error).toMatchObject({ operation: "createChangeRequest", cause });
+        if (outcome === "unconfirmed") {
+          expect(error.detail).toContain("may have been created");
+          expect(error.detail).toContain("before retrying");
+        }
+        expect(events.at(-1)).toMatchObject({ kind: "action_failed", phase: "pr" });
+        expect(events.some((event) => event.kind === "action_finished")).toBe(false);
+        expect(ghCalls.filter((call) => call.startsWith("pr create "))).toHaveLength(1);
+      }),
+  );
+
+  it.effect("generates PR content while honoring independent draft intent", () =>
+    Effect.gen(function* () {
+      for (const draft of [true, false]) {
+        const repoDir = yield* makeTempDir("t3code-generated-draft-pr-");
+        yield* initRepo(repoDir);
+        yield* runGit(repoDir, ["checkout", "-b", "generated-pr"]);
+        const remoteDir = yield* createBareRemote();
+        yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+        NodeFS.writeFileSync(NodePath.join(repoDir, "changes.txt"), "review delivery\n");
+        yield* runGit(repoDir, ["add", "changes.txt"]);
+        yield* runGit(repoDir, ["commit", "-m", "Fix review delivery"]);
+        yield* runGit(repoDir, ["push", "-u", "origin", "generated-pr"]);
+        yield* runGit(repoDir, ["config", "branch.generated-pr.gh-merge-base", "main"]);
+        let generationCount = 0;
+        const { manager, ghCalls } = yield* makeManager({
+          textGeneration: {
+            generatePrContent: (input) => {
+              generationCount++;
+              expect(input.diffPatch).toContain("review delivery");
+              return Effect.succeed({ title: "Generated review fix", body: "Generated summary" });
+            },
+          },
+          ghScenario: { prListSequence: ["[]", "[]"] },
+        });
+        const result = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "create_pr",
+          pullRequest: { draft },
+        });
+        expect(result.pr).toMatchObject({ status: "created", title: "Generated review fix" });
+        expect(generationCount).toBe(1);
+        const creation = ghCalls.find((call) => call.startsWith("pr create "));
+        expect(creation).toContain("--title Generated review fix");
+        expect(creation?.endsWith("--draft")).toBe(draft);
+      }
+    }),
+  );
+
+  it.effect("rejects generated and manual draft PRs before touching a dirty checkout", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-dirty-draft-pr-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "dirty-pr"]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "uncommitted.txt"), "Keep this change\n");
+      const { manager, ghCalls } = yield* makeManager({
+        textGeneration: {
+          generatePrContent: () => Effect.die("Dirty checkout must not call a writing model"),
+        },
+      });
+      for (const pullRequest of [
+        { draft: true },
+        { title: "Manual title", body: "Manual body", draft: true },
+      ]) {
+        const error = yield* runStackedAction(manager, {
+          cwd: repoDir,
+          action: "create_pr",
+          pullRequest,
+        }).pipe(Effect.flip);
+        expect(error.message).toContain("Commit local changes before creating a PR.");
+      }
+      expect(ghCalls).toEqual([]);
+      expect((yield* runGit(repoDir, ["status", "--porcelain"])).stdout).toContain(
+        "?? uncommitted.txt",
+      );
+    }),
+  );
+
+  it.effect("creates a manually authored PR without invoking a writing provider", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("t3code-manual-pr-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", "manual-pr"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      NodeFS.writeFileSync(NodePath.join(repoDir, "changes.txt"), "change\n");
+      yield* runGit(repoDir, ["add", "changes.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Feature commit"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "manual-pr"]);
+      yield* runGit(repoDir, ["config", "branch.manual-pr.gh-merge-base", "main"]);
+      const { manager, ghCalls } = yield* makeManager({
+        textGeneration: { generatePrContent: () => Effect.die("Manual PR must not call a model") },
+        ghScenario: { prListSequence: ["[]", "[]"] },
+      });
+      const result = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "create_pr",
+        pullRequest: { title: "Repair parser", body: "User-authored summary", draft: true },
+      });
+      expect(result.pr.status).toBe("created");
+      expect(result.pr.title).toBe("Repair parser");
+      expect(
+        ghCalls.some((call) => call.includes("--title Repair parser") && call.endsWith("--draft")),
+      ).toBe(true);
     }),
   );
 

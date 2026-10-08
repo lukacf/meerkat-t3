@@ -2,6 +2,7 @@
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
+import * as NodeCrypto from "node:crypto";
 
 import {
   ModelSelection,
@@ -10,6 +11,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderSetupError,
+  type ThreadPreparedTurn,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
 import {
@@ -53,6 +55,8 @@ import {
   type ProviderServiceShape,
 } from "../../provider/Services/ProviderService.ts";
 import { ProviderAuthService } from "../../provider/Services/ProviderAuthService.ts";
+import { ProviderInstanceRegistry } from "../../provider/Services/ProviderInstanceRegistry.ts";
+import type { ProviderInstance } from "../../provider/ProviderDriver.ts";
 import { makeProviderRegistryLayer } from "../../provider/testUtils/providerRegistryMock.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
 import * as RepositoryIdentityResolver from "../../project/RepositoryIdentityResolver.ts";
@@ -67,6 +71,7 @@ import {
 } from "./ProviderCommandReactor.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
+import { ProjectCloneTracker } from "../../project/ProjectCloneTracker.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Clock from "effect/Clock";
@@ -186,6 +191,7 @@ describe("ProviderCommandReactor", () => {
     readonly startSessionEffect?: (
       session: ProviderSession,
     ) => Effect.Effect<ProviderSession, ProviderServiceError>;
+    readonly meerkatInstance?: ProviderInstance;
     readonly tryHandlePromptCommandEffect?: ProviderAuthService["Service"]["tryHandlePromptCommand"];
   }) {
     const now = "2026-01-01T00:00:00.000Z";
@@ -426,7 +432,7 @@ describe("ProviderCommandReactor", () => {
           readEvents: engine.readEvents,
           readThreadEvents: engine.readThreadEvents,
           getThreadReplayStats: engine.getThreadReplayStats,
-          dispatch: (command) => {
+          dispatch: (command, options) => {
             if (command.type === "thread.title.regeneration.complete") {
               titleRegenerationCompletionDispatchAttempts += 1;
               if (
@@ -446,7 +452,7 @@ describe("ProviderCommandReactor", () => {
                   ? input?.beforeTurnStartDispatch
                   : undefined;
             return (before?.() ?? Effect.void).pipe(
-              Effect.andThen(engine.dispatch(command)),
+              Effect.andThen(engine.dispatch(command, options)),
               Effect.tap(() =>
                 isReplay ? (input?.afterTurnStartDispatch?.() ?? Effect.void) : Effect.void,
               ),
@@ -461,11 +467,20 @@ describe("ProviderCommandReactor", () => {
       }),
     ).pipe(Layer.provide(orchestrationLayer));
     const layer = ProviderCommandReactorLive.pipe(
+      Layer.provide(Layer.mock(ProjectCloneTracker)({ get: () => Effect.succeed(null) })),
       Layer.provideMerge(reactorOrchestrationLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(Layer.succeed(ProviderService, service)),
       Layer.provide(Layer.mock(ProviderAuthService, { tryHandlePromptCommand })),
       Layer.provideMerge(makeProviderRegistryLayer(providerSnapshots as never)),
+      Layer.provide(
+        input?.meerkatInstance
+          ? Layer.mock(ProviderInstanceRegistry)({
+              listInstances: Effect.succeed([input.meerkatInstance]),
+              listUnavailable: Effect.succeed([]),
+            })
+          : Layer.empty,
+      ),
       Layer.provideMerge(
         Layer.mock(GitWorkflowService.GitWorkflowService)({
           renameBranch,
@@ -849,6 +864,100 @@ describe("ProviderCommandReactor", () => {
     }),
   );
 
+  it.each([true, false])(
+    "observes Meerkat connections before send and requires a native thread (loaded=%s)",
+    async (loaded) => {
+      const trace: string[] = [];
+      const instanceId = ProviderInstanceId.make("meerkat");
+      const mobId = `t3-${NodeCrypto.createHash("sha256").update("meerkat:thread-1").digest("hex")}`;
+      const instance = {
+        instanceId,
+        driverKind: ProviderDriverKind.make("meerkat"),
+        enabled: true,
+        displayName: "Meerkat",
+        continuationIdentity: {
+          driverKind: ProviderDriverKind.make("meerkat"),
+          continuationKey: "meerkat",
+        },
+        meerkatTeam: {
+          stateRoot: "/meerkat-state",
+          snapshot: () =>
+            Effect.sync(() => {
+              trace.push("native-connections");
+              return {
+                observation: "loaded_runtimes" as const,
+                loaded,
+                mobs: loaded
+                  ? [
+                      {
+                        mobId,
+                        kind: "thread",
+                        label: "Thread",
+                        consoleStatus: "ready" as const,
+                        identities: [],
+                      },
+                    ]
+                  : [],
+              };
+            }),
+          activity: () => Effect.succeed({ frames: [] }),
+        },
+        get adapter(): never {
+          throw new Error("No native adapter needed for observation");
+        },
+        get textGeneration(): never {
+          throw new Error("No generation from observation");
+        },
+        get snapshot(): never {
+          throw new Error("No provider probe from observation");
+        },
+      } satisfies ProviderInstance;
+      const harness = await createHarness({
+        meerkatInstance: instance,
+        threadModelSelection: { instanceId, model: "anthropic:claude-haiku-4-5" },
+      });
+      harness.sendTurn.mockImplementation(() =>
+        Effect.sync(() => {
+          trace.push("send");
+          return { threadId: ThreadId.make("thread-1"), turnId: asTurnId("turn-1") };
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("connections-before-send"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("connections-message"),
+            role: "user",
+            text: "Start",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        }),
+      );
+      if (loaded) {
+        await waitFor(() => trace.includes("send"));
+        expect(trace).toEqual(["native-connections", "send"]);
+      } else {
+        await waitFor(async () =>
+          (await harness.readModel()).threads.some((thread) =>
+            thread.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+          ),
+        );
+        expect(trace).toEqual(["native-connections"]);
+        const thread = (await harness.readModel()).threads.find((item) => item.id === "thread-1");
+        const failure = thread?.activities.find(
+          (activity) => activity.kind === "provider.turn.start.failed",
+        );
+        expect(JSON.stringify(failure)).not.toContain("MeerkatTeamError:");
+        expect(JSON.stringify(failure)).not.toContain("MeerkatTeamService.ts");
+      }
+    },
+  );
+
   it("reacts to thread.turn.start by ensuring session and sending provider turn", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";
@@ -856,6 +965,7 @@ describe("ProviderCommandReactor", () => {
     await Effect.runPromise(
       harness.engine.dispatch({
         type: "thread.turn.start",
+        handlingMode: "queue",
         commandId: CommandId.make("cmd-turn-start-1"),
         threadId: ThreadId.make("thread-1"),
         message: {
@@ -882,12 +992,234 @@ describe("ProviderCommandReactor", () => {
       runtimeMode: "approval-required",
     });
 
+    expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({ handlingMode: "queue" });
+
     const readModel = await harness.readModel();
     const thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
     expect(thread?.session?.threadId).toBe("thread-1");
     expect(thread?.session?.status).toBe("starting");
     expect(thread?.session?.runtimeMode).toBe("approval-required");
   });
+
+  effectIt.effect(
+    "forwards explicit steering without restarting and preserves the active run on rejection",
+    () =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() => createHarness());
+        const now = "2026-01-01T00:00:00.000Z";
+        const dispatch = (id: string, handlingMode: "queue" | "steer") =>
+          harness.engine.dispatch({
+            type: "thread.turn.start",
+            commandId: CommandId.make(id),
+            threadId: ThreadId.make("thread-1"),
+            message: { messageId: asMessageId(id), role: "user", text: id, attachments: [] },
+            runtimeMode: "approval-required",
+            interactionMode: "default",
+            handlingMode,
+            createdAt: now,
+          });
+        yield* dispatch("first", "queue");
+        yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+        harness.runtimeSessions[0] = {
+          ...harness.runtimeSessions[0]!,
+          status: "running",
+          activeTurnId: asTurnId("turn-1"),
+        };
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("running"),
+          threadId: ThreadId.make("thread-1"),
+          session: {
+            threadId: ThreadId.make("thread-1"),
+            status: "running",
+            providerName: ProviderDriverKind.make("codex"),
+            providerInstanceId: ProviderInstanceId.make("codex"),
+            runtimeMode: "approval-required",
+            activeTurnId: asTurnId("turn-1"),
+            lastError: null,
+            updatedAt: now,
+          },
+          createdAt: now,
+        });
+        yield* dispatch("steer", "steer");
+        yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 2));
+        expect(harness.startSession).toHaveBeenCalledTimes(1);
+        expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+          handlingMode: "steer",
+          input: "steer",
+        });
+        expect(harness.sendTurn.mock.calls[1]?.[0]).not.toHaveProperty("modelSelection");
+        // A stale UI steer must not turn a still-live run into an error/terminal turn.
+        harness.runtimeSessions[0] = { ...harness.runtimeSessions[0]!, status: "ready" };
+        yield* dispatch("stale-steer", "steer");
+        yield* Effect.promise(() => harness.drain());
+        expect(harness.sendTurn).toHaveBeenCalledTimes(2);
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads[0];
+        expect(thread?.session).toMatchObject({ status: "running", activeTurnId: "turn-1" });
+        expect(
+          thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+        ).toBe(true);
+      }),
+  );
+
+  effectIt.effect.each(["same", "successor", "missing-target"] as const)(
+    "keeps a Meerkat steering request pinned when the provider has the %s run",
+    (providerRun) =>
+      Effect.gen(function* () {
+        const processing = yield* Deferred.make<void>();
+        const release = yield* Deferred.make<void>();
+        const harness = yield* Effect.promise(() =>
+          createHarness({
+            tryHandlePromptCommandEffect: () =>
+              Deferred.succeed(processing, undefined).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.as(false),
+              ),
+          }),
+        );
+        const threadId = ThreadId.make("thread-1");
+        const instanceId = ProviderInstanceId.make("codex");
+        const now = "2026-01-01T00:00:00.000Z";
+        const originalTurnId = asTurnId("meerkat-original-run");
+        const activeTurnId =
+          providerRun === "same" ? originalTurnId : asTurnId("meerkat-successor-run");
+        const sent = yield* Deferred.make<void>();
+        harness.sendTurn.mockImplementation(() =>
+          Deferred.succeed(sent, undefined).pipe(Effect.as({ threadId, turnId: activeTurnId })),
+        );
+        const setProjectionSession = (turnId: TurnId | null, suffix: string) =>
+          harness.engine.dispatch({
+            type: "thread.session.set",
+            commandId: CommandId.make(`pinned-steer-session-${suffix}`),
+            threadId,
+            session: {
+              threadId,
+              status: turnId === null ? "ready" : "running",
+              providerName: "meerkat",
+              providerInstanceId: instanceId,
+              runtimeMode: "approval-required",
+              activeTurnId: turnId,
+              lastError: null,
+              updatedAt: now,
+            },
+            createdAt: now,
+          });
+        yield* setProjectionSession(
+          providerRun === "missing-target" ? null : originalTurnId,
+          "original",
+        );
+        yield* harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("pinned-steer-command"),
+          threadId,
+          message: {
+            messageId: MessageId.make("pinned-steer-message"),
+            role: "user",
+            text: "Correct the original run",
+            attachments: [],
+          },
+          handlingMode: "steer",
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          createdAt: now,
+        });
+        yield* Deferred.await(processing);
+        if (providerRun === "successor") yield* setProjectionSession(activeTurnId, "successor");
+        harness.runtimeSessions.push({
+          threadId,
+          provider: ProviderDriverKind.make("meerkat"),
+          providerInstanceId: instanceId,
+          status: "running",
+          activeTurnId,
+          runtimeMode: "approval-required",
+          createdAt: now,
+          updatedAt: now,
+        });
+        yield* Deferred.succeed(release, undefined);
+        if (providerRun === "same") yield* Deferred.await(sent);
+        yield* Effect.promise(() => harness.drain());
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads[0];
+        expect(harness.startSession).not.toHaveBeenCalled();
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        expect(thread?.session).toMatchObject(
+          providerRun === "missing-target"
+            ? { status: "ready", activeTurnId: null }
+            : { status: "running", activeTurnId },
+        );
+        expect(harness.runtimeSessions[0]).toMatchObject({ status: "running", activeTurnId });
+        expect(yield* Effect.promise(() => harness.readPendingTurnStarts())).toEqual([]);
+        if (providerRun === "same") {
+          expect(harness.sendTurn).toHaveBeenCalledTimes(1);
+          expect(harness.sendTurn.mock.calls[0]?.[0]).toMatchObject({
+            handlingMode: "steer",
+            steeringTurnId: originalTurnId,
+          });
+        } else {
+          expect(harness.sendTurn).not.toHaveBeenCalled();
+          expect(thread?.activities).toContainEqual(
+            expect.objectContaining({ kind: "provider.turn.start.failed" }),
+          );
+        }
+      }),
+  );
+
+  effectIt.effect("preserves a live Meerkat run when a queued send is rejected while busy", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() => createHarness());
+      const now = "2026-01-01T00:00:00.000Z";
+      const dispatch = (id: string) =>
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make(id),
+          threadId: ThreadId.make("thread-1"),
+          message: { messageId: asMessageId(id), role: "user", text: id, attachments: [] },
+          runtimeMode: "approval-required",
+          interactionMode: "default",
+          handlingMode: "queue",
+          createdAt: now,
+        });
+      yield* dispatch("first-meerkat");
+      yield* Effect.promise(() => waitFor(() => harness.sendTurn.mock.calls.length === 1));
+      harness.runtimeSessions[0] = {
+        ...harness.runtimeSessions[0]!,
+        provider: ProviderDriverKind.make("meerkat"),
+        status: "running",
+        activeTurnId: asTurnId("turn-1"),
+      };
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("meerkat-running"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "running",
+          providerName: ProviderDriverKind.make("meerkat"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: asTurnId("turn-1"),
+          lastError: null,
+          updatedAt: now,
+        },
+        createdAt: now,
+      });
+      // The provider rejects the second queue admission, but the first run remains authoritative.
+      harness.sendTurn.mockImplementationOnce(() => Effect.die(new Error("Meerkat is busy")));
+      yield* dispatch("busy-meerkat");
+      yield* Effect.promise(() =>
+        waitFor(
+          async () =>
+            (await harness.readModel()).threads[0]?.activities.some(
+              (activity) => activity.kind === "provider.turn.start.failed",
+            ) === true,
+        ),
+      );
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads[0];
+      expect(thread?.session).toMatchObject({ status: "running", activeTurnId: "turn-1" });
+      expect(
+        thread?.activities.some((activity) => activity.kind === "provider.turn.start.failed"),
+      ).toBe(true);
+    }),
+  );
 
   effectIt.effect("projects inline context before sending the provider turn", () =>
     Effect.gen(function* () {
@@ -1583,6 +1915,131 @@ describe("ProviderCommandReactor", () => {
       thread = readModel.threads.find((entry) => entry.id === ThreadId.make("thread-1"));
       expect(thread?.session?.status).toBe("starting");
       expect(thread?.session?.lastError).toBeNull();
+    }),
+  );
+
+  effectIt.effect("projects a prepared retry's new startup failure after the original block", () =>
+    Effect.gen(function* () {
+      const attempted = yield* Deferred.make<void>();
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          startSessionEffect: () =>
+            Deferred.succeed(attempted, undefined).pipe(
+              Effect.andThen(
+                Effect.fail(
+                  new ProviderAdapterRequestError({
+                    provider: "codex",
+                    method: "thread.start",
+                    detail: "Retry reached provider startup",
+                  }),
+                ),
+              ),
+            ),
+        }),
+      );
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const blockedAt = "2026-01-01T00:01:00.000Z";
+      const threadId = ThreadId.make("thread-1");
+      const prepared: ThreadPreparedTurn = {
+        recoveryId: CommandId.make("original-prepared-command"),
+        projectId: asProjectId("project-1"),
+        projectCwd: "/tmp/provider-project",
+        expectedCwd: "/tmp/provider-project/prepared",
+        providerIdentity: {
+          driverKind: ProviderDriverKind.make("codex"),
+          continuationKey: "test-codex",
+        },
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("original-prepared-command"),
+          threadId,
+          message: {
+            messageId: asMessageId("original-prepared-message"),
+            role: "user",
+            text: "Keep the original prepared message",
+            attachments: [],
+          },
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          createdAt,
+        },
+        phase: "blocked",
+        setup: "finished",
+        reason: "Original checkout model unavailable",
+        createdAt,
+        updatedAt: blockedAt,
+      };
+      yield* harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("bind-prepared-checkout"),
+        threadId,
+        worktreePath: prepared.expectedCwd,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.prepared-turn.set",
+        commandId: CommandId.make("save-prepared-command"),
+        threadId,
+        preparedTurn: prepared,
+        createdAt,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("original-prepared-block"),
+        threadId,
+        session: {
+          threadId,
+          status: "error",
+          providerName: ProviderDriverKind.make("codex"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: prepared.reason ?? null,
+          updatedAt: blockedAt,
+        },
+        createdAt: blockedAt,
+      });
+      yield* harness.engine.dispatch(prepared.command, {
+        preparedTurnRecoveryId: prepared.recoveryId,
+      });
+      yield* Deferred.await(attempted);
+      yield* Effect.promise(() => harness.drain());
+      const events = yield* Stream.runCollect(harness.engine.readEvents(0));
+      const admission = events.find((event) => event.type === "thread.turn-start-requested");
+      if (!admission) return yield* Effect.die("The saved turn was not admitted");
+      expect(admission).toMatchObject({
+        commandId: prepared.command.commandId,
+        payload: {
+          messageId: prepared.command.message.messageId,
+          modelSelection: prepared.command.modelSelection,
+        },
+      });
+      expect(Date.parse(admission.occurredAt)).toBeGreaterThan(Date.parse(blockedAt));
+      const states = events
+        .filter((event) => event.type === "thread.session-set")
+        .filter((event) => event.sequence > admission.sequence);
+      expect(states.map((event) => event.payload.session.status)).toEqual(["starting", "error"]);
+      for (const event of states) {
+        expect(event.payload.session.updatedAt).toBe(admission.occurredAt);
+      }
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(thread?.preparedTurn).toBeNull();
+      expect(thread?.session?.lastError).toBe("Retry reached provider startup");
+      expect(
+        thread?.activities.find((activity) => activity.kind === "provider.turn.start.failed"),
+      ).toMatchObject({ createdAt: admission.occurredAt });
+      expect(thread?.messages).toHaveLength(1);
+      expect(thread?.messages[0]).toMatchObject({
+        id: prepared.command.message.messageId,
+        text: prepared.command.message.text,
+        createdAt,
+        updatedAt: createdAt,
+      });
+      expect(prepared.command.createdAt).toBe(createdAt);
+      expect(harness.sendTurn).not.toHaveBeenCalled();
+      expect(harness.createWorktree).not.toHaveBeenCalled();
     }),
   );
 
@@ -3625,6 +4082,189 @@ describe("ProviderCommandReactor", () => {
       threadId: "thread-1",
     });
   });
+
+  for (const scenario of [
+    { name: "matching request", requestedTurnId: "run-current", instanceId: "meerkat" },
+    { name: "implicit target", requestedTurnId: undefined, instanceId: "meerkat" },
+    { name: "legacy session identity", requestedTurnId: "run-current", instanceId: undefined },
+    { name: "stale request", requestedTurnId: "run-previous", instanceId: "meerkat" },
+  ] as const) {
+    effectIt.effect(`keeps the Meerkat cancellation target for a ${scenario.name}`, () =>
+      Effect.gen(function* () {
+        const harness = yield* Effect.promise(() => createHarness());
+        const threadId = ThreadId.make("thread-1");
+        const currentTurnId = asTurnId("run-current");
+        const createdAt = "2026-01-01T00:00:01.000Z";
+        // Legacy provider sessions can omit providerInstanceId. The live driver
+        // identity still establishes that these are Meerkat application run ids.
+        harness.runtimeSessions.push({
+          threadId,
+          provider: ProviderDriverKind.make("meerkat"),
+          ...(scenario.instanceId
+            ? { providerInstanceId: ProviderInstanceId.make(scenario.instanceId) }
+            : {}),
+          status: "running",
+          runtimeMode: "full-access",
+          activeTurnId: currentTurnId,
+          createdAt,
+          updatedAt: createdAt,
+        });
+        yield* harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("meerkat-cancel-session"),
+          threadId,
+          session: {
+            threadId,
+            providerName: "meerkat",
+            ...(scenario.instanceId
+              ? { providerInstanceId: ProviderInstanceId.make(scenario.instanceId) }
+              : {}),
+            status: "running",
+            runtimeMode: "full-access",
+            activeTurnId: currentTurnId,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        });
+        yield* Effect.promise(() => harness.drain());
+        const nativeCancel = vi.fn();
+        harness.interruptTurn.mockImplementation((input) =>
+          Effect.gen(function* () {
+            const request = input as Parameters<ProviderServiceShape["interruptTurn"]>[0];
+            // The gateway rejects a stale application run before native cancel.
+            if (request.turnId !== undefined && request.turnId !== currentTurnId) {
+              return yield* new ProviderAdapterRequestError({
+                provider: ProviderDriverKind.make("meerkat"),
+                method: "run.cancel",
+                detail: "Requested run is no longer active",
+              });
+            }
+            nativeCancel();
+          }),
+        );
+        yield* harness.engine.dispatch({
+          type: "thread.turn.interrupt",
+          commandId: CommandId.make("meerkat-cancel-request"),
+          threadId,
+          ...(scenario.requestedTurnId !== undefined
+            ? { turnId: asTurnId(scenario.requestedTurnId) }
+            : {}),
+          createdAt: "2026-01-01T00:00:02.000Z",
+        });
+        yield* Effect.promise(() => harness.drain());
+        expect(harness.interruptTurn).toHaveBeenCalledExactlyOnceWith({
+          threadId,
+          turnId: scenario.requestedTurnId ?? currentTurnId,
+        });
+        expect(nativeCancel).toHaveBeenCalledTimes(scenario.name === "stale request" ? 0 : 1);
+        expect(harness.stopSession).not.toHaveBeenCalled();
+        const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+          (entry) => entry.id === threadId,
+        );
+        expect(thread?.session).toMatchObject({ status: "running", activeTurnId: currentTurnId });
+        expect(thread?.latestTurn).toMatchObject({ state: "running", completedAt: null });
+        expect(
+          thread?.activities.some((activity) => activity.kind === "provider.turn.interrupt.failed"),
+        ).toBe(false);
+      }),
+    );
+  }
+
+  effectIt.effect("does not send an unscoped Meerkat cancellation when no run is known", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() => createHarness());
+      const threadId = ThreadId.make("thread-1");
+      const createdAt = "2026-01-01T00:00:01.000Z";
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("meerkat-cancel-no-run-session"),
+        threadId,
+        session: {
+          threadId,
+          providerName: "meerkat",
+          status: "ready",
+          runtimeMode: "full-access",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      });
+      yield* harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("meerkat-cancel-no-run"),
+        threadId,
+        createdAt,
+      });
+      yield* Effect.promise(() => harness.drain());
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(thread?.session).toMatchObject({ status: "ready", activeTurnId: null });
+      expect(
+        thread?.activities.find((activity) => activity.kind === "provider.turn.interrupt.failed"),
+      ).toMatchObject({ payload: { detail: "No active Meerkat run is available to cancel." } });
+    }),
+  );
+
+  effectIt.effect("preserves a running MobKit member when native cancellation is denied", () =>
+    Effect.gen(function* () {
+      const harness = yield* Effect.promise(() =>
+        createHarness({
+          interruptTurnEffect: () =>
+            Effect.fail(
+              new ProviderAdapterRequestError({
+                provider: ProviderDriverKind.make("meerkat"),
+                method: "mobs.v1.forceCancel",
+                detail: "MobKit did not accept cancellation; the run remains active",
+              }),
+            ),
+        }),
+      );
+      const threadId = ThreadId.make("thread-1");
+      const turnId = asTurnId("mobkit-active-turn");
+      const createdAt = "2026-01-01T00:00:01.000Z";
+      yield* harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("mobkit-session-running"),
+        threadId,
+        session: {
+          threadId,
+          status: "running",
+          providerName: "meerkat",
+          runtimeMode: "full-access",
+          activeTurnId: turnId,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      });
+      yield* Effect.promise(() => harness.drain());
+      yield* harness.engine.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("mobkit-cancel-denied"),
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+      });
+      yield* Effect.promise(() => harness.drain());
+      const thread = (yield* Effect.promise(() => harness.readModel())).threads.find(
+        (entry) => entry.id === threadId,
+      );
+      expect(harness.interruptTurn).toHaveBeenCalledOnce();
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(thread?.session).toMatchObject({ status: "running", activeTurnId: turnId });
+      expect(thread?.latestTurn).toMatchObject({ state: "running", completedAt: null });
+      expect(
+        thread?.activities.find((activity) => activity.kind === "provider.turn.interrupt.failed"),
+      ).toMatchObject({
+        payload: { detail: "MobKit did not accept cancellation; the run remains active" },
+      });
+    }),
+  );
 
   effectIt.effect(
     "stops a running session and records the failure when provider interrupt fails",

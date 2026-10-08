@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { verifyMeerkatRuntime } from "@t3tools/shared/meerkatRuntime";
+import { resolveMeerkatReleaseRepository } from "@t3tools/shared/meerkatDistribution";
 // @effect-diagnostics nodeBuiltinImport:off - Node's typed junction API avoids Windows symlink privileges while keeping the probe isolated.
 
 import * as NodeFSP from "node:fs/promises";
@@ -16,6 +18,7 @@ import {
 import { fromYaml } from "@t3tools/shared/schemaYaml";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { clerkFrontendApiHostnameFromPublishableKey } from "@t3tools/shared/relayAuth";
+import { normalizeSecureRelayUrl } from "@t3tools/shared/relayUrl";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import rootPackageJson from "../package.json" with { type: "json" };
 import desktopPackageJson from "../apps/desktop/package.json" with { type: "json" };
@@ -33,9 +36,18 @@ import {
   findInlinedExternalPackages,
   selectCliRuntimeExternalDependencies,
 } from "./lib/cli-external-packages.ts";
-import { loadRepoEnv } from "./lib/public-config.ts";
+import { loadRepoEnv, resolvePublicConfig } from "./lib/public-config.ts";
+import {
+  MAC_SIGNING_INPUTS,
+  MacSigningContextError,
+  MacSigningInputsError,
+  requireMacSigningInputs,
+} from "./lib/meerkat-mac-release.ts";
 import { selectDesktopRuntimeExternalDependencies } from "./lib/desktop-external-packages.ts";
 import { resolveCatalogDependencies } from "./lib/resolve-catalog.ts";
+import { prepareDesktopProductionResolution } from "./lib/desktop-production-resolution.ts";
+import { NativeNoticeArtifactPurpose, stageNativeNotices } from "./lib/native-notices.ts";
+import { stageElectronNotices } from "./lib/electron-notices.ts";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -54,7 +66,7 @@ import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 const LINUX_ICON_SIZES = [16, 22, 24, 32, 48, 64, 128, 256, 512] as const;
-const DESKTOP_APP_ID = "com.t3tools.t3code";
+const DESKTOP_APP_ID = "ai.rkat.meerkat-t3";
 const APPLE_TEAM_ID_PATTERN = /^[A-Z0-9]{10}$/u;
 
 const BuildPlatform = Schema.Literals(["mac", "linux", "win"]);
@@ -150,6 +162,7 @@ const PLATFORM_CONFIG: Record<typeof BuildPlatform.Type, PlatformConfig> = {
 };
 
 interface BuildCliInput {
+  readonly artifactPurpose: Option.Option<NativeNoticeArtifactPurpose>;
   readonly platform: Option.Option<typeof BuildPlatform.Type>;
   readonly target: Option.Option<string>;
   readonly arch: Option.Option<typeof BuildArch.Type>;
@@ -239,6 +252,15 @@ export class UnsupportedHostBuildPlatformError extends Schema.TaggedError<Unsupp
 ) {
   override get message(): string {
     return `Unsupported host platform '${this.hostPlatform}'.`;
+  }
+}
+
+export class SignedMacBuildHostError extends Schema.TaggedError<SignedMacBuildHostError>()(
+  "SignedMacBuildHostError",
+  { hostPlatform: Schema.String },
+) {
+  override get message(): string {
+    return `Signed macOS packaging requires a macOS host; received '${this.hostPlatform}'.`;
   }
 }
 
@@ -907,6 +929,7 @@ const resolvePythonForNodeGyp = Effect.fn("resolvePythonForNodeGyp")(function* (
 });
 
 interface ResolvedBuildOptions {
+  readonly artifactPurpose: NativeNoticeArtifactPurpose;
   readonly platform: typeof BuildPlatform.Type;
   readonly target: string;
   readonly arch: typeof BuildArch.Type;
@@ -929,7 +952,7 @@ interface StagePackageJson {
   readonly private: true;
   readonly packageManager: string;
   readonly description: string;
-  readonly homepage: string;
+  readonly homepage?: string;
   readonly author: string;
   readonly main: string;
   readonly build: Record<string, unknown>;
@@ -941,7 +964,10 @@ interface StagePackageJson {
 
 export const STAGE_INSTALL_ARGS = ["install", "--prod"] as const;
 export const DESKTOP_ELECTRON_LANGUAGES = ["en-US"] as const;
+export const MAC_INSTALL_GUIDE_NAME = "Install Meerkat T3.txt";
 export const DESKTOP_FILE_EXCLUSIONS = [
+  // This guide must be readable before macOS permits the app to launch.
+  `!${MAC_INSTALL_GUIDE_NAME}`,
   // T3 Code always passes the user's installed Claude executable to the SDK,
   // so the SDK's optional platform packages (each a ~200MB bundled executable)
   // are dead weight. The trailing dash keeps the SDK's own JS package.
@@ -952,6 +978,20 @@ export const DESKTOP_FILE_EXCLUSIONS = [
   "!**/*.d.cts",
   "!apps/desktop/resources/browser-secret",
   "!apps/desktop/resources/browser-secret/**/*",
+  "!apps/desktop/resources/native-notices",
+  "!apps/desktop/resources/native-notices/**/*",
+  "!apps/desktop/resources/electron-notices",
+  "!apps/desktop/resources/electron-notices/**/*",
+  "!apps/desktop/resources/LICENSE",
+  "!apps/desktop/prod-resources/native-notices",
+  "!apps/desktop/prod-resources/native-notices/**/*",
+  "!apps/desktop/prod-resources/electron-notices",
+  "!apps/desktop/prod-resources/electron-notices/**/*",
+  "!apps/desktop/prod-resources/LICENSE",
+  "!apps/desktop/prod-resources/meerkat-runtime",
+  "!apps/desktop/prod-resources/meerkat-runtime/**/*",
+  "!apps/server/dist/meerkat-runtime",
+  "!apps/server/dist/meerkat-runtime/**/*",
   "!apps/desktop/prod-resources/browser-secret",
   "!apps/desktop/prod-resources/browser-secret/**/*",
   // Windows stages the server sidecar below prod-resources so electron-builder
@@ -1065,11 +1105,30 @@ export const WSL_RUNTIME_EXTRA_RESOURCES = [
   WSL_RUNTIME_ARCHIVE_EXTRA_RESOURCE,
   WSL_RUNTIME_ARCHIVE_HASH_EXTRA_RESOURCE,
 ] as const;
+class MeerkatPackagingTargetError extends Schema.TaggedError<MeerkatPackagingTargetError>()(
+  "MeerkatPackagingTargetError",
+  { detail: Schema.String },
+) {
+  override get message() {
+    return this.detail;
+  }
+}
+
 export const DESKTOP_EXTRA_RESOURCES = [
+  {
+    from: "apps/desktop/prod-resources/meerkat-profile-backup.mjs",
+    to: "meerkat-profile-backup.mjs",
+  },
+  { from: "apps/desktop/prod-resources/meerkat-runtime", to: "meerkat-runtime" },
+  { from: "apps/desktop/prod-resources/native-notices", to: "native-notices" },
+  { from: "apps/desktop/prod-resources/LICENSE", to: "LICENSE" },
   {
     from: "apps/desktop/prod-resources/resource-monitor",
     to: "resource-monitor",
   },
+] as const;
+export const MAC_ELECTRON_NOTICES_EXTRA_RESOURCES = [
+  { from: "apps/desktop/prod-resources/electron-notices", to: "electron-notices" },
 ] as const;
 export const LINUX_CAPTURE_EXTRA_RESOURCES = [
   {
@@ -1268,6 +1327,24 @@ export function resolveMacPasskeySigningConfiguration(
   };
 }
 
+export function resolveOptionalMacPasskeySigningConfiguration(
+  env: Readonly<Record<string, string | undefined>>,
+): MacPasskeySigningConfiguration | undefined {
+  const publicConfig = resolvePublicConfig(env);
+  // Match the renderer's managed-auth gate. The always-registered desktop
+  // bridge also owns single-instance handling and does not itself enable UI.
+  const managedAuthEnabled = Boolean(
+    publicConfig.clerkPublishableKey &&
+    publicConfig.clerkJwtTemplate &&
+    normalizeSecureRelayUrl(publicConfig.relayUrl ?? ""),
+  );
+  if (!managedAuthEnabled && !env.T3CODE_CLERK_PASSKEY_RP_DOMAINS?.trim()) return undefined;
+  return resolveMacPasskeySigningConfiguration({
+    ...env,
+    T3CODE_CLERK_PUBLISHABLE_KEY: publicConfig.clerkPublishableKey,
+  });
+}
+
 function escapeXml(value: string): string {
   return value
     .replaceAll("&", "&amp;")
@@ -1277,26 +1354,26 @@ function escapeXml(value: string): string {
     .replaceAll("'", "&apos;");
 }
 
-export function renderMacPasskeyEntitlements(
-  configuration: MacPasskeySigningConfiguration,
-): string {
-  const associatedDomains = configuration.rpDomains
-    .map((domain) => `      <string>webcredentials:${escapeXml(domain)}</string>`)
-    .join("\n");
-
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-  <dict>
-    <key>com.apple.application-identifier</key>
+export function renderMacEntitlements(configuration?: MacPasskeySigningConfiguration): string {
+  const passkeyEntitlements = configuration
+    ? `    <key>com.apple.application-identifier</key>
     <string>${escapeXml(`${configuration.teamId}.${configuration.appId}`)}</string>
     <key>com.apple.developer.team-identifier</key>
     <string>${escapeXml(configuration.teamId)}</string>
     <key>com.apple.developer.associated-domains</key>
     <array>
-${associatedDomains}
+${configuration.rpDomains
+  .map((domain) => `      <string>webcredentials:${escapeXml(domain)}</string>`)
+  .join("\n")}
     </array>
-    <key>com.apple.security.cs.allow-jit</key>
+`
+    : "";
+
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+${passkeyEntitlements}    <key>com.apple.security.cs.allow-jit</key>
     <true/>
     <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
     <true/>
@@ -1620,9 +1697,13 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     });
   }
   const version = mergeOptions(input.buildVersion, env.version, undefined);
-  const releaseDir = resolveBooleanFlag(input.mockUpdates, env.mockUpdates)
-    ? "release-mock"
-    : "release";
+  const artifactPurpose = Option.getOrElse(input.artifactPurpose, () => "release" as const);
+  const releaseDir =
+    artifactPurpose === "internal-validation"
+      ? "release-internal"
+      : resolveBooleanFlag(input.mockUpdates, env.mockUpdates)
+        ? "release-mock"
+        : "release";
   const outputDir = path.resolve(
     repoRoot,
     mergeOptions(input.outputDir, env.outputDir, releaseDir),
@@ -1649,6 +1730,7 @@ export const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (
     Option.getOrUndefined(input.wslRuntime) ?? Option.getOrUndefined(env.wslRuntime);
 
   return {
+    artifactPurpose,
     platform,
     target,
     arch,
@@ -1690,6 +1772,57 @@ const runCommand = Effect.fn("runCommand")(function* (
       ...(stderr.trim() ? { stderrTail: stderr } : {}),
     });
   }
+});
+
+export const installDesktopProductionDependencies = Effect.fn(
+  "installDesktopProductionDependencies",
+)(function* (input: {
+  readonly repoRoot: string;
+  readonly stageAppDir: string;
+  readonly platform: typeof BuildPlatform.Type;
+  readonly arch: typeof BuildArch.Type;
+  readonly verbose: boolean;
+}) {
+  const path = yield* Path.Path;
+  // The private pilot qualifies this dependency closure only. Other targets
+  // keep their own staging paths until they have reviewed resolutions.
+  const installArgs =
+    input.platform === "mac" && input.arch === "arm64"
+      ? yield* prepareDesktopProductionResolution({
+          resolutionDir: path.join(
+            input.repoRoot,
+            "scripts/desktop-production-resolutions/mac-arm64",
+          ),
+          stageAppDir: input.stageAppDir,
+          platform: input.platform,
+          arch: input.arch,
+        })
+      : STAGE_INSTALL_ARGS;
+  const installCommand = yield* resolveSpawnCommand("vp", [...installArgs]);
+  yield* runCommand(
+    ChildProcess.make(installCommand.command, installCommand.args, {
+      cwd: input.stageAppDir,
+      shell: installCommand.shell,
+    }),
+    { label: `vp ${installArgs.join(" ")}`, verbose: input.verbose },
+  );
+});
+
+export const buildDesktopSources = Effect.fn("buildDesktopSources")(function* (input: {
+  readonly repoRoot: string;
+  readonly appVersion: string;
+  readonly verbose: boolean;
+}) {
+  const spawnCommand = yield* resolveSpawnCommand("vp", ["run", "build:desktop"]);
+  yield* runCommand(
+    ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+      cwd: input.repoRoot,
+      shell: spawnCommand.shell,
+      env: { APP_VERSION: input.appVersion },
+      extendEnv: true,
+    }),
+    { label: "vp run build:desktop", verbose: input.verbose },
+  );
 });
 
 const desktopBuildProbeSucceeds = Effect.fn("desktopBuildProbeSucceeds")(function* (
@@ -2342,6 +2475,39 @@ function generateMacIconSet(
   });
 }
 
+export function renderMacInstallGuide(markdown: string): string {
+  return `${markdown
+    .replace(/^#{1,6} /gmu, "")
+    .replace(/\[([^\]]+)\]\(([^)\s]+)\)/gu, (_, label: string, target: string) =>
+      /^(?:\.\/)?[\w-]+\.md(?:#[\w-]+)?$/u.test(target)
+        ? `${label} (in-app Help)`
+        : `${label} (${target})`,
+    )
+    .replace(/\*\*([^*]+)\*\*/gu, "$1")
+    .replace(/`([^`]+)`/gu, "$1")
+    .trim()}\n`;
+}
+
+export const stageMacInstallGuide = Effect.fn("stageMacInstallGuide")(function* (input: {
+  readonly repoRoot: string;
+  readonly stageAppDir: string;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const sourcePath = path.join(input.repoRoot, "docs/user/install.md");
+  const markdown = yield* fs.readFileString(sourcePath);
+  if (markdown.trim().length === 0) {
+    return yield* new MeerkatPackagingTargetError({
+      detail: `Mac installation guide is empty: ${sourcePath}`,
+    });
+  }
+  yield* fs.makeDirectory(input.stageAppDir, { recursive: true });
+  const destination = path.join(input.stageAppDir, MAC_INSTALL_GUIDE_NAME);
+  yield* fs.writeFileString(destination, renderMacInstallGuide(markdown));
+  yield* fs.chmod(destination, 0o644);
+  return destination;
+});
+
 function stageMacIcons(stageResourcesDir: string, sourcePng: string, verbose: boolean) {
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
@@ -2535,22 +2701,56 @@ export function resolveDesktopRuntimeDependencies(
   );
 }
 
+export class MeerkatUpdateRepositoryError extends Schema.TaggedError<MeerkatUpdateRepositoryError>()(
+  "MeerkatUpdateRepositoryError",
+  {},
+) {
+  override get message(): string {
+    return "MEERKAT_DESKTOP_UPDATE_REPOSITORY must name this fork's GitHub owner/repository. The original T3 repository and repository URLs are not accepted. Leave it unset for an offline-distributed build.";
+  }
+}
+
+export class MeerkatLinuxDistributionRepositoryError extends Schema.TaggedError<MeerkatLinuxDistributionRepositoryError>()(
+  "MeerkatLinuxDistributionRepositoryError",
+  {},
+) {
+  override get message(): string {
+    return "Linux AppImage and Debian packaging requires an owned project homepage. Configure MEERKAT_DESKTOP_UPDATE_REPOSITORY with your fork's GitHub owner/repository before building; the original T3 repository is not accepted. Offline Mac builds do not require this setting.";
+  }
+}
+
+export class UnsignedMacUpdateFeedError extends Schema.TaggedError<UnsignedMacUpdateFeedError>()(
+  "UnsignedMacUpdateFeedError",
+  {},
+) {
+  override get message(): string {
+    return "Unsigned macOS releases use manual updates. Leave MEERKAT_DESKTOP_UPDATE_REPOSITORY unset, or explicitly select a signed build to enable the updater.";
+  }
+}
+
+export const validateDesktopDistributionConfig = Effect.fn("validateDesktopDistributionConfig")(
+  function* (platform: typeof BuildPlatform.Type, target: string) {
+    // The AppImage target also emits a Debian package, whose metadata requires a homepage.
+    if (platform !== "linux" || (target !== "AppImage" && target !== "deb")) return;
+    const configured = yield* Config.String("MEERKAT_DESKTOP_UPDATE_REPOSITORY").pipe(
+      Config.option,
+    );
+    if (!resolveMeerkatReleaseRepository(Option.getOrUndefined(configured))) {
+      return yield* new MeerkatLinuxDistributionRepositoryError();
+    }
+  },
+);
+
 export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
   updateChannel: "latest" | "nightly",
 ) {
-  const env = yield* Config.all({
-    updateRepository: Config.String("T3CODE_DESKTOP_UPDATE_REPOSITORY").pipe(Config.option),
-    githubRepository: Config.String("GITHUB_REPOSITORY").pipe(Config.option),
-  });
-  const rawRepo = (
-    Option.getOrUndefined(env.updateRepository)?.trim() ||
-    Option.getOrUndefined(env.githubRepository)?.trim() ||
-    ""
-  ).trim();
+  // Never infer a fork update source from donor CI variables or Git remotes.
+  const configured = yield* Config.String("MEERKAT_DESKTOP_UPDATE_REPOSITORY").pipe(Config.option);
+  const rawRepo = Option.getOrUndefined(configured)?.trim();
   if (!rawRepo) return undefined;
-
-  const [owner, repo, ...rest] = rawRepo.split("/");
-  if (!owner || !repo || rest.length > 0) return undefined;
+  const repository = resolveMeerkatReleaseRepository(rawRepo);
+  if (!repository) return yield* new MeerkatUpdateRepositoryError();
+  const { owner, repo } = repository;
 
   return {
     provider: "github",
@@ -2613,10 +2813,26 @@ export function resolvePackageManagerUserAgent(packageManager: string): string {
   return `${trimmed.slice(0, versionSeparator)}/${trimmed.slice(versionSeparator + 1)}`;
 }
 
-export function resolveDesktopProductName(version: string): string {
+export function resolveDesktopProductName(
+  version: string,
+  artifactPurpose: NativeNoticeArtifactPurpose = "release",
+): string {
+  if (artifactPurpose === "internal-validation") return "Meerkat T3 (Internal Validation)";
   return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "T3 Code (Nightly)"
-    : (desktopPackageJson.productName ?? "T3 Code");
+    ? "Meerkat T3 (Nightly)"
+    : (desktopPackageJson.productName ?? "Meerkat T3");
+}
+
+export function resolveDesktopPackageIdentity(repository?: string) {
+  const configured = resolveMeerkatReleaseRepository(repository);
+  return {
+    name: "meerkat-t3",
+    description: "Meerkat T3 desktop development environment",
+    author: "Meerkat T3 contributors",
+    ...(configured
+      ? { homepage: `https://github.com/${configured.owner}/${configured.repo}` }
+      : {}),
+  };
 }
 
 export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
@@ -2626,10 +2842,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   signed: boolean,
   mockUpdates: boolean,
   mockUpdateServerPort: number | undefined,
-  macPasskeySigning:
+  macSigning:
     | {
         readonly entitlementsPath: string;
-        readonly provisioningProfilePath: string;
+        readonly provisioningProfilePath?: string;
       }
     | undefined,
   // Windows only, and false when no Linux CLI archive was handed to the build:
@@ -2637,11 +2853,23 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   // source file was never written fails the electron-builder step.
   wslRuntimeBundled = false,
   arch?: typeof BuildArch.Type,
+  artifactPurpose: NativeNoticeArtifactPurpose = "release",
+  macInstallGuidePath = MAC_INSTALL_GUIDE_NAME,
 ) {
+  yield* validateDesktopDistributionConfig(platform, target);
+  const internalValidation = artifactPurpose === "internal-validation";
   const buildConfig: Record<string, unknown> = {
     appId: DESKTOP_APP_ID,
-    productName: resolveDesktopProductName(version),
-    artifactName: "T3-Code-${version}-${arch}.${ext}",
+    productName: resolveDesktopProductName(version, artifactPurpose),
+    artifactName: internalValidation
+      ? "Meerkat-T3-INTERNAL-VALIDATION-${version}-${arch}.${ext}"
+      : "Meerkat-T3-${version}-${arch}.${ext}",
+    extraMetadata: {
+      meerkatArtifactPurpose: artifactPurpose,
+      ...(internalValidation ? { meerkatPublicDistributionEligible: false } : {}),
+    },
+    // null explicitly disables electron-builder's implicit GitHub repository inference.
+    publish: null,
     electronLanguages: [...DESKTOP_ELECTRON_LANGUAGES],
     files: [
       ...DESKTOP_FILE_EXCLUSIONS,
@@ -2662,6 +2890,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       : {}),
     extraResources: [
       ...DESKTOP_EXTRA_RESOURCES,
+      ...(platform === "mac" ? MAC_ELECTRON_NOTICES_EXTRA_RESOURCES : []),
       ...(platform === "linux" ? LINUX_CAPTURE_EXTRA_RESOURCES : []),
       ...(platform === "linux" ? LINUX_BROWSER_SECRET_EXTRA_RESOURCES : []),
       ...(platform === "win" ? WINDOWS_SERVER_EXTRA_RESOURCES : []),
@@ -2669,9 +2898,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     ],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
-  if (!isDesktopPreviewVersion(version)) {
-    const publishConfig = yield* resolveGitHubPublishConfig(updateChannel);
+  if (internalValidation || !isDesktopPreviewVersion(version)) {
+    // Internal validation may exercise only the explicit loopback mock feed.
+    const publishConfig = internalValidation
+      ? undefined
+      : yield* resolveGitHubPublishConfig(updateChannel);
     if (publishConfig) {
+      if (platform === "mac" && !signed) return yield* new UnsignedMacUpdateFeedError();
       buildConfig.publish = [publishConfig];
     } else if (mockUpdates) {
       buildConfig.publish = [
@@ -2684,27 +2917,42 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   }
 
   if (platform === "mac") {
-    const path = yield* Path.Path;
-    const repoRoot = yield* RepoRoot;
     buildConfig.mac = {
       target: target === "dmg" ? [target, "zip"] : [target],
+      // electron-builder copies these beside the app before ZIP/blockmap creation.
+      extraDistFiles: [MAC_INSTALL_GUIDE_NAME],
       icon: "icon.icns",
       category: "public.app-category.developer-tools",
       extendInfo: {
         NSScreenCaptureUsageDescription:
-          "T3 Code captures the active window when you use the window capture shortcut.",
+          "Meerkat T3 captures the active window when you use the window capture shortcut.",
       },
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
+          name: "Meerkat T3",
+          schemes: ["meerkat-t3", "meerkat-t3-dev"],
         },
       ],
-      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
-      ...(macPasskeySigning
+      ...(signed
         ? {
-            entitlements: macPasskeySigning.entitlementsPath,
-            provisioningProfile: macPasskeySigning.provisioningProfilePath,
+            type: "distribution",
+            forceCodeSigning: true,
+            notarize: true,
+          }
+        : {
+            identity: "-",
+            notarize: false,
+            hardenedRuntime: false,
+            // These separately verified executables already have ad-hoc signatures.
+            // Re-signing them would invalidate their runtime and notice manifests.
+            signIgnore: ["/Contents/Resources/(meerkat-runtime|resource-monitor)(/|$)"],
+          }),
+      ...(macSigning
+        ? {
+            entitlements: macSigning.entitlementsPath,
+            ...(macSigning.provisioningProfilePath
+              ? { provisioningProfile: macSigning.provisioningProfilePath }
+              : {}),
           }
         : {}),
     };
@@ -2715,7 +2963,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       // Give the themed installer its own Finder volume name. Finder caches
       // DMG window backgrounds by volume name, so reusing a generic name can
       // make a newly built background look unchanged during testing.
-      title: `${resolveDesktopProductName(version)} ${version} Installer`,
+      title: `${resolveDesktopProductName(version, artifactPurpose)} ${version} Installer`,
       background: `dmg/dmg-background-${updateChannel}.png`,
       window: {
         width: 640,
@@ -2724,8 +2972,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
         height: 432,
       },
       contents: [
-        { x: 166, y: 214, type: "file" },
-        { x: 474, y: 214, type: "link", path: "/Applications" },
+        { x: 130, y: 214, type: "file" },
+        { x: 320, y: 214, type: "file", path: macInstallGuidePath },
+        { x: 510, y: 214, type: "link", path: "/Applications" },
       ],
       iconSize: 120,
       iconTextSize: 12,
@@ -2739,24 +2988,24 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       // resources/package-type into the .deb only, so electron-updater updates
       // each install in its own format.
       target: target === "AppImage" ? [target, "deb"] : [target],
-      executableName: "t3code",
+      executableName: "meerkat-t3",
       icon: "icons",
       category: "Development",
       synopsis: "Desktop GUI for coding agents",
       // Required by the .deb control file.
-      maintainer: "T3 Tools <hello@t3.codes>",
+      maintainer: "Meerkat T3 contributors",
       // electron-builder turns these into MimeType=x-scheme-handler/<scheme>;
       // in the .desktop entry (Exec already gets %U), so browsers can hand
       // t3code:// OAuth callbacks to the app.
       protocols: [
         {
-          name: "T3 Code",
-          schemes: ["t3code", "t3code-dev"],
+          name: "Meerkat T3",
+          schemes: ["meerkat-t3", "meerkat-t3-dev"],
         },
       ],
       desktop: {
         entry: {
-          StartupWMClass: "t3code",
+          StartupWMClass: "meerkat-t3",
         },
       },
     };
@@ -3344,13 +3593,26 @@ export const validateWindowsPackagedPayload = Effect.fn(
   return { packagedAppDir, fileCount, unpackedFiles } as const;
 });
 
-const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
+export const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   options: ResolvedBuildOptions,
 ) {
+  const hostPlatform = yield* HostProcessPlatform;
+  if (options.platform === "mac" && options.signed) {
+    if (hostPlatform !== "darwin") {
+      return yield* new SignedMacBuildHostError({ hostPlatform });
+    }
+    yield* Effect.try({
+      try: () => requireMacSigningInputs(process.env),
+      catch: (cause) =>
+        cause instanceof MacSigningInputsError || cause instanceof MacSigningContextError
+          ? cause
+          : new MacSigningInputsError([...MAC_SIGNING_INPUTS]),
+    });
+  }
   const repoRoot = yield* RepoRoot;
   const path = yield* Path.Path;
   const fs = yield* FileSystem.FileSystem;
-  const hostPlatform = yield* HostProcessPlatform;
+  yield* validateDesktopDistributionConfig(options.platform, options.target);
   if (hostPlatform === "linux" && options.platform === "linux") {
     yield* preflightLinuxDesktopBuild(options.arch);
   }
@@ -3428,6 +3690,9 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     prefix: `t3code-desktop-${options.platform}-stage-`,
   });
 
+  if (options.keepStage) {
+    yield* Effect.log(`[desktop-artifact] Keeping stage at ${stageRoot}`);
+  }
   const stageAppDir = path.join(stageRoot, "app");
   const stageResourcesDir = path.join(stageAppDir, "apps/desktop/resources");
   const distDirs = {
@@ -3437,16 +3702,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   };
   const bundledClientEntry = path.join(distDirs.serverDist, "client/index.html");
 
+  if (options.platform === "mac") {
+    yield* stageMacInstallGuide({ repoRoot, stageAppDir });
+  }
+
   if (!options.skipBuild) {
     yield* Effect.log("[desktop-artifact] Building desktop/server/web artifacts...");
-    const spawnCommand = yield* resolveSpawnCommand("vp", ["run", "build:desktop"]);
-    yield* runCommand(
-      ChildProcess.make(spawnCommand.command, spawnCommand.args, {
-        cwd: repoRoot,
-        shell: spawnCommand.shell,
-      }),
-      { label: "vp run build:desktop", verbose: options.verbose },
-    );
+    yield* buildDesktopSources({ repoRoot, appVersion, verbose: options.verbose });
   }
 
   const requiredBuildInputs = [
@@ -3547,6 +3809,21 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   yield* Effect.log("[desktop-artifact] Staging release app...");
   yield* fs.copy(distDirs.desktopDist, path.join(stageAppDir, "apps/desktop/dist-electron"));
   yield* fs.copy(distDirs.desktopResources, stageResourcesDir);
+  if (options.platform === "mac") {
+    // electron-builder removes Electron's root licenses from Mac bundles.
+    // Preserve the full Chromium notice from the matching runtime before signing.
+    yield* Effect.tryPromise(() =>
+      stageElectronNotices({
+        electronPackageDir: path.join(repoRoot, "apps/desktop/node_modules/electron"),
+        expectedVersion: electronVersion,
+        destinationDir: path.join(stageResourcesDir, "electron-notices"),
+      }),
+    );
+  }
+  yield* fs.copyFile(
+    path.join(repoRoot, "scripts/meerkat-profile-backup.mjs"),
+    path.join(stageResourcesDir, "meerkat-profile-backup.mjs"),
+  );
   if (options.platform === "linux") {
     const extensionDir = path.join(stageAppDir, "apps/desktop/gnome-extension");
     yield* fs.makeDirectory(extensionDir, { recursive: true });
@@ -3569,6 +3846,23 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   if (options.platform !== "win") {
     yield* fs.copy(distDirs.serverDist, path.join(stageAppDir, "apps/server/dist"));
   }
+  // Native Meerkat is a real executable and must stay outside app.asar. Provision
+  // once from the consumer's released lock using scripts/build-meerkat-runtime.ts.
+  const meerkatRuntimeDir = path.join(repoRoot, "apps/server/resources/meerkat-runtime");
+  const meerkatManifest = yield* Effect.tryPromise(() => verifyMeerkatRuntime(meerkatRuntimeDir));
+  const meerkatBuildPlatform =
+    options.platform === "mac" ? "macos" : options.platform === "win" ? "windows" : "linux";
+  const meerkatBuildArch =
+    options.arch === "arm64" ? "aarch64" : options.arch === "x64" ? "x86_64" : "universal";
+  if (
+    meerkatManifest.build.platform !== meerkatBuildPlatform ||
+    meerkatManifest.build.arch !== meerkatBuildArch
+  ) {
+    return yield* new MeerkatPackagingTargetError({
+      detail: `Meerkat runtime is ${meerkatManifest.build.platform}-${meerkatManifest.build.arch}; provision the matching ${meerkatBuildPlatform}-${meerkatBuildArch} runtime. Universal and cross-host builds are not supported by the local Meerkat packaging route.`,
+    });
+  }
+  yield* fs.copy(meerkatRuntimeDir, path.join(stageResourcesDir, "meerkat-runtime"));
   yield* stageResourceMonitor({
     repoRoot,
     stageResourcesDir,
@@ -3576,6 +3870,30 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     arch: options.arch,
     verbose: options.verbose,
   });
+  const nativeNoticesDir = path.join(stageResourcesDir, "native-notices");
+  yield* stageNativeNotices({
+    artifactPurpose: options.artifactPurpose,
+    bundleDir: path.join(repoRoot, "apps/server/resources/native-notices"),
+    destinationDir: nativeNoticesDir,
+    target: { platform: meerkatBuildPlatform, arch: meerkatBuildArch },
+    gateway: {
+      cargoLockSha256: meerkatManifest.build.cargoLockSha256,
+      binarySha256: meerkatManifest.files[meerkatManifest.binary]!,
+    },
+    resourceMonitor: {
+      cargoLockPath: path.join(repoRoot, "native/resource-monitor/Cargo.lock"),
+      binaryPath: path.join(
+        stageResourcesDir,
+        "resource-monitor",
+        resourceMonitorExecutableName(options.platform),
+      ),
+    },
+    t3LicensePath: path.join(repoRoot, "LICENSE"),
+  });
+  yield* fs.copyFile(
+    path.join(nativeNoticesDir, "T3-LICENSE"),
+    path.join(stageResourcesDir, "LICENSE"),
+  );
   if (options.platform === "linux") {
     for (const backend of ["kde", "hyprland"] as const)
       yield* stageLinuxCaptureHelper({
@@ -3612,7 +3930,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   const configuredMacPasskeySigning =
     options.platform === "mac" && options.signed
       ? yield* Effect.try({
-          try: () => resolveMacPasskeySigningConfiguration(loadRepoEnv({ repoRoot })),
+          try: () => resolveOptionalMacPasskeySigningConfiguration(loadRepoEnv({ repoRoot })),
           catch: MacPasskeySigningConfigurationResolutionError.fromCause,
         })
       : undefined;
@@ -3625,16 +3943,17 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
         ),
       }
     : undefined;
-  const macEntitlementsPath = macPasskeySigning
-    ? path.join(stageAppDir, "entitlements.mac.plist")
-    : undefined;
-  if (macPasskeySigning && macEntitlementsPath) {
-    if (!(yield* fs.exists(macPasskeySigning.provisioningProfilePath))) {
+  const macEntitlementsPath =
+    options.platform === "mac" && options.signed
+      ? path.join(stageAppDir, "entitlements.mac.plist")
+      : undefined;
+  if (macEntitlementsPath) {
+    if (macPasskeySigning && !(yield* fs.exists(macPasskeySigning.provisioningProfilePath))) {
       return yield* new MacProvisioningProfileNotFoundError({
         provisioningProfilePath: macPasskeySigning.provisioningProfilePath,
       });
     }
-    yield* fs.writeFileString(macEntitlementsPath, renderMacPasskeyEntitlements(macPasskeySigning));
+    yield* fs.writeFileString(macEntitlementsPath, renderMacEntitlements(macPasskeySigning));
   }
 
   // Windows splits dependencies per process: app.asar carries only the
@@ -3660,16 +3979,16 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       ? path.join(stageAppDir, WINDOWS_SERVER_RESOURCE_SOURCE_DIR, WINDOWS_SERVER_ASAR_RESOURCE)
       : undefined;
   const stagePackageJson: StagePackageJson = {
-    name: "t3code",
+    ...resolveDesktopPackageIdentity(
+      Option.getOrUndefined(
+        yield* Config.String("MEERKAT_DESKTOP_UPDATE_REPOSITORY").pipe(Config.option),
+      ),
+    ),
     version: appVersion,
     buildVersion: appVersion,
     t3codeCommitHash: commitHash,
     private: true,
     packageManager: rootPackageJson.packageManager,
-    description: "T3 Code desktop build",
-    // Required by the .deb control file.
-    homepage: "https://t3.codes",
-    author: "T3 Tools",
     main: "apps/desktop/dist-electron/boot.cjs",
     build: yield* createBuildConfig(
       options.platform,
@@ -3678,14 +3997,18 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       options.signed,
       options.mockUpdates,
       options.mockUpdateServerPort,
-      macPasskeySigning && macEntitlementsPath
+      macEntitlementsPath
         ? {
             entitlementsPath: macEntitlementsPath,
-            provisioningProfilePath: macPasskeySigning.provisioningProfilePath,
+            ...(macPasskeySigning
+              ? { provisioningProfilePath: macPasskeySigning.provisioningProfilePath }
+              : {}),
           }
         : undefined,
       bundlesWslRuntime({ platform: options.platform, runtimeArchivePath: options.wslRuntime }),
       options.arch,
+      options.artifactPurpose,
+      path.join(stageAppDir, MAC_INSTALL_GUIDE_NAME),
     ),
     dependencies: stageDependencies,
     devDependencies: {
@@ -3713,14 +4036,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   }
 
   yield* Effect.log("[desktop-artifact] Installing staged production dependencies...");
-  const installCommand = yield* resolveSpawnCommand("vp", [...STAGE_INSTALL_ARGS]);
-  yield* runCommand(
-    ChildProcess.make(installCommand.command, installCommand.args, {
-      cwd: stageAppDir,
-      shell: installCommand.shell,
-    }),
-    { label: "vp install --prod", verbose: options.verbose },
-  );
+  yield* installDesktopProductionDependencies({
+    repoRoot,
+    stageAppDir,
+    platform: options.platform,
+    arch: options.arch,
+    verbose: options.verbose,
+  });
   yield* stageClerkPasskeyNativeBinaries(stageAppDir, options.platform, options.arch);
   yield* stageKeyringNativeBinaries(stageAppDir, options.platform, options.arch);
 
@@ -3850,7 +4172,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   if (options.platform === "win") {
     yield* validateWindowsPackagedPayload({
       stageDistDir,
-      appExecutableName: `${resolveDesktopProductName(appVersion)}.exe`,
+      appExecutableName: `${resolveDesktopProductName(appVersion, options.artifactPurpose)}.exe`,
       targetArch: options.arch,
       appVersion,
       expectWslRuntime: bundlesWslRuntime({
@@ -3883,12 +4205,24 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     });
   }
 
+  if (options.platform === "mac") {
+    const guideOutput = path.join(options.outputDir, MAC_INSTALL_GUIDE_NAME);
+    yield* fs.copyFile(path.join(stageAppDir, MAC_INSTALL_GUIDE_NAME), guideOutput);
+    copiedArtifacts.push(guideOutput);
+  }
+
   yield* Effect.log("[desktop-artifact] Done. Artifacts:").pipe(
     Effect.annotateLogs({ artifacts: copiedArtifacts }),
   );
 });
 
 const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
+  artifactPurpose: Flag.Literals("artifact-purpose", NativeNoticeArtifactPurpose.literals).pipe(
+    Flag.withDescription(
+      "Artifact purpose: release (default) requires complete notices; internal-validation retains honest incomplete notices and marks private test artifacts.",
+    ),
+    Flag.optional,
+  ),
   platform: Flag.Literals("platform", BuildPlatform.literals).pipe(
     Flag.withDescription("Build platform (env: T3CODE_DESKTOP_PLATFORM)."),
     Flag.optional,
@@ -3923,7 +4257,7 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
   ),
   signed: Flag.Boolean("signed").pipe(
     Flag.withDescription(
-      "Enable signing/notarization discovery; Windows uses Azure Trusted Signing (env: T3CODE_DESKTOP_SIGNED).",
+      "Require macOS signing and notarization; Windows uses Azure Trusted Signing (env: T3CODE_DESKTOP_SIGNED).",
     ),
     Flag.optional,
   ),
@@ -3947,7 +4281,7 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
     Flag.optional,
   ),
 }).pipe(
-  Command.withDescription("Build a desktop artifact for T3 Code."),
+  Command.withDescription("Build a desktop artifact for Meerkat T3."),
   Command.withHandler((input) => Effect.flatMap(resolveBuildOptions(input), buildDesktopArtifact)),
 );
 

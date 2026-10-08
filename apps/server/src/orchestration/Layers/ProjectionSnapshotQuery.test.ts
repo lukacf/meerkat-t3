@@ -2,6 +2,7 @@ import {
   type AgentSessionImportSource,
   ChatAttachment,
   ComposerContextId,
+  CommandId,
   CheckpointRef,
   EventId,
   MessageId,
@@ -11,6 +12,8 @@ import {
   ThreadLinkedPullRequest,
   TurnId,
   ProviderInstanceId,
+  ProviderDriverKind,
+  ThreadPreparedTurn,
   OrchestrationMessageContext,
 } from "@t3tools/contracts";
 import { assert, it } from "@effect/vitest";
@@ -46,6 +49,7 @@ const encodeThreadLinkedPullRequest = Schema.encodeSync(
 const encodeMessageContext = Schema.encodeEffect(
   Schema.fromJsonString(OrchestrationMessageContext),
 );
+const encodePreparedTurn = Schema.encodeEffect(Schema.fromJsonString(ThreadPreparedTurn));
 
 it.effect("reads project shells without loading threads or resolving excluded projects", () => {
   const resolved: string[] = [];
@@ -110,6 +114,35 @@ const projectionSnapshotLayer = it.layer(
 );
 
 projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
+  it.effect(
+    "reads registered review roots without hydrating deleted or malformed conversations",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const query = yield* ProjectionSnapshotQuery;
+        yield* sql`INSERT INTO projection_projects
+        (project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at)
+        VALUES
+        ('review-live', 'Live', '/review-project', 'invalid-json', '2026-09-29T00:00:00Z', '2026-09-29T00:00:00Z', NULL),
+        ('review-deleted', 'Deleted', '/deleted-project', 'invalid-json', '2026-09-29T00:00:00Z', '2026-09-29T00:00:00Z', '2026-09-29T01:00:00Z')`;
+        yield* sql`INSERT INTO projection_threads
+        (thread_id, project_id, title, model_selection_json, runtime_mode, interaction_mode,
+         worktree_path, archived_at, deleted_at, created_at, updated_at)
+        VALUES
+        ('review-open', 'review-live', 'Open', 'invalid-json', 'full-access', 'default', '/external-checkout', NULL, NULL, '2026-09-29T00:00:00Z', '2026-09-29T00:00:00Z'),
+        ('review-archive', 'review-live', 'Archive', 'invalid-json', 'full-access', 'default', '/archived-checkout', '2026-09-29T01:00:00Z', NULL, '2026-09-29T00:00:00Z', '2026-09-29T00:00:00Z'),
+        ('review-removed', 'review-live', 'Removed', 'invalid-json', 'full-access', 'default', '/removed-checkout', NULL, '2026-09-29T01:00:00Z', '2026-09-29T00:00:00Z', '2026-09-29T00:00:00Z'),
+        ('review-orphan', 'review-deleted', 'Orphan', 'invalid-json', 'full-access', 'default', '/orphan-checkout', NULL, NULL, '2026-09-29T00:00:00Z', '2026-09-29T00:00:00Z')`;
+        assert.deepStrictEqual((yield* query.getReviewWorkspaceRoots()).toSorted(), [
+          "/archived-checkout",
+          "/external-checkout",
+          "/review-project",
+        ]);
+        yield* sql`DELETE FROM projection_threads WHERE thread_id LIKE 'review-%'`;
+        yield* sql`DELETE FROM projection_projects WHERE project_id LIKE 'review-%'`;
+      }),
+  );
+
   it.effect("hydrates read model from projection tables and computes snapshot sequence", () =>
     Effect.gen(function* () {
       const snapshotQuery = yield* ProjectionSnapshotQuery;
@@ -460,6 +493,7 @@ projectionSnapshotLayer("ProjectionSnapshotQuery", (it) => {
           runtimeMode: "full-access",
           branch: null,
           worktreePath: null,
+          preparedTurn: null,
           pullRequests: expectedPullRequests,
           branchPullRequest,
           latestTurn: {
@@ -2627,6 +2661,78 @@ projectionSnapshotLayer("ProjectionSnapshotQuery windowed thread detail", (it) =
     snapshot.thread.messages.map((message) => message.id).toSorted();
   const activityIds = (snapshot: { thread: { activities: ReadonlyArray<{ id: string }> } }) =>
     snapshot.thread.activities.map((activity) => activity.id).toSorted();
+
+  it.effect("reads blocked prepared work and watermarks recovery and admission events", () =>
+    Effect.gen(function* () {
+      yield* seedFanOutThread();
+      const sql = yield* SqlClient.SqlClient;
+      const query = yield* ProjectionSnapshotQuery;
+      const now = "2026-03-01T00:00:10.000Z";
+      const prepared: ThreadPreparedTurn = {
+        recoveryId: CommandId.make("query-prepared-request"),
+        projectId: ProjectId.make("project-w"),
+        projectCwd: "/tmp/project-w",
+        expectedCwd: "/tmp/prepared-checkout",
+        providerIdentity: {
+          driverKind: ProviderDriverKind.make("meerkat"),
+          continuationKey: "native-continuity",
+        },
+        phase: "blocked",
+        setup: "finished",
+        reason: "The native model is unavailable in this checkout.",
+        createdAt: now,
+        updatedAt: now,
+        command: {
+          type: "thread.turn.start",
+          commandId: CommandId.make("query-prepared-request"),
+          threadId: threadW,
+          message: {
+            messageId: MessageId.make("query-prepared-message"),
+            role: "user",
+            text: "Keep the original request",
+            attachments: [],
+          },
+          modelSelection: { instanceId: ProviderInstanceId.make("meerkat"), model: "fixture-b" },
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          createdAt: now,
+        },
+      };
+      yield* sql`UPDATE projection_threads
+        SET prepared_turn_json = ${yield* encodePreparedTurn(prepared)}
+        WHERE thread_id = ${threadW}`;
+      yield* sql`DELETE FROM orchestration_events`;
+      yield* sql`INSERT INTO orchestration_events (
+        sequence, event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+        command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+      ) VALUES
+        (39, 'query-recovery', 'thread', ${threadW}, 1, 'thread.prepared-turn-changed', ${now},
+         NULL, NULL, NULL, 'user', '{}', '{}'),
+        (40, 'query-metadata', 'thread', ${threadW}, 2, 'thread.meta-updated', ${now},
+         NULL, NULL, NULL, 'user', '{}', '{}')`;
+      const full = Option.getOrThrow(yield* query.getThreadDetailSnapshot(threadW));
+      const page = Option.getOrThrow(
+        yield* query.getThreadDetailSnapshot(threadW, { turnLimit: 2 }),
+      );
+      assert.deepStrictEqual(full.thread.preparedTurn, prepared);
+      assert.deepStrictEqual(page.thread.preparedTurn, prepared);
+      assert.equal(page.page?.threadSequence, 39);
+
+      yield* sql`INSERT INTO orchestration_events (
+        sequence, event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+        command_id, causation_event_id, correlation_id, actor_kind, payload_json, metadata_json
+      ) VALUES
+        (41, 'query-admitted', 'thread', ${threadW}, 3, 'thread.turn-start-requested', ${now},
+         NULL, NULL, NULL, 'user', '{}', '{}')`;
+      yield* sql`UPDATE projection_threads SET prepared_turn_json = NULL WHERE thread_id = ${threadW}`;
+      const admitted = Option.getOrThrow(
+        yield* query.getThreadDetailSnapshot(threadW, { turnLimit: 2 }),
+      );
+      assert.isNull(admitted.thread.preparedTurn);
+      assert.equal(admitted.page?.threadSequence, 41);
+      yield* sql`DELETE FROM orchestration_events`;
+    }),
+  );
 
   it.effect("returns the full thread with no page metadata when no window is requested", () =>
     Effect.gen(function* () {

@@ -7,6 +7,7 @@ import {
   type TerminalMetadataStreamEvent,
   type TerminalOpenInput,
   type TerminalRestartInput,
+  type TerminalSessionSnapshot,
   ProviderDriverKind,
   ProviderInstanceId,
   ServerSettingsError,
@@ -874,6 +875,92 @@ it.layer(
       assert.equal(reopened.cwd, differentCwd);
       assert.equal(reopened.history, "");
       yield* waitFor(Effect.map(readFileString(logPath), (text) => text === ""));
+    }),
+  );
+
+  it.effect("preserves scoped shells on checkout changes and blocks stale writes and reuse", () =>
+    Effect.gen(function* () {
+      const { manager, ptyAdapter, getEvents, baseDir } = yield* createManager();
+      const path = yield* Path.Path;
+      const originalCwd = path.join(baseDir, "original");
+      const currentCwd = path.join(baseDir, "current");
+      yield* makeDirectory(originalCwd);
+      yield* makeDirectory(currentCwd);
+      const original = {
+        ...openInput({ cwd: originalCwd, worktreePath: originalCwd }),
+        executionScope: { cwd: originalCwd, worktreePath: originalCwd },
+      };
+      const current = {
+        ...original,
+        cwd: currentCwd,
+        worktreePath: null,
+        executionScope: { cwd: currentCwd, worktreePath: null },
+      };
+      const first = yield* manager.open(original);
+      const sibling = yield* manager.open({ ...original, threadId: "sibling" });
+      const process = ptyAdapter.processes[0]!;
+      process.emitData("original transcript\n");
+      yield* waitFor(
+        Effect.map(getEvents, (events) =>
+          events.some(
+            (event) => event.type === "output" && event.data.includes("original transcript"),
+          ),
+        ),
+      );
+
+      const snapshots: TerminalSessionSnapshot[] = [];
+      const detach = yield* manager.attachStream(current, (event) =>
+        Effect.sync(() => {
+          if (event.type === "snapshot") snapshots.push(event.snapshot);
+        }),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(detach));
+      expect(snapshots[0]).toMatchObject({ pid: first.pid, cwd: originalCwd });
+      expect(snapshots[0]?.history).toContain("original transcript");
+      expect((yield* manager.open(current).pipe(Effect.flip))._tag).toBe(
+        "TerminalWorkspaceChangedError",
+      );
+      expect(
+        (yield* manager
+          .write({
+            ...current,
+            data: "must not execute\r",
+          })
+          .pipe(Effect.flip))._tag,
+      ).toBe("TerminalWorkspaceChangedError");
+      expect(process.writes).toEqual([]);
+      expect(process.killed).toBe(false);
+      expect(ptyAdapter.spawnInputs).toHaveLength(2);
+
+      yield* manager.write({ ...original, threadId: "sibling", data: "still usable\r" });
+      expect(ptyAdapter.processes[1]?.writes).toEqual(["still usable\r"]);
+      expect(ptyAdapter.processes[1]?.pid).toBe(sibling.pid);
+      const fresh = yield* manager.open({ ...current, terminalId: "fresh" });
+      yield* manager.write({ ...current, terminalId: "fresh", data: "new checkout\r" });
+      expect(fresh.cwd).toBe(currentCwd);
+      expect(ptyAdapter.processes[2]?.writes).toEqual(["new checkout\r"]);
+
+      process.emitExit({ exitCode: 0, signal: 0 });
+      yield* waitFor(
+        Effect.map(getEvents, (events) =>
+          events.some((event) => event.type === "exited" && event.threadId === original.threadId),
+        ),
+      );
+      const detachExited = yield* manager.attachStream(
+        { ...current, restartIfNotRunning: true },
+        (event) =>
+          Effect.sync(() => {
+            if (event.type === "snapshot") snapshots.push(event.snapshot);
+          }),
+      );
+      yield* Effect.addFinalizer(() => Effect.sync(detachExited));
+      expect(ptyAdapter.spawnInputs).toHaveLength(3);
+      expect(snapshots.at(-1)).toMatchObject({ status: "exited", cwd: originalCwd });
+      expect(snapshots.at(-1)?.history).toContain("original transcript");
+      const restarted = yield* manager.restart({ ...current, cols: 100, rows: 24 });
+      expect(restarted.cwd).toBe(currentCwd);
+      expect(restarted.pid).not.toBe(first.pid);
+      expect(restarted.history).toBe("");
     }),
   );
 
@@ -2022,6 +2109,7 @@ it.layer(
         start: Effect.void,
         ready: Effect.void,
         getSettings: Effect.fail(settingsError),
+        updateProviderSettings: () => Effect.die("Unexpected provider settings mutation"),
         updateSettings: () => Effect.fail(settingsError),
         streamChanges: Stream.empty,
         subscribeChanges: Effect.succeed(Stream.empty),

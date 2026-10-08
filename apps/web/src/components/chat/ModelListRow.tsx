@@ -14,6 +14,7 @@ import { Kbd } from "../ui/kbd";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { cn } from "~/lib/utils";
 import { modelPickerModelKey } from "./modelPickerKeys";
+import { modelCredentialRequirement } from "../../modelCredentials";
 
 export const ModelListRow = memo(function ModelListRow(props: {
   index: number;
@@ -76,7 +77,11 @@ export const ModelListRow = memo(function ModelListRow(props: {
               New
             </span>
           ) : null}
-          {props.unavailable ? (
+          {modelCredentialRequirement(props.model) ? (
+            <Badge variant="outline" size="sm">
+              Connect account
+            </Badge>
+          ) : props.unavailable ? (
             <Badge variant="outline" size="sm">
               Unavailable
             </Badge>

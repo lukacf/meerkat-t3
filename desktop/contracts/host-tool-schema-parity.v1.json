@@ -1,0 +1,117 @@
+{
+  "schemaVersion": 1,
+  "toolDefinition": {
+    "name": "synthetic_echo",
+    "description": "Synthetic host-neutral schema parity tool.",
+    "inputSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["message"],
+      "properties": {
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8,
+          "pattern": "^[a-z]+$"
+        }
+      }
+    },
+    "resultSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["echo", "length"],
+      "properties": {
+        "echo": { "type": "string", "minLength": 1, "maxLength": 8 },
+        "length": { "type": "integer", "minimum": 1, "maximum": 8 }
+      }
+    },
+    "capabilityErrorSchema": {
+      "$schema": "https://json-schema.org/draft/2020-12/schema",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "code", "retryability"],
+      "properties": {
+        "version": { "const": "synthetic.echo.v1" },
+        "code": { "enum": ["SYNTHETIC_REJECTED"] },
+        "retryability": { "const": "never" }
+      }
+    }
+  },
+  "cases": [
+    {
+      "id": "input-valid",
+      "surface": "input",
+      "valid": true,
+      "value": { "message": "hello" }
+    },
+    {
+      "id": "input-additional-property",
+      "surface": "input",
+      "valid": false,
+      "value": { "message": "hello", "witness": "forbidden" }
+    },
+    {
+      "id": "input-pattern-mismatch",
+      "surface": "input",
+      "valid": false,
+      "value": { "message": "HELLO" }
+    },
+    {
+      "id": "input-boundary-plus-one",
+      "surface": "input",
+      "valid": false,
+      "value": { "message": "abcdefghi" }
+    },
+    {
+      "id": "result-valid",
+      "surface": "result",
+      "valid": true,
+      "value": { "echo": "hello", "length": 5 }
+    },
+    {
+      "id": "result-wrong-type",
+      "surface": "result",
+      "valid": false,
+      "value": { "echo": "hello", "length": "5" }
+    },
+    {
+      "id": "result-additional-property",
+      "surface": "result",
+      "valid": false,
+      "value": { "echo": "hello", "length": 5, "private": true }
+    },
+    {
+      "id": "capability-error-valid",
+      "surface": "capability_error",
+      "valid": true,
+      "value": {
+        "version": "synthetic.echo.v1",
+        "code": "SYNTHETIC_REJECTED",
+        "retryability": "never"
+      }
+    },
+    {
+      "id": "capability-error-wrong-namespace",
+      "surface": "capability_error",
+      "valid": false,
+      "value": {
+        "version": "desktop.browser.v1",
+        "code": "SYNTHETIC_REJECTED",
+        "retryability": "never"
+      }
+    },
+    {
+      "id": "capability-error-additional-property",
+      "surface": "capability_error",
+      "valid": false,
+      "value": {
+        "version": "synthetic.echo.v1",
+        "code": "SYNTHETIC_REJECTED",
+        "retryability": "never",
+        "stack": "forbidden"
+      }
+    }
+  ]
+}

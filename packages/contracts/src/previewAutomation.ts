@@ -64,6 +64,8 @@ export const PreviewAutomationTabTargetInput = Schema.Struct(PreviewAutomationTa
 export type PreviewAutomationTabTargetInput = typeof PreviewAutomationTabTargetInput.Type;
 
 export const PreviewAutomationStatus = Schema.Struct({
+  /** Broker-owned live connection witness, never supplied by the guest page. */
+  hostConnectionId: Schema.optional(Schema.String),
   available: Schema.Boolean,
   visible: Schema.Boolean,
   tabId: Schema.NullOr(PreviewTabId),

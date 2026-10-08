@@ -2394,7 +2394,7 @@ describe("deriveMessagesTimelineRows", () => {
     expect(foldRow?.label).toBe("Worked for 12s");
   });
 
-  it("uses latest-turn timings and the stopped label for an interrupted latest turn", () => {
+  it("labels runtime interruption without attributing it to a user stop", () => {
     const rows = deriveMessagesTimelineRows({
       timelineEntries: [
         {
@@ -2426,7 +2426,7 @@ describe("deriveMessagesTimelineRows", () => {
       expect.objectContaining({
         kind: "turn-fold",
         turnId: "turn-1",
-        label: "You stopped after 47s",
+        label: "Interrupted after 47s",
         expanded: false,
       }),
     ]);

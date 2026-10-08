@@ -9,6 +9,7 @@
  *
  * @module ProviderServiceLive
  */
+import { requireRestoreReviewReleased, restoreReviewHeld } from "../../restoreReview.ts";
 import {
   EventId,
   MessageId,
@@ -40,6 +41,7 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { executionModeError } from "@t3tools/shared/executionModes";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -51,6 +53,8 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as SchemaIssue from "effect/SchemaIssue";
+import * as Schedule from "effect/Schedule";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { appendUserInputAttachmentPaths } from "../userInputAttachments.ts";
@@ -469,6 +473,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 ) {
   const analytics = yield* Effect.service(AnalyticsService.AnalyticsService);
   const serverConfig = yield* ServerConfig.ServerConfig;
+  const heldForRestoreReview = yield* restoreReviewHeld;
   const eventLoggers = yield* ProviderEventLoggers.ProviderEventLoggers;
   // Options-provided logger wins (test overrides); otherwise we take whatever
   // the `ProviderEventLoggers` tag exposes — `undefined` means "no canonical
@@ -487,6 +492,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   const fileSystem = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const runtimeEventPubSub = yield* PubSub.unbounded<ProviderRuntimeEvent>();
+  const meerkatBindingWrites = yield* Semaphore.make(1);
   const pendingCompactions = new Map<ThreadId, PendingCompaction>();
   const timedOutNativeCompactions = new Set<ThreadId>();
   const settleCompaction = (threadId: ThreadId, pending: PendingCompaction, terminal: string) =>
@@ -1100,6 +1106,38 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         canonicalEvent.type === "turn.aborted"
       ) {
         yield* recordTurnCompletedAnalytics(source, canonicalEvent);
+        if (source.provider === "meerkat") {
+          yield* meerkatBindingWrites
+            .withPermit(
+              Effect.gen(function* () {
+                const adapter = yield* registry.getByInstance(source.instanceId);
+                const session = (yield* adapter.listSessions()).find(
+                  (session) => session.threadId === canonicalEvent.threadId,
+                );
+                if (!session) return;
+                const binding = yield* directory.getBinding(session.threadId);
+                if (
+                  Option.isNone(binding) ||
+                  binding.value.providerInstanceId !== source.instanceId
+                ) {
+                  return;
+                }
+                yield* upsertSessionBinding(
+                  { ...session, providerInstanceId: source.instanceId },
+                  session.threadId,
+                  {
+                    lastRuntimeEvent: canonicalEvent.type,
+                    lastRuntimeEventAt: canonicalEvent.createdAt,
+                  },
+                );
+              }),
+            )
+            .pipe(
+              Effect.catch((cause) =>
+                Effect.logWarning("failed to persist Meerkat terminal session state", { cause }),
+              ),
+            );
+        }
         if (source.provider === "claudeAgent") {
           // Background Claude turns have no sendTurn response to persist their
           // new native boundary. Save it before clients can checkpoint the turn.
@@ -1185,6 +1223,73 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     Effect.map((map) => Array.from(map.entries())),
   );
 
+  const observationsEnabled = yield* Ref.make(false);
+  const observationRegistrations = yield* Semaphore.make(1);
+
+  const observeBindingsForAdapter = Effect.fn("observeBindingsForAdapter")(function* (
+    instanceId: ProviderInstanceId,
+    adapter: ProviderAdapterShape<ProviderAdapterError>,
+  ) {
+    if (!adapter.observeSession) return;
+    const observeSession = adapter.observeSession;
+    const bindings = yield* Effect.gen(function* () {
+      const persisted = yield* directory.listBindings();
+      if (Option.isNone(projectionQuery)) return persisted;
+      const snapshot = yield* projectionQuery.value.getCommandReadModel();
+      const existing = new Set(
+        snapshot.threads.filter((thread) => thread.deletedAt === null).map((thread) => thread.id),
+      );
+      return persisted.filter((binding) => existing.has(binding.threadId));
+    }).pipe(
+      Effect.retry({ times: 3, schedule: Schedule.spaced("200 millis") }),
+      Effect.catch((cause) =>
+        Effect.logWarning("failed to read provider observation bindings", { cause }).pipe(
+          Effect.as([]),
+        ),
+      ),
+    );
+    for (const binding of bindings) {
+      if (
+        binding.providerInstanceId !== instanceId ||
+        binding.resumeCursor === undefined ||
+        binding.resumeCursor === null
+      ) {
+        continue;
+      }
+      if (binding.provider !== adapter.provider) {
+        yield* Effect.logWarning("provider observation binding does not match its adapter", {
+          threadId: binding.threadId,
+          instanceId,
+          provider: binding.provider,
+          adapterProvider: adapter.provider,
+        });
+        continue;
+      }
+      yield* observeSession({
+        threadId: binding.threadId,
+        resumeCursor: binding.resumeCursor,
+      }).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("failed to observe persisted provider session", {
+            threadId: binding.threadId,
+            instanceId,
+            cause,
+          }),
+        ),
+      );
+    }
+  });
+
+  const observePersistedSessions = () =>
+    observationRegistrations.withPermit(
+      Effect.gen(function* () {
+        yield* Ref.set(observationsEnabled, true);
+        for (const [instanceId, adapter] of yield* getAdapterEntries) {
+          yield* observeBindingsForAdapter(instanceId, adapter);
+        }
+      }),
+    );
+
   // Rebuild the map of id → adapter from the registry and fork a new event
   // subscription for every instance that is either brand new or whose adapter
   // identity changed (indicating the underlying `ProviderInstance` was torn
@@ -1195,6 +1300,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     const previous = yield* Ref.get(subscribedAdapters);
     const currentIds = yield* registry.listInstances();
     const next = new Map<ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>>();
+    const changed: Array<
+      readonly [ProviderInstanceId, ProviderAdapterShape<ProviderAdapterError>]
+    > = [];
     for (const id of currentIds) {
       const adapterOption = yield* registry
         .getByInstance(id)
@@ -1203,6 +1311,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const adapter = adapterOption.value;
       next.set(id, adapter);
       if (previous.get(id) !== adapter) {
+        changed.push([id, adapter]);
         yield* Stream.runForEach(adapter.streamEvents, (event) =>
           processRuntimeEvent(
             {
@@ -1211,10 +1320,17 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             },
             event,
           ),
-        ).pipe(Effect.forkScoped);
+        ).pipe(Effect.forkScoped({ startImmediately: true }));
       }
     }
     yield* Ref.set(subscribedAdapters, next);
+    if (yield* Ref.get(observationsEnabled)) {
+      yield* observationRegistrations.withPermit(
+        Effect.forEach(changed, ([instanceId, adapter]) =>
+          observeBindingsForAdapter(instanceId, adapter),
+        ),
+      );
+    }
   });
 
   const instanceChanges = yield* registry.subscribeChanges;
@@ -1237,6 +1353,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
     return yield* Effect.gen(function* () {
       const adapter = yield* registry.getByInstance(bindingInstanceId);
+      const unsupportedMode = executionModeError(
+        adapter.provider,
+        input.binding.runtimeMode ?? "full-access",
+      );
+      if (unsupportedMode) return yield* toValidationError(input.operation, unsupportedMode);
       const hasResumeCursor =
         input.binding.resumeCursor !== null && input.binding.resumeCursor !== undefined;
       const hasActiveSession = yield* adapter.hasSession(input.binding.threadId);
@@ -1269,6 +1390,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       const persistedCwd = readPersistedCwd(input.binding.runtimePayload);
       const persistedModelSelection = readPersistedModelSelection(input.binding.runtimePayload);
 
+      yield* requireRestoreReviewReleased.pipe(
+        Effect.mapError((cause) => toValidationError(input.operation, cause.message)),
+      );
       yield* prepareMcpSession(input.binding.threadId, bindingInstanceId);
       const resumed = yield* adapter
         .startSession({
@@ -1396,6 +1520,11 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const startSession: ProviderServiceMethod<"startSession"> = Effect.fn("startSession")(
     function* (threadId, rawInput) {
+      yield* requireRestoreReviewReleased.pipe(
+        Effect.mapError((cause) =>
+          toValidationError("ProviderService.startSession", cause.message),
+        ),
+      );
       const parsed = yield* decodeInputOrValidationError({
         operation: "ProviderService.startSession",
         schema: ProviderSessionStartInput,
@@ -1416,6 +1545,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       return yield* Effect.gen(function* () {
         const instanceInfo = yield* registry.getInstanceInfo(resolvedInstanceId);
         const resolvedProvider = instanceInfo.driverKind;
+        const unsupportedMode = executionModeError(resolvedProvider, parsed.runtimeMode);
+        if (unsupportedMode)
+          return yield* toValidationError("ProviderService.startSession", unsupportedMode);
         metricProvider = resolvedProvider;
         if (parsed.provider !== undefined && parsed.provider !== resolvedProvider) {
           return yield* toValidationError(
@@ -1567,6 +1699,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   );
 
   const sendTurn: ProviderServiceMethod<"sendTurn"> = Effect.fn("sendTurn")(function* (rawInput) {
+    yield* requireRestoreReviewReleased.pipe(
+      Effect.mapError((cause) => toValidationError("ProviderService.sendTurn", cause.message)),
+    );
     const parsed = yield* decodeInputOrValidationError({
       operation: "ProviderService.sendTurn",
       schema: ProviderSendTurnInput,
@@ -1748,7 +1883,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             requestId: turnMetadata.requestId,
           }),
       );
-      yield* directory.upsert({
+      const persistAcceptedTurn = directory.upsert({
         threadId: input.threadId,
         provider: routed.adapter.provider,
         providerInstanceId: routed.instanceId,
@@ -1764,6 +1899,37 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           lastRuntimeEventAt: yield* nowIso,
         },
       });
+      if (routed.adapter.provider === "meerkat") {
+        // MobKit can finish while the admission reply waits for an executor
+        // boundary. Serialize snapshot persistence with terminal-event writes;
+        // a late reply must not resurrect the completed turn.
+        yield* meerkatBindingWrites.withPermit(
+          Effect.gen(function* () {
+            const session = (yield* routed.adapter.listSessions()).find(
+              (session) => session.threadId === input.threadId,
+            );
+            if (!session) return;
+            yield* directory.upsert({
+              threadId: input.threadId,
+              provider: routed.adapter.provider,
+              providerInstanceId: routed.instanceId,
+              status: toRuntimeStatus(session),
+              ...(session.resumeCursor !== undefined ? { resumeCursor: session.resumeCursor } : {}),
+              runtimePayload: {
+                ...toRuntimePayloadFromSession(session, {
+                  modelSelection: input.modelSelection,
+                  lastRuntimeEvent: "provider.sendTurn",
+                  lastRuntimeEventAt: yield* nowIso,
+                }),
+                continueAfterServerUpdate: null,
+                continueAfterServerUpdatePrepared: null,
+              },
+            });
+          }),
+        );
+      } else {
+        yield* persistAcceptedTurn;
+      }
       yield* analytics.record("provider.turn.sent", {
         provider: routed.adapter.provider,
         model: input.modelSelection?.model,
@@ -2294,7 +2460,49 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     },
   );
 
+  const stopObservingSession = Effect.fn("ProviderService.stopObservingSession")(
+    function* (threadId: ThreadId) {
+      const binding = yield* directory.getBinding(threadId);
+      if (Option.isNone(binding) || binding.value.providerInstanceId === undefined) return;
+      const adapter = yield* registry.getByInstance(binding.value.providerInstanceId);
+      if (adapter.provider === binding.value.provider && adapter.stopObservingSession) {
+        yield* adapter.stopObservingSession(threadId);
+      }
+    },
+    Effect.catch((cause) =>
+      Effect.logWarning("failed to stop provider output observation", { cause }),
+    ),
+  );
+
+  const acknowledgeEvent = Effect.fn("ProviderService.acknowledgeEvent")(
+    function* (event: ProviderRuntimeEvent) {
+      if (event.providerInstanceId === undefined) return;
+      const binding = yield* directory.getBinding(event.threadId);
+      if (
+        Option.isNone(binding) ||
+        binding.value.provider !== event.provider ||
+        binding.value.providerInstanceId !== event.providerInstanceId
+      ) {
+        return;
+      }
+      const adapter = yield* registry.getByInstance(event.providerInstanceId);
+      if (adapter.provider === event.provider && adapter.acknowledgeEvent) {
+        yield* adapter.acknowledgeEvent(event.eventId);
+      }
+    },
+    Effect.catch((cause) => Effect.logWarning("failed to acknowledge provider output", { cause })),
+  );
+
   const runStopAll = Effect.fn("runStopAll")(function* () {
+    if (heldForRestoreReview) {
+      // Closing a held profile must release live resources without rewriting
+      // saved sessions or their continuation evidence before the next launch.
+      const adapters = yield* getAdapterEntries;
+      yield* Effect.forEach(adapters, ([, adapter]) => adapter.stopAll()).pipe(Effect.asVoid);
+      yield* McpSessionRegistry.revokeAllActiveMcpCredentials();
+      McpProviderSession.clearAllMcpProviderSessions();
+      return;
+    }
     // Continuation is project-scopable, so decide it per session's project;
     // without orchestration the environment value is all there is.
     const stopSettings = yield* serverSettings.getSettings.pipe(
@@ -2399,6 +2607,12 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   );
 
   return {
+    subscribeEvents: PubSub.subscribe(runtimeEventPubSub).pipe(
+      Effect.map((subscription) => Stream.fromSubscription(subscription)),
+    ),
+    observePersistedSessions,
+    acknowledgeEvent,
+    stopObservingSession,
     startSession,
     sendTurn,
     compactThread,

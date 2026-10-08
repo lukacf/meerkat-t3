@@ -2,8 +2,9 @@ import { createFileRoute, redirect, useLocation, useNavigate } from "@tanstack/r
 import { useState } from "react";
 
 import { NoProjectsHero } from "../components/NoProjectsHero";
+import { FirstRunRecovery } from "../components/onboarding/FirstRunGate";
 import { WelcomeWizard } from "../components/onboarding/WelcomeWizard";
-import { useNewThreadHandler } from "../hooks/useHandleNewThread";
+import { useClientSettingsHydrationStatus } from "../hooks/useSettings";
 
 /** Onboarding overlays the workspace. Visiting /welcome reopens setup. */
 export const Route = createFileRoute("/welcome")({
@@ -23,7 +24,13 @@ function WelcomeRouteView() {
   // Never reopen setup while the destination route is still loading.
   const isWelcomeRoute = useLocation({ select: (location) => location.pathname === "/welcome" });
   const [dismissed, setDismissed] = useState(false);
-  const openNewThread = useNewThreadHandler();
+  const hydrationStatus = useClientSettingsHydrationStatus();
+  if (hydrationStatus === "failed" || hydrationStatus === "retrying") {
+    return <FirstRunRecovery reason="settings" retrying={hydrationStatus === "retrying"} />;
+  }
+  // Direct /welcome entry bypasses FirstRunGate. Wait before mounting either
+  // setup surface so the wizard initializes its saved step and computers once.
+  if (hydrationStatus !== "ready") return null;
   // An authenticated gate means a primary server is serving this app —
   // desktop, `npx t3`, or a dev server — and that server is "this machine"
   // no matter what hostname the browser used. Only hosted-static has no
@@ -35,15 +42,17 @@ function WelcomeRouteView() {
       {isWelcomeRoute && !dismissed ? (
         <WelcomeWizard
           localAvailable={localAvailable}
-          onDone={(projectRef) => {
-            setDismissed(true);
-            if (projectRef !== undefined) {
-              void openNewThread(projectRef, { replace: true }).catch(() => {
-                void navigate({ to: "/", replace: true });
+          onDone={async (projectRef) => {
+            if (projectRef) {
+              await navigate({
+                to: "/$environmentId/projects/$projectId/start",
+                params: projectRef,
+                replace: true,
               });
-              return;
+            } else {
+              await navigate({ to: "/", replace: true });
             }
-            void navigate({ to: "/", replace: true });
+            setDismissed(true);
           }}
         />
       ) : null}

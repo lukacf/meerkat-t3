@@ -3062,6 +3062,9 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const sanitizedBranch = targetBranch.replace(/\//g, "-");
     const repoName = path.basename(input.cwd);
     const worktreePath = input.path ?? path.join(worktreesDir, repoName, sanitizedBranch);
+    if (options?.beforeWorktreeCreate) {
+      yield* options.beforeWorktreeCreate(path.resolve(input.cwd, worktreePath));
+    }
     const args = input.newRefName
       ? ["worktree", "add", "-b", input.newRefName, worktreePath, input.refName]
       : ["worktree", "add", worktreePath, input.refName];
@@ -3593,13 +3596,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
 
   const createRef: GitVcsDriver.GitVcsDriver["Service"]["createRef"] = Effect.fn("createRef")(
     function* (input) {
-      yield* executeGit("GitVcsDriver.createRef", input.cwd, ["branch", input.refName], {
+      // Creating and switching together also supports an unborn HEAD before the first commit.
+      const args = input.switchRef
+        ? ["checkout", "-b", input.refName, "--"]
+        : ["branch", input.refName];
+      yield* executeGit("GitVcsDriver.createRef", input.cwd, args, {
         timeoutMs: 10_000,
         fallbackErrorDetail: "git branch create failed",
       });
-      if (input.switchRef) {
-        yield* switchRef({ cwd: input.cwd, refName: input.refName });
-      }
 
       return { refName: input.refName };
     },

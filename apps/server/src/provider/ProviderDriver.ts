@@ -37,6 +37,7 @@ import type { ProviderAdapterError, ProviderDriverError } from "./Errors.ts";
 import type { ProviderAdapterShape } from "./Services/ProviderAdapter.ts";
 import type { ServerProviderShape } from "./Services/ServerProvider.ts";
 import type { ProviderAuthController } from "./Services/ProviderAuthService.ts";
+import type { MeerkatTeamReader } from "./meerkat/MeerkatTeamReader.ts";
 
 /**
  * Static metadata advertised by a driver. Used for default presentation
@@ -71,6 +72,13 @@ export interface ProviderInstance {
   readonly displayName: string | undefined;
   readonly accentColor?: string | undefined;
   readonly enabled: boolean;
+  readonly meerkatTeam?: MeerkatTeamReader;
+  readonly meerkatControls?: {
+    readonly request: (method: string, params: Record<string, unknown>) => Promise<unknown>;
+  };
+  readonly meerkatMedia?: {
+    readonly request: (method: string, params: Record<string, unknown>) => Promise<unknown>;
+  };
   readonly snapshot: ServerProviderShape;
   readonly snapshotForCwd?: (cwd: string) => Effect.Effect<ServerProvider, ProviderDriverError>;
   readonly refreshModels?: () => Effect.Effect<void, ProviderDriverError>;

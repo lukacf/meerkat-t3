@@ -103,6 +103,10 @@ vi.mock("./use-thread-outbox", async () => {
     editingQueuedMessageIdsAtom: Atom.make<Record<string, boolean>>({}).pipe(Atom.keepAlive),
     useThreadOutboxMessages: () => ({}),
     useThreadOutboxShellStatuses: () => new Map(),
+    useThreadOutboxPreparedState: () => new Set(),
+    isPreparedRecoveryBlockingMessage: () => false,
+    readPreparedTurnForQueuedMessage: () => undefined,
+    nextPreparedRecoveryMessage: (queue: ReadonlyArray<unknown>) => queue[0],
   };
 });
 
@@ -218,6 +222,27 @@ afterEach(() => {
 });
 
 describe("thread outbox attachment preparation", () => {
+  it("validates a prepared-message draft restore after hydration and before publication", async () => {
+    const key = "environment-1:prepared-draft";
+    await composerDrafts.waitForComposerDraftsLoaded();
+    composerDrafts.setComposerDraftText(key, "New typing");
+    const validate = vi.fn(() => {
+      throw new Error("Draft changed during recovery");
+    });
+    await expect(
+      composerDrafts.restoreComposerDraftSnapshot(
+        key,
+        {
+          text: "Original saved request",
+          attachments: [],
+        },
+        validate,
+      ),
+    ).rejects.toThrow("Draft changed during recovery");
+    expect(validate).toHaveBeenCalledOnce();
+    expect(composerDrafts.getComposerDraftSnapshot(key).text).toBe("New typing");
+  });
+
   it("abandons reused uploads when an editor saves changed text during verification", async () => {
     const message = withReusedFileUpload(
       queuedMessage({
@@ -705,6 +730,52 @@ describe("thread outbox recovery rollback", () => {
         `${message.environmentId}:${message.threadId}`
       ],
     ).toEqual({ kind: "failed", message, reason: "rejected by server" });
+  });
+
+  it("preserves a prepared request's queued edits separately without replacing the open composer", async () => {
+    const message: QueuedThreadMessage = {
+      ...queuedMessage({
+        messageId: "prepared-copy",
+        text: "Possibly edited queued copy",
+        fileUri: "file:///documents/t3-composer-attachments/queued-copy.pdf",
+      }),
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("meerkat"),
+        model: "queued-model",
+        options: [{ id: "reasoning_effort", value: "high" }],
+      },
+      creation: {
+        projectId: ProjectId.make("project-1"),
+        workspaceMode: "local",
+        branch: null,
+        worktreePath: null,
+      },
+    };
+    const key = `${message.environmentId}:${message.threadId}`;
+    composerDrafts.setComposerDraftText(key, "Current restored original or new typing");
+    composerDrafts.updateComposerDraftSettings(key, {
+      modelSelection: { instanceId: ProviderInstanceId.make("meerkat"), model: "current-model" },
+    });
+    const before = composerDrafts.getComposerDraftSnapshot(key);
+    await harness.manager.enqueue(message);
+    await expect(
+      restoreRejectedQueuedMessage(
+        message,
+        "The queued copy is kept separately in Drafts for review.",
+        { preparedRecovery: true },
+      ),
+    ).resolves.toBe("restored");
+    expect(composerDrafts.getComposerDraftSnapshot(key)).toEqual(before);
+    expect(
+      composerDrafts.getComposerDraftSnapshot("new-task:restored-prepared-copy"),
+    ).toMatchObject({
+      text: message.text,
+      attachments: message.attachments,
+      modelSelection: message.modelSelection,
+    });
+    expect(remainingMessages()).toEqual([]);
+    expect(harness.removePersistedFile).not.toHaveBeenCalled();
+    expect(appAtomRegistry.get(pendingThreadCreationOutcomesAtom)[key]).toBeUndefined();
   });
 
   it("keeps a failed outcome until its thread screen consumes it", async () => {

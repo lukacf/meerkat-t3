@@ -7,6 +7,7 @@ import type {
 import { COMPOSER_CONTEXT_MAX_RECORDS } from "@t3tools/contracts";
 import { Alert } from "react-native";
 import { formatComposerContextReference } from "@t3tools/shared/composerContextReferences";
+import { serializeProviderSkillSelection } from "@t3tools/shared/meerkatSkills";
 import { pullRequestComposerContext } from "../../lib/composerContext";
 import { uuidv4 } from "../../lib/uuid";
 import {
@@ -147,7 +148,7 @@ export function resolveComposerCommandSelection(input: {
   if (item.type === "path") {
     replacement = `${serializeComposerFileLink(item.path)} `;
   } else if (item.type === "skill") {
-    replacement = `$${item.skill.name} `;
+    replacement = `${serializeProviderSkillSelection(item.skill)} `;
   } else if (item.type === "slash-command") {
     replacement = `/${item.command} `;
   } else if (item.type === "provider-slash-command") {
@@ -353,10 +354,10 @@ export function useComposerCommandMenu({
       const skillItems = visibleSkills
         .filter((skill) => matchesSlashSkillQuery(skill, q))
         .map((skill) => ({
-          id: `skill:${skill.name}`,
+          id: `skill:${skill.path}`,
           type: "skill" as const,
           skill,
-          label: `skill:${skill.name}`,
+          label: `skill:${skill.path.startsWith("meerkat-skill://") ? (skill.displayName ?? skill.name) : skill.name}`,
           description: skill.shortDescription ?? skill.description ?? "",
         }));
 
@@ -371,7 +372,7 @@ export function useComposerCommandMenu({
 
       if (!normalizedQuery) {
         return enabledSkills.slice(0, 20).map((skill) => ({
-          id: `skill:${skill.name}`,
+          id: `skill:${skill.path}`,
           type: "skill" as const,
           skill,
           label: skill.displayName ?? skill.name,
@@ -438,7 +439,7 @@ export function useComposerCommandMenu({
       }
 
       return ranked.map(({ item: skill }) => ({
-        id: `skill:${skill.name}`,
+        id: `skill:${skill.path}`,
         type: "skill" as const,
         skill,
         label: skill.displayName ?? skill.name,

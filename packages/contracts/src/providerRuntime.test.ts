@@ -1,11 +1,66 @@
 import { describe, expect, it } from "vite-plus/test";
 import * as Schema from "effect/Schema";
+import * as DateTime from "effect/DateTime";
 
 import { classifyTaskAgentKind, ProviderRuntimeEvent } from "./providerRuntime.ts";
 
 const decodeRuntimeEvent = Schema.decodeUnknownSync(ProviderRuntimeEvent);
 
 describe("ProviderRuntimeEvent", () => {
+  for (const type of ["skills.resolved", "skills.resolution-failed"] as const) {
+    it(`preserves the native envelope and requires acknowledgement identity for ${type}`, () => {
+      const nativeEvent = {
+        event_id: "b3fdcd90-cb8c-40c2-aee5-c1aba30a9b64",
+        source: { type: "session", session_id: "native-session" },
+        seq: 7,
+        mob_id: "native-mob",
+        timestamp_ms: 1_790_582_400_000,
+        payload:
+          type === "skills.resolved"
+            ? {
+                type: "skills_resolved",
+                skills: [{ source_uuid: "source-a", skill_name: "review" }],
+                injection_bytes: 123,
+              }
+            : {
+                type: "skill_resolution_failed",
+                skill_key: null,
+                reason: {
+                  reason_type: "not_found",
+                  key: { source_uuid: "source-b", skill_name: "review" },
+                },
+              },
+      };
+      const eventId = `meerkat-output:run:native-session:evt-agent-${nativeEvent.event_id}`;
+      const event = {
+        type,
+        eventId,
+        provider: "meerkat",
+        createdAt: DateTime.formatIso(DateTime.makeUnsafe(nativeEvent.timestamp_ms)),
+        threadId: "thread-1",
+        turnId: "run",
+        payload: {
+          nativeEvent,
+          nativeSourceEventId: `evt-agent-${nativeEvent.event_id}`,
+          nativeSessionId: "native-session",
+          nativeDeliveryId: eventId,
+        },
+      };
+      expect(decodeRuntimeEvent(event)).toEqual(event);
+      for (const field of ["nativeSourceEventId", "nativeSessionId", "nativeDeliveryId"]) {
+        expect(() =>
+          decodeRuntimeEvent({ ...event, payload: { ...event.payload, [field]: undefined } }),
+        ).toThrow();
+        expect(() =>
+          decodeRuntimeEvent({ ...event, payload: { ...event.payload, [field]: " " } }),
+        ).toThrow();
+      }
+      expect(() =>
+        decodeRuntimeEvent({ ...event, payload: { ...event.payload, nativeEvent: null } }),
+      ).toThrow();
+    });
+  }
+
   it("requires input and output totals for complete turn usage", () => {
     const completeEvent = {
       type: "turn.completed",

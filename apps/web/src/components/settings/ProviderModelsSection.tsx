@@ -130,6 +130,7 @@ interface ProviderModelsSectionProps {
    * removed) via `onChange`.
    */
   readonly customModels: ReadonlyArray<CustomModelDefinition>;
+  readonly modelsManagedByRuntime?: boolean;
   /** Server-returned model slugs hidden from the model picker. */
   readonly hiddenModels: ReadonlyArray<string>;
   /** Model slugs favorited for this provider instance. */
@@ -163,6 +164,7 @@ export function ProviderModelsSection({
   driverKind,
   models,
   customModels,
+  modelsManagedByRuntime = false,
   hiddenModels,
   favoriteModels,
   modelOrder,
@@ -171,6 +173,7 @@ export function ProviderModelsSection({
   onFavoriteModelsChange,
   onModelOrderChange,
 }: ProviderModelsSectionProps) {
+  const allowCustomModelEdits = driverKind !== "antigravity" && !modelsManagedByRuntime;
   const [input, setInput] = useState("");
   const [isAdding, setIsAdding] = useState(false);
   const [filter, setFilter] = useState("");
@@ -223,7 +226,7 @@ export function ProviderModelsSection({
   }, [displayModels]);
 
   const handleAdd = () => {
-    if (driverKind === "antigravity") return;
+    if (!allowCustomModelEdits) return;
     const normalized = normalizeCustomModelSlug(input);
     if (!normalized) {
       setError("Enter a model slug.");
@@ -259,6 +262,7 @@ export function ProviderModelsSection({
   };
 
   const handleRemove = (slug: string) => {
+    if (!allowCustomModelEdits) return;
     if (editingSlug === slug) setEditingSlug(null);
     onChange(customModels.filter((entry) => entry.slug !== slug));
     onModelOrderChange(modelOrder.filter((model) => model !== slug));
@@ -267,6 +271,7 @@ export function ProviderModelsSection({
   };
 
   const handleSaveEdit = (next: CustomModelDefinition) => {
+    if (!allowCustomModelEdits) return;
     onChange(customModels.map((entry) => (entry.slug === next.slug ? next : entry)));
     setEditingSlug(null);
   };
@@ -375,7 +380,7 @@ export function ProviderModelsSection({
           </Tooltip>
         </>
       ) : null}
-      {model.isCustom ? (
+      {model.isCustom && allowCustomModelEdits ? (
         <>
           <Tooltip>
             <TooltipTrigger
@@ -534,7 +539,7 @@ export function ProviderModelsSection({
             {hiddenCount > 0 ? ` · ${hiddenCount} hidden` : ""}
           </span>
         </div>
-        {driverKind !== "antigravity" && !isAdding ? (
+        {allowCustomModelEdits && !isAdding ? (
           <Button
             type="button"
             size="xs"
@@ -561,7 +566,7 @@ export function ProviderModelsSection({
           const previous = visibleModels[index - 1];
           const startsGroup = previous === undefined || groupOf(previous) !== group;
           const editingEntry =
-            model.isCustom && editingSlug === model.slug
+            allowCustomModelEdits && model.isCustom && editingSlug === model.slug
               ? customModels.find((entry) => entry.slug === model.slug)
               : undefined;
           return (
@@ -592,7 +597,7 @@ export function ProviderModelsSection({
         })}
       </div>
 
-      {driverKind === "antigravity" ? null : isAdding ? (
+      {allowCustomModelEdits && isAdding ? (
         <div className="mt-3 flex flex-col gap-2 sm:flex-row">
           <Input
             id={`provider-instance-${instanceId}-custom-model`}
@@ -627,7 +632,7 @@ export function ProviderModelsSection({
         </div>
       ) : null}
 
-      {driverKind !== "antigravity" && error ? (
+      {allowCustomModelEdits && error ? (
         <p className="mt-2 text-xs text-destructive">{error}</p>
       ) : null}
     </div>

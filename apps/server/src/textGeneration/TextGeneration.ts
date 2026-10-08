@@ -9,6 +9,7 @@ import type { ProviderInstance } from "../provider/ProviderDriver.ts";
 import * as SourceControlProviderRegistry from "../sourceControl/SourceControlProviderRegistry.ts";
 import * as ThreadTitleLinks from "./ThreadTitleLinks.ts";
 import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
+import { requireRestoreReviewReleased } from "../restoreReview.ts";
 
 export interface CommitMessageGenerationInput {
   cwd: string;
@@ -120,16 +121,29 @@ const resolveInstance = (
   operation: TextGenerationOp,
   instanceId: ProviderInstanceId,
 ): Effect.Effect<ProviderInstance["textGeneration"], TextGenerationError> =>
-  registry.getInstance(instanceId).pipe(
-    Effect.flatMap((instance) =>
-      instance
-        ? Effect.succeed(instance.textGeneration)
-        : Effect.fail(
-            new TextGenerationError({
-              operation,
-              detail: `No provider instance registered for id '${instanceId}'.`,
-            }),
-          ),
+  requireRestoreReviewReleased.pipe(
+    Effect.mapError((cause) => new TextGenerationError({ operation, detail: cause.message })),
+    Effect.andThen(registry.getInstance(instanceId)),
+    Effect.flatMap(
+      Effect.fnUntraced(function* (instance) {
+        if (!instance)
+          return yield* new TextGenerationError({
+            operation,
+            detail: `No provider instance registered for id '${instanceId}'.`,
+          });
+        if (!instance.enabled)
+          return yield* new TextGenerationError({
+            operation,
+            detail: `Provider '${instanceId}' is disabled. Choose an enabled writing provider in Settings.`,
+          });
+        const snapshot = yield* instance.snapshot.getSnapshot;
+        if (snapshot.supportsTextGeneration === false)
+          return yield* new TextGenerationError({
+            operation,
+            detail: `Provider '${instanceId}' does not support background writing. Choose another writing provider in Settings.`,
+          });
+        return instance.textGeneration;
+      }),
     ),
   );
 

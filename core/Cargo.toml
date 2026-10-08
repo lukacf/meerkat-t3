@@ -1,0 +1,41 @@
+[workspace]
+members = [
+  "meerkat-desktop-contracts",
+  "meerkat-desktop-gateway",
+  "meerkat-desktop-stdio",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+tracing = "0.1"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+jsonschema = { version = "0.26.2", default-features = false }
+thiserror = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "io-util", "io-std", "sync", "time"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+# Keep the Meerkat family and MobKit as an exact, matched release set. MobKit
+# 0.8.46 declares Meerkat 0.8.51 exactly, so these pins prevent registry drift
+# from splitting shared runtime and tool-overlay types across versions.
+meerkat = { version = "=0.8.51", features = ["comms", "skills", "mcp", "memory-store", "jsonl-store", "session-store", "sqlite-store"] }
+meerkat-core = "=0.8.51"
+meerkat-contracts = "=0.8.51"
+meerkat-mobkit = "=0.8.46"
+meerkat-mob = "=0.8.51"
+meerkat-runtime = "=0.8.51"
+meerkat-providers = { version = "=0.8.51", features = ["native-keyring", "refresh-file-lock"] }
+meerkat-store = { version = "=0.8.51", features = ["sqlite"] }
+meerkat-models = "=0.8.51"
+meerkat-sqlite = "=0.8.51"
+meerkat-tools = "=0.8.51"

@@ -25,6 +25,7 @@ import { ProviderSessionReaper } from "../Services/ProviderSessionReaper.ts";
 import { ProviderService, type ProviderServiceShape } from "../Services/ProviderService.ts";
 import { ProviderSessionDirectoryLive } from "./ProviderSessionDirectory.ts";
 import { makeProviderSessionReaperLive } from "./ProviderSessionReaper.ts";
+import { ProfileRestoreReview, type RestoreReviewService } from "../../restoreReview.ts";
 
 const defaultModelSelection = {
   instanceId: ProviderInstanceId.make("codex"),
@@ -175,6 +176,7 @@ describe("ProviderSessionReaper", () => {
 
   async function createHarness(input: {
     readonly readModel: ReturnType<typeof makeReadModel>;
+    readonly restoreReview?: RestoreReviewService;
     readonly stopSessionImplementation?: (input: {
       readonly threadId: ThreadId;
     }) => ReturnType<ProviderServiceShape["stopSession"]>;
@@ -233,6 +235,7 @@ describe("ProviderSessionReaper", () => {
       Layer.provideMerge(Layer.succeed(ProviderService, providerService)),
       Layer.provideMerge(
         Layer.succeed(ProjectionSnapshotQuery, {
+          getReviewWorkspaceRoots: () => Effect.die("unused"),
           getUserInputActivity: () => Effect.die("unused"),
           listActivitiesByKind: () => Effect.die("unused"),
           getCommandReadModel: () => Effect.die("unused"),
@@ -265,6 +268,7 @@ describe("ProviderSessionReaper", () => {
         }),
       ),
       Layer.provideMerge(NodeServices.layer),
+      Layer.provide(Layer.succeed(ProfileRestoreReview, input.restoreReview)),
     );
 
     runtime = ManagedRuntime.make(layer);
@@ -316,6 +320,50 @@ describe("ProviderSessionReaper", () => {
 
     expect(harness.stopSession.mock.calls[0]?.[0]).toEqual({ threadId });
     expect(harness.stoppedThreadIds.has(threadId)).toBe(true);
+  });
+
+  it("retains stale saved sessions and continuation evidence while restore review is held", async () => {
+    const threadId = ThreadId.make("thread-reaper-restore-held");
+    const harness = await createHarness({
+      readModel: makeReadModel([]),
+      restoreReview: {
+        held: true,
+        status: () => ({
+          status: "restart-required",
+          restoreId: "restore",
+          restoredAt: null,
+          backupCreatedAt: null,
+          message: "Restart required",
+        }),
+        consent: async () => {
+          throw new Error("Unused consent");
+        },
+      },
+    });
+    const repository = await runtime!.runPromise(
+      Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
+    );
+    await runtime!.runPromise(
+      repository.upsert({
+        threadId,
+        providerName: "claudeAgent",
+        providerInstanceId: null,
+        adapterKey: "claudeAgent",
+        runtimeMode: "full-access",
+        status: "running",
+        lastSeenAt: "2026-01-01T00:00:00.000Z",
+        resumeCursor: { opaque: "restored-resume" },
+        runtimePayload: {
+          continueAfterServerUpdate: true,
+          continueAfterServerUpdatePrepared: true,
+        },
+      }),
+    );
+    const before = await runtime!.runPromise(repository.getByThreadId({ threadId }));
+    await startReaper();
+    await runtime!.runPromise(drainFibers);
+    expect(harness.stopSession).not.toHaveBeenCalled();
+    expect(await runtime!.runPromise(repository.getByThreadId({ threadId }))).toEqual(before);
   });
 
   it("skips stale sessions when the thread still has an active turn", async () => {

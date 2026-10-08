@@ -18,6 +18,7 @@ import { useProjects, useThreadShells } from "~/state/entities";
 import { useEnvironments, usePrimaryEnvironmentId } from "~/state/environments";
 import { ProjectEnvironmentBadge } from "../ProjectEnvironmentBadge";
 import { ProjectFavicon } from "../ProjectFavicon";
+import { sidebarCheckoutLabel } from "../sidebar/sidebarProjectCheckouts";
 import { sortLogicalProjectsForSidebar } from "../Sidebar.logic";
 import {
   Menu,
@@ -106,16 +107,29 @@ export function DraftHeroHeadline({
       ),
     [environments],
   );
+  const meerkatEnvironmentIds = useMemo(
+    () =>
+      new Set(
+        environments
+          .filter((environment) =>
+            environment.serverConfig?.providers.some((provider) => provider.driver === "meerkat"),
+          )
+          .map((environment) => environment.environmentId),
+      ),
+    [environments],
+  );
   const projectPickerEntries = useMemo(
     () =>
       buildSidebarProjectPickerEntries({
         groups: projectGroups,
         preferredProjectRef: activeProjectRef,
+        expandCheckouts: (group) =>
+          group.memberProjects.some((project) => meerkatEnvironmentIds.has(project.environmentId)),
       }),
-    [activeProjectRef, projectGroups],
+    [activeProjectRef, meerkatEnvironmentIds, projectGroups],
   );
   const projectEntryByKey = useMemo(
-    () => new Map(projectPickerEntries.map((entry) => [entry.group.projectKey, entry] as const)),
+    () => new Map(projectPickerEntries.map((entry) => [entry.key, entry] as const)),
     [projectPickerEntries],
   );
   const activeProjectGroup =
@@ -126,7 +140,8 @@ export function DraftHeroHeadline({
             (projectRef) => scopedProjectKey(projectRef) === scopedProjectKey(activeProjectRef),
           ),
         ) ?? null);
-  const activeProjectKey = activeProjectGroup?.projectKey ?? "";
+  const activeProjectEntry = projectPickerEntries.find((entry) => entry.isPreferred);
+  const activeProjectKey = activeProjectEntry?.key ?? "";
   const activeProjectDisplayName = activeProjectGroup?.displayName ?? activeProjectTitle;
   const hasResolvedProject = activeProjectTitle !== null;
   const canChooseProject = projectPickerEntries.length > 0;
@@ -150,7 +165,11 @@ export function DraftHeroHeadline({
           <span className="min-w-0 truncate">{activeProjectDisplayName ?? "Choose a project"}</span>
         </TooltipTrigger>
         {activeProjectDisplayName ? (
-          <TooltipPopup side="top">{activeProjectDisplayName}</TooltipPopup>
+          <TooltipPopup side="top">
+            {activeProjectEntry?.isExplicitCheckout
+              ? `${activeProjectDisplayName} - ${sidebarCheckoutLabel(activeProjectEntry.targetProject)}`
+              : activeProjectDisplayName}
+          </TooltipPopup>
         ) : null}
       </Tooltip>
       <MenuPopup align="center" className="max-h-80 overflow-y-auto">
@@ -173,6 +192,9 @@ export function DraftHeroHeadline({
               entry.group.projectKey,
               scopeProjectRef(project.environmentId, project.id),
               draftId,
+              entry.isExplicitCheckout
+                ? { environmentSelection: "manual", loadBalancedEnvironmentId: null }
+                : undefined,
             );
             if (!hasExplicitComposerModelSelection(currentDraft)) {
               applyStickyState(draftId);
@@ -191,9 +213,31 @@ export function DraftHeroHeadline({
             }
           }}
         >
-          {projectPickerEntries.map(({ group }) => {
+          {projectPickerEntries.map(({ key, group, targetProject, isExplicitCheckout }) => {
+            if (isExplicitCheckout) {
+              const checkoutLabel = sidebarCheckoutLabel(targetProject);
+              const accessibleLabel = `${group.displayName} - ${checkoutLabel}`;
+              return (
+                <Tooltip key={key}>
+                  <TooltipTrigger
+                    render={<MenuRadioItem value={key} closeOnClick aria-label={accessibleLabel} />}
+                  >
+                    <span className="flex w-80 max-w-full min-w-0 items-start gap-2">
+                      <ProjectFavicon project={targetProject} className="size-4 shrink-0" />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate">{group.displayName}</span>
+                        <span className="block whitespace-normal break-all text-muted-foreground text-xs">
+                          {checkoutLabel}
+                        </span>
+                      </span>
+                    </span>
+                  </TooltipTrigger>
+                  <TooltipPopup side="top">{accessibleLabel}</TooltipPopup>
+                </Tooltip>
+              );
+            }
             return (
-              <MenuRadioItem key={group.projectKey} value={group.projectKey} closeOnClick>
+              <MenuRadioItem key={key} value={key} closeOnClick>
                 <span className="flex min-w-0 items-center gap-2">
                   <ProjectFavicon project={group} className="size-4 shrink-0" />
                   <Tooltip>

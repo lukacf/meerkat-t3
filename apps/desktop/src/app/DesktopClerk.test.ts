@@ -1,7 +1,9 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import { beforeEach, vi } from "vite-plus/test";
 
 const { createClerkBridgeMock, storageAdapter, storageMock } = vi.hoisted(() => ({
@@ -28,12 +30,15 @@ import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+import * as DesktopPreReadyPlatform from "./DesktopPreReadyPlatform.ts";
+import * as DesktopConfig from "./DesktopConfig.ts";
 
 const makeDesktopClerkLayer = (isDevelopment = true, events: string[] = []) => {
   const environment = DesktopEnvironment.DesktopEnvironment.of({
     stateDir: "/tmp/t3-state",
     isDevelopment,
     appDataDirectory: "/tmp/app-data",
+    userDataDirectoryOverride: Option.none(),
     userDataDirName: isDevelopment ? "t3code-dev" : "t3code",
     legacyUserDataDirName: isDevelopment ? "T3 Code (Dev)" : "T3 Code (Alpha)",
     path: { join: (...parts: ReadonlyArray<string>) => parts.join("/") },
@@ -50,8 +55,13 @@ const makeDesktopClerkLayer = (isDevelopment = true, events: string[] = []) => {
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(DesktopEnvironment.DesktopEnvironment, environment),
+        Layer.succeed(DesktopPreReadyPlatform.DesktopPreReadyElectronOptions, {
+          linux: null,
+          linuxPasswordStoreCommandLine: null,
+          userDataPath: `/tmp/app-data/${environment.userDataDirName}`,
+        }),
         Layer.succeed(ElectronApp.ElectronApp, electronApp),
-        FileSystem.layerNoop({ exists: () => Effect.succeed(false) }),
+        FileSystem.layerNoop({ exists: () => Effect.promise(async () => false) }),
       ),
     ),
   );
@@ -61,6 +71,77 @@ describe("DesktopClerk", () => {
   beforeEach(() => {
     createClerkBridgeMock.mockReset();
     storageMock.mockReset();
+  });
+
+  it.effect("creates the bridge before an event-loop turn using the prepared profile", () => {
+    const events: string[] = [];
+    let ready = false;
+    storageMock.mockReturnValue(storageAdapter);
+    createClerkBridgeMock.mockImplementation(() => {
+      assert.isFalse(ready);
+      events.push("createClerkBridge");
+      return { cleanup: vi.fn(), isPrimaryInstance: true };
+    });
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const nextTurn = Promise.resolve().then(() => {
+          ready = true;
+        });
+        yield* Layer.build(makeDesktopClerkLayer(false, events));
+        assert.deepEqual(events, ["setPath:userData:/tmp/app-data/t3code", "createClerkBridge"]);
+        yield* Effect.promise(() => nextTurn);
+      }),
+    );
+  });
+
+  it.effect("keeps environment and Node service acquisition synchronous before Clerk", () => {
+    let ready = false;
+    storageMock.mockReturnValue(storageAdapter);
+    createClerkBridgeMock.mockImplementation(() => {
+      assert.isFalse(ready);
+      return { cleanup: vi.fn(), isPrimaryInstance: true };
+    });
+    const environment = DesktopEnvironment.layer({
+      dirname: "/repo/apps/desktop/dist-electron",
+      homeDirectory: "/Users/test",
+      platform: "darwin",
+      processArch: "arm64",
+      appVersion: "0.0.42",
+      appPath: "/repo/apps/desktop",
+      isPackaged: false,
+      resourcesPath: "/repo/resources",
+      runningUnderArm64Translation: false,
+    });
+    const clerkLayer = DesktopClerk.layer.pipe(
+      Layer.provideMerge(environment),
+      Layer.provideMerge(NodeServices.layer),
+      Layer.provide(
+        Layer.mergeAll(
+          DesktopConfig.layerTest({
+            T3CODE_HOME: "/tmp/isolated-clerk-home",
+            T3CODE_DESKTOP_USER_DATA_DIR: "/tmp/isolated-clerk-profile",
+          }),
+          Layer.succeed(DesktopPreReadyPlatform.DesktopPreReadyElectronOptions, {
+            linux: null,
+            linuxPasswordStoreCommandLine: null,
+            userDataPath: "/tmp/isolated-clerk-profile",
+          }),
+          Layer.succeed(ElectronApp.ElectronApp, {
+            setPath: () => Effect.void,
+          } as unknown as ElectronApp.ElectronApp["Service"]),
+        ),
+      ),
+    );
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const nextTurn = Promise.resolve().then(() => {
+          ready = true;
+        });
+        yield* Layer.build(clerkLayer);
+        assert.equal(createClerkBridgeMock.mock.calls.length, 1);
+        yield* Effect.promise(() => nextTurn);
+      }),
+    );
   });
 
   it.effect("acquires and releases the SDK bridge with the layer", () => {
@@ -80,7 +161,7 @@ describe("DesktopClerk", () => {
           {
             storage: storageAdapter,
             passkeys: true,
-            renderer: { scheme: "t3code-dev", host: "app" },
+            renderer: { scheme: "meerkat-t3-dev", host: "app" },
           },
         ],
       ]);

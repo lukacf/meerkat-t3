@@ -9,7 +9,50 @@ import {
   resolveProviderSkillsForCwd,
   resolveProviderSlashCommandsForCwd,
   resolveProviderSkillSourceKind,
+  resolveProviderSkillReference,
+  providerSkillReferenceMeta,
 } from "./providerSkills.ts";
+
+describe("source-pinned skill presentation", () => {
+  const first = {
+    name: "review",
+    displayName: "Review (first)",
+    path: "meerkat-skill://b3fdcd90-cb8c-40c2-aee5-c1aba30a9b64/review",
+    description: "First instructions",
+  };
+  const second = {
+    name: "review",
+    displayName: "Review (second)",
+    path: "meerkat-skill://4fa3e1a2-5b6c-47d8-9012-3456789abcde/review",
+    description: "Second instructions",
+  };
+
+  it("does not assign bare legacy text to either native source", () => {
+    for (const skills of [
+      [first, second],
+      [second, first],
+    ]) {
+      expect(resolveProviderSkillReference(skills, "review")).toBeUndefined();
+      expect(providerSkillReferenceMeta(skills, "review")).toEqual({
+        label: "Review (unselected)",
+        description:
+          "This text does not select a native skill. Choose a source from the conversation skill menu.",
+      });
+    }
+  });
+
+  it("resolves the exact native key and keeps donor name lookup", () => {
+    expect(resolveProviderSkillReference([first, second], "review", second.path)).toBe(second);
+    expect(providerSkillReferenceMeta([first, second], "review", second.path)).toEqual({
+      label: second.displayName,
+      description: second.description,
+    });
+    const legacyHref = second.path.replace("4fa3e1a2", "4FA3E1A2").replace("/review", "/%72eview");
+    expect(resolveProviderSkillReference([first, second], "review", legacyHref)).toBe(second);
+    const donor = { name: "review", path: "/skills/review/SKILL.md", displayName: "Donor review" };
+    expect(resolveProviderSkillReference([first, donor, second], "review")).toBe(donor);
+  });
+});
 
 const provider = {
   instanceId: ProviderInstanceId.make("codex"),
@@ -53,6 +96,19 @@ describe("formatProviderSkillDisplayName", () => {
 });
 
 describe("dedupeProviderSkillsByName", () => {
+  it("preserves same-name native skills from different sources", () => {
+    const first = {
+      name: "review",
+      path: "meerkat-skill://b3fdcd90-cb8c-40c2-aee5-c1aba30a9b64/review",
+      enabled: true,
+    };
+    const second = {
+      ...first,
+      path: "meerkat-skill://4fa3e1a2-5b6c-47d8-9012-3456789abcde/review",
+    };
+    expect(dedupeProviderSkillsByName([first, second, { ...first }])).toEqual([first, second]);
+    expect(getProviderSkillsForSlashMenu([first, second], true)).toEqual([first, second]);
+  });
   it("keeps the first resolved skill and preserves unrelated skill order", () => {
     const firstSkill = {
       name: "branch-audit",

@@ -46,6 +46,8 @@ const NO_FILE_SCRIPTS: ReadonlyArray<T3ProjectFileScript> = [];
 interface ProjectScriptsControlProps {
   presentation?: "toolbar" | "menu";
   onRequestMenuClose?: () => void;
+  /** A menu that unmounts on close must keep its editor in the surrounding workspace. */
+  onEditorRequest?: (request: ProjectScriptEditorRequest) => void;
   scripts: ReadonlyArray<ProjectScript>;
   /** Scripts declared in the project's checked-in t3.json, offered for import. */
   fileScripts?: ReadonlyArray<T3ProjectFileScript>;
@@ -63,6 +65,7 @@ interface ProjectScriptsControlProps {
 export default function ProjectScriptsControl({
   presentation = "toolbar",
   onRequestMenuClose,
+  onEditorRequest,
   scripts,
   fileScripts = NO_FILE_SCRIPTS,
   keybindings,
@@ -81,6 +84,7 @@ export default function ProjectScriptsControl({
     setActionsMenuOpen({ presentation, scripts: false, imports: false });
   }
   const [editorRequest, setEditorRequest] = useState<ProjectScriptEditorRequest | null>(null);
+  const requestEditor = onEditorRequest ?? setEditorRequest;
 
   const primaryScript = useMemo(() => {
     if (preferredScriptId) {
@@ -103,13 +107,15 @@ export default function ProjectScriptsControl({
   );
 
   const openAddDialog = () => {
-    setEditorRequest({ scriptId: null, initial: EMPTY_PROJECT_SCRIPT_INPUT });
+    onRequestMenuClose?.();
+    setActionsMenuOpen({ presentation, scripts: false, imports: false });
+    requestEditor({ scriptId: null, initial: EMPTY_PROJECT_SCRIPT_INPUT });
   };
 
   const openEditDialog = (script: ProjectScript) => {
     onRequestMenuClose?.();
     setActionsMenuOpen({ presentation, scripts: false, imports: false });
-    setEditorRequest(editorRequestForScript(script, keybindings));
+    requestEditor(editorRequestForScript(script, keybindings));
   };
 
   const submitScript = useCallback(
@@ -134,7 +140,7 @@ export default function ProjectScriptsControl({
       // Surface the failure through the regular add dialog, prefilled so the
       // user can adjust and retry.
       const error = squashAtomCommandFailure(result);
-      setEditorRequest({
+      requestEditor({
         scriptId: null,
         initial: payload,
         error: error instanceof Error ? error.message : "Failed to import action.",
@@ -351,13 +357,15 @@ export default function ProjectScriptsControl({
         </Tooltip>
       )}
 
-      <ProjectScriptEditorDialog
-        request={editorRequest}
-        scripts={scripts}
-        onSubmit={submitScript}
-        onDelete={(scriptId) => void onDeleteScript(scriptId)}
-        onClose={() => setEditorRequest(null)}
-      />
+      {onEditorRequest ? null : (
+        <ProjectScriptEditorDialog
+          request={editorRequest}
+          scripts={scripts}
+          onSubmit={submitScript}
+          onDelete={(scriptId) => void onDeleteScript(scriptId)}
+          onClose={() => setEditorRequest(null)}
+        />
+      )}
     </>
   );
 }

@@ -52,6 +52,7 @@ const SERVER_CONFIG_STORE_NAME = "server-config";
 const VCS_REFS_STORE_NAME = "vcs-refs";
 const CATALOG_KEY = "document";
 const SHELL_SNAPSHOT_CACHE_SCHEMA_VERSION = 1;
+const THREAD_SNAPSHOT_CACHE_SCHEMA_VERSION = 5;
 
 const StoredShellSnapshot = Schema.Struct({
   schemaVersion: Schema.Literal(SHELL_SNAPSHOT_CACHE_SCHEMA_VERSION),
@@ -67,8 +68,10 @@ const StoredShellSnapshotJson = Schema.fromJsonString(StoredShellSnapshot);
 // thread as complete forever. Older entries fail to decode → cold cache.
 // v4 reloads pre-thinking caches: their fallback system roles cannot recover
 // settled reasoning messages by resuming afterSequence.
+// v5 reloads caches that omitted prepared-request events, including entries
+// whose null recovery state was persisted after a later activity cursor.
 const StoredThreadSnapshot = Schema.Struct({
-  schemaVersion: Schema.Literal(4),
+  schemaVersion: Schema.Literal(THREAD_SNAPSHOT_CACHE_SCHEMA_VERSION),
   environmentId: EnvironmentId,
   threadId: ThreadId,
   snapshot: OrchestrationThreadDetailSnapshot,
@@ -132,6 +135,29 @@ function persistenceError(
     message: `Could not ${operation.replaceAll("-", " ")}: ${String(cause)}`,
   });
 }
+
+export const decodeThreadSnapshotCache = Effect.fn(
+  "web.connectionStorage.decodeThreadSnapshotCache",
+)(function* (environmentId: EnvironmentId, threadId: ThreadId, raw: unknown) {
+  if (typeof raw !== "string") return Option.none<OrchestrationThreadDetailSnapshot>();
+  const stored = yield* decodeStoredThreadSnapshot(raw).pipe(
+    Effect.mapError((cause) => persistenceError("load-thread", cause)),
+  );
+  return stored.environmentId === environmentId && stored.threadId === threadId
+    ? Option.some(stored.snapshot)
+    : Option.none();
+});
+
+export const encodeThreadSnapshotCache = Effect.fn(
+  "web.connectionStorage.encodeThreadSnapshotCache",
+)((environmentId: EnvironmentId, snapshot: OrchestrationThreadDetailSnapshot) =>
+  encodeStoredThreadSnapshot({
+    schemaVersion: THREAD_SNAPSHOT_CACHE_SCHEMA_VERSION,
+    environmentId,
+    threadId: snapshot.thread.id,
+    snapshot,
+  }).pipe(Effect.mapError((cause) => persistenceError("save-thread", cause))),
+);
 
 const openDatabase = Effect.fn("web.connectionStorage.openDatabase")(function* () {
   return yield* Effect.callback<IDBDatabase, ConnectionTransientError>((resume) => {
@@ -659,19 +685,7 @@ export const connectionStorageLayer = Layer.effectContext(
           THREAD_STORE_NAME,
           threadCacheKey(environmentId, threadId),
         ).pipe(
-          Effect.flatMap((raw) => {
-            if (typeof raw !== "string") {
-              return Effect.succeedNone;
-            }
-            return decodeStoredThreadSnapshot(raw).pipe(
-              Effect.mapError((cause) => persistenceError("load-thread", cause)),
-              Effect.map((stored) =>
-                stored.environmentId === environmentId && stored.threadId === threadId
-                  ? Option.some(stored.snapshot)
-                  : Option.none(),
-              ),
-            );
-          }),
+          Effect.flatMap((raw) => decodeThreadSnapshotCache(environmentId, threadId, raw)),
           Effect.mapError((cause) =>
             cause._tag === "ConnectionPersistenceError"
               ? cause
@@ -680,12 +694,7 @@ export const connectionStorageLayer = Layer.effectContext(
         ),
       saveThread: (environmentId, snapshot) =>
         Effect.gen(function* () {
-          const encoded = yield* encodeStoredThreadSnapshot({
-            schemaVersion: 4,
-            environmentId,
-            threadId: snapshot.thread.id,
-            snapshot,
-          }).pipe(Effect.mapError((cause) => persistenceError("save-thread", cause)));
+          const encoded = yield* encodeThreadSnapshotCache(environmentId, snapshot);
           yield* writeDatabaseValue(
             database,
             THREAD_STORE_NAME,

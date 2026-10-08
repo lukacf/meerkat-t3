@@ -115,6 +115,16 @@ describe("GitResolvePullRequestResult", () => {
 });
 
 describe("GitRunStackedActionInput", () => {
+  it("retains optional expected branches, including explicit detached HEAD", () => {
+    const input = { actionId: "branch-check", cwd: "/repo", action: "push" };
+    expect(decodeRunStackedActionInput(input).expectedBranch).toBeUndefined();
+    for (const expectedBranch of ["main", null]) {
+      expect(decodeRunStackedActionInput({ ...input, expectedBranch }).expectedBranch).toBe(
+        expectedBranch,
+      );
+    }
+    expect(() => decodeRunStackedActionInput({ ...input, expectedBranch: "  " })).toThrow();
+  });
   it("accepts explicit stacked actions and requires a client-provided actionId", () => {
     const parsed = decodeRunStackedActionInput({
       actionId: "action-1",
@@ -124,6 +134,44 @@ describe("GitRunStackedActionInput", () => {
 
     expect(parsed.actionId).toBe("action-1");
     expect(parsed.action).toBe("create_pr");
+  });
+
+  it.each([true, false])("accepts generated PR content with draft=%s", (draft) => {
+    const parsed = decodeRunStackedActionInput({
+      actionId: "generated-pr",
+      cwd: "/repo",
+      action: "commit_push_pr",
+      pullRequest: { draft },
+    });
+    expect(parsed.pullRequest).toEqual({ draft });
+  });
+
+  it("preserves manually authored PR content and draft intent", () => {
+    const pullRequest = { title: "Fix recipient routing", body: "", draft: true };
+    const parsed = decodeRunStackedActionInput({
+      actionId: "manual-pr",
+      cwd: "/repo",
+      action: "create_pr",
+      pullRequest,
+    });
+    expect(parsed.pullRequest).toEqual(pullRequest);
+  });
+
+  it.each([
+    { title: "Title without body", draft: true },
+    { body: "Body without title", draft: true },
+    { title: "   ", body: "", draft: true },
+    { title: "x".repeat(257), body: "" },
+    { title: "Valid", body: "x".repeat(65_537) },
+  ])("rejects incomplete or invalid manual content: %j", (pullRequest) => {
+    expect(() =>
+      decodeRunStackedActionInput({
+        actionId: "invalid-pr",
+        cwd: "/repo",
+        action: "create_pr",
+        pullRequest,
+      }),
+    ).toThrow();
   });
 });
 

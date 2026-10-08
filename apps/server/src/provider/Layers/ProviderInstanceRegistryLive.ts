@@ -27,7 +27,7 @@
  *
  * Every live instance runs inside its own child `Scope`. The registry's
  * own scope owns all child scopes via finalizers, so closing the registry
- * tears every instance down in reverse order; closing a single instance
+ * tears independent instances down concurrently; closing a single instance
  * (via `reconcile` removing it) leaves the rest untouched.
  *
  * @module provider/Layers/ProviderInstanceRegistryLive
@@ -41,6 +41,7 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Equal from "effect/Equal";
 import * as Exit from "effect/Exit";
@@ -49,6 +50,7 @@ import * as PubSub from "effect/PubSub";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 
 import { buildUnavailableProviderSnapshot } from "../unavailableProviderSnapshot.ts";
@@ -73,6 +75,15 @@ interface LiveEntry {
   readonly entry: ProviderInstanceConfig;
 }
 
+interface FailedDisposal {
+  readonly cause: Cause.Cause<never>;
+  readonly snapshot: ServerProvider;
+}
+
+type BuiltEntry =
+  | { readonly kind: "live"; readonly live: LiveEntry }
+  | { readonly kind: "unavailable"; readonly snapshot: ServerProvider };
+
 /**
  * Internal state shared between the public registry service and the
  * mutator service. Both services are thin shells around these refs.
@@ -80,6 +91,9 @@ interface LiveEntry {
 interface RegistryState {
   readonly entries: Ref.Ref<ReadonlyMap<ProviderInstanceId, LiveEntry>>;
   readonly unavailable: Ref.Ref<ReadonlyMap<ProviderInstanceId, ServerProvider>>;
+  // Scope.close is idempotent even after failure. Keep that failure independently
+  // of settings so removing and readding an id cannot imply successful cleanup.
+  readonly failedDisposals: Map<ProviderInstanceId, FailedDisposal>;
   readonly changes: PubSub.PubSub<void>;
 }
 
@@ -110,9 +124,8 @@ const resolveEntryEnabled = (entry: ProviderInstanceConfig, typedConfig: unknown
 };
 
 /**
- * Build one live entry from a raw config envelope. Returns either a
- * `LiveEntry` plus undefined unavailable shadow, or a shadow snapshot and
- * undefined entry — callers dispatch to the appropriate Ref bucket.
+ * Build one entry and hand its ownership to the registry before honoring
+ * interruption. Partial acquisitions are closed and their disposal recorded.
  */
 const buildEntry = <R>(input: {
   readonly driversById: ReadonlyMap<ProviderDriverKind, AnyProviderDriver<R>>;
@@ -120,17 +133,14 @@ const buildEntry = <R>(input: {
   readonly instanceId: ProviderInstanceId;
   readonly rawInstanceId: string;
   readonly entry: ProviderInstanceConfig;
-}): Effect.Effect<
-  | { readonly kind: "live"; readonly live: LiveEntry }
-  | { readonly kind: "unavailable"; readonly snapshot: ServerProvider },
-  never,
-  R
-> =>
+  readonly state: RegistryState;
+  readonly onBuilt: (result: BuiltEntry) => Effect.Effect<void>;
+}): Effect.Effect<void, never, R> =>
   Effect.gen(function* () {
-    const { driversById, parentScope, instanceId, rawInstanceId, entry } = input;
+    const { driversById, parentScope, instanceId, rawInstanceId, entry, state, onBuilt } = input;
     const driver = driversById.get(entry.driver);
     if (!driver) {
-      return {
+      return yield* onBuilt({
         kind: "unavailable" as const,
         snapshot: yield* buildUnavailableProviderSnapshot({
           driverKind: entry.driver,
@@ -139,7 +149,7 @@ const buildEntry = <R>(input: {
           accentColor: entry.accentColor,
           reason: `Driver '${entry.driver}' is not registered in this build.`,
         }),
-      };
+      });
     }
 
     const decoder = Schema.decodeUnknownEffect(driver.configSchema);
@@ -152,7 +162,7 @@ const buildEntry = <R>(input: {
         driver: entry.driver,
         detail,
       });
-      return {
+      return yield* onBuilt({
         kind: "unavailable" as const,
         snapshot: yield* buildUnavailableProviderSnapshot({
           driverKind: entry.driver,
@@ -161,55 +171,87 @@ const buildEntry = <R>(input: {
           accentColor: entry.accentColor,
           reason: `Invalid config for instance '${rawInstanceId}': ${detail}`,
         }),
-      };
+      });
     }
 
     const typedConfig = decodeResult.success;
-    const childScope = yield* Scope.make();
-    // Attach the child scope to the registry's parent scope: if the
-    // registry scope closes, each surviving instance's child scope is
-    // closed through this finalizer. `reconcile` manually closes the
-    // child scope on remove/replace; subsequent close via the parent's
-    // finalizer is a no-op because `Scope.close` is idempotent.
-    yield* Scope.addFinalizer(parentScope, Scope.close(childScope, Exit.void).pipe(Effect.ignore));
+    yield* Effect.uninterruptibleMask((restore) =>
+      Effect.gen(function* () {
+        const childScope = yield* Scope.fork(parentScope);
+        // Only acquisition is interruptible; cleanup and the ownership handoff
+        // are not. Keep the full cause so mixed failures retain cancellation.
+        const created = yield* restore(
+          Effect.suspend(() =>
+            driver.create({
+              instanceId,
+              displayName: entry.displayName,
+              accentColor: entry.accentColor,
+              environment: entry.environment ?? [],
+              enabled: resolveEntryEnabled(entry, typedConfig),
+              config: typedConfig,
+            }),
+          ).pipe(Effect.provideService(Scope.Scope, childScope)),
+        ).pipe(Effect.exit);
+        if (Exit.isSuccess(created)) {
+          yield* onBuilt({
+            kind: "live",
+            live: { instance: created.value, scope: childScope, entry },
+          });
+          return;
+        }
 
-    const createResult = yield* driver
-      .create({
-        instanceId,
-        displayName: entry.displayName,
-        accentColor: entry.accentColor,
-        environment: entry.environment ?? [],
-        enabled: resolveEntryEnabled(entry, typedConfig),
-        config: typedConfig,
-      })
-      .pipe(Effect.provideService(Scope.Scope, childScope), Effect.result);
-    if (createResult._tag === "Failure") {
-      yield* Effect.logError("Failed to create provider instance", {
-        instanceId: rawInstanceId,
-        driver: entry.driver,
-        detail: createResult.failure.detail,
-      });
-      yield* Scope.close(childScope, Exit.void).pipe(Effect.ignore);
-      return {
-        kind: "unavailable" as const,
-        snapshot: yield* buildUnavailableProviderSnapshot({
+        const closed = yield* Scope.close(childScope, Exit.void).pipe(Effect.exit);
+        const failure = created.cause.reasons.find(Cause.isFailReason);
+        const detail =
+          failure !== undefined
+            ? failure.error.detail
+            : Cause.hasInterruptsOnly(created.cause)
+              ? "Creation was interrupted."
+              : "Creation failed unexpectedly; see server logs for details.";
+        const reason = Exit.isFailure(closed)
+          ? "Provider shutdown failed after incomplete creation. Automatic replacement is blocked for this server session; see server logs for cleanup details."
+          : `Driver '${entry.driver}' failed to create instance: ${detail}`;
+        let snapshot = yield* buildUnavailableProviderSnapshot({
           driverKind: entry.driver,
           instanceId,
           displayName: entry.displayName,
           accentColor: entry.accentColor,
-          reason: `Driver '${entry.driver}' failed to create instance: ${createResult.failure.detail}`,
-        }),
-      };
-    }
-
-    return {
-      kind: "live" as const,
-      live: {
-        instance: createResult.success,
-        scope: childScope,
-        entry,
-      },
-    };
+          reason,
+        });
+        if (Exit.isFailure(closed)) {
+          const previous = (yield* Ref.get(state.unavailable)).get(instanceId);
+          snapshot = {
+            ...snapshot,
+            status: "error",
+            ...(previous?.driver === entry.driver
+              ? { installed: previous.installed, version: previous.version }
+              : {}),
+            setup: { canAuthenticate: false, canInstall: false },
+            supportsTextGeneration: false,
+          };
+          state.failedDisposals.set(instanceId, { cause: closed.cause, snapshot });
+          yield* Effect.logError(
+            "Provider instance shutdown failed",
+            { instanceId, driver: entry.driver },
+            closed.cause,
+          );
+        }
+        yield* onBuilt({ kind: "unavailable", snapshot });
+        if (failure !== undefined) {
+          yield* Effect.logError("Failed to create provider instance", {
+            instanceId: rawInstanceId,
+            driver: entry.driver,
+            detail,
+          });
+        }
+        const fatalReasons = created.cause.reasons.filter(
+          (reason): reason is Cause.Die | Cause.Interrupt => !Cause.isFailReason(reason),
+        );
+        if (fatalReasons.length > 0) {
+          return yield* Effect.failCause(Cause.fromReasons<never>(fatalReasons));
+        }
+      }),
+    );
   });
 
 /**
@@ -222,101 +264,162 @@ const makeReconcile = <R>(input: {
   readonly parentScope: Scope.Scope;
 }): ((configMap: ProviderInstanceConfigMap) => Effect.Effect<void, never, R>) => {
   const { state, driversById, parentScope } = input;
-  return (configMap: ProviderInstanceConfigMap) =>
-    Effect.gen(function* () {
-      const previousEntries = yield* Ref.get(state.entries);
-      const previousUnavailable = yield* Ref.get(state.unavailable);
-      const nextRaw = Object.entries(configMap);
-      const nextKeys = new Set<ProviderInstanceId>(
-        nextRaw.map(([raw]) => ProviderInstanceId.make(raw)),
-      );
+  return Effect.fnUntraced(function* (configMap: ProviderInstanceConfigMap) {
+    const previousEntries = yield* Ref.get(state.entries);
+    const previousUnavailable = yield* Ref.get(state.unavailable);
+    const nextRaw = Object.entries(configMap);
+    const nextKeys = new Set<ProviderInstanceId>(
+      nextRaw.map(([raw]) => ProviderInstanceId.make(raw)),
+    );
 
-      // 1. Close scopes for instances that disappeared or whose config
-      //    changed. Do this BEFORE creating replacements so ids map 1-to-1
-      //    to live scopes at all times.
-      const removedIds: Array<ProviderInstanceId> = [];
-      const replacedIds = new Set<ProviderInstanceId>();
-      for (const [instanceId, live] of previousEntries) {
-        if (!nextKeys.has(instanceId)) {
-          removedIds.push(instanceId);
-          continue;
-        }
-        const nextEntry = configMap[instanceId];
-        if (nextEntry !== undefined && !entryEqual(live.entry, nextEntry)) {
-          replacedIds.add(instanceId);
-        }
-      }
-      for (const id of [...removedIds, ...replacedIds]) {
-        const live = previousEntries.get(id);
-        if (live) {
-          yield* Scope.close(live.scope, Exit.void).pipe(Effect.ignore);
-        }
-      }
+    const closing = [...previousEntries].filter(([instanceId, live]) => {
+      const nextEntry = configMap[instanceId];
+      return nextEntry === undefined || !entryEqual(live.entry, nextEntry);
+    });
 
-      // 2. Build additions and replacements. Walk `nextRaw` so the final
-      //    entry order follows settings-author order.
-      const builtEntries = new Map<ProviderInstanceId, LiveEntry>();
-      const builtUnavailable = new Map<ProviderInstanceId, ServerProvider>();
-      let orderChanged = false;
-      const previousOrder = [...previousEntries.keys()];
-      const nextOrder: Array<ProviderInstanceId> = [];
+    if (closing.length > 0) {
+      // Detach before finalizers run so new calls cannot route to a closing
+      // instance. Record and publish every outcome before honoring cancellation:
+      // a second Scope.close cannot recover a failed first close's result.
+      yield* Effect.gen(function* () {
+        const remainingEntries = new Map(previousEntries);
+        const closingSnapshots = new Map<ProviderInstanceId, ServerProvider>();
+        const unavailable = new Map([...previousUnavailable].filter(([id]) => nextKeys.has(id)));
+        for (const [instanceId, live] of closing) {
+          remainingEntries.delete(instanceId);
+          const previousSnapshot = yield* live.instance.snapshot.getSnapshot;
+          const snapshot: ServerProvider = {
+            ...(yield* buildUnavailableProviderSnapshot({
+              driverKind: live.instance.driverKind,
+              instanceId,
+              displayName: live.instance.displayName,
+              accentColor: live.instance.accentColor,
+              reason: "Provider is unavailable while settings are being applied.",
+            })),
+            installed: previousSnapshot.installed,
+            version: previousSnapshot.version,
+            status: "warning",
+            setup: { canAuthenticate: false, canInstall: false },
+            supportsTextGeneration: false,
+          };
+          closingSnapshots.set(instanceId, snapshot);
+          if (nextKeys.has(instanceId)) unavailable.set(instanceId, snapshot);
+        }
+        yield* Ref.set(state.entries, remainingEntries);
+        yield* Ref.set(state.unavailable, new Map(unavailable));
+        yield* PubSub.publish(state.changes, undefined);
 
+        let unavailableChanged = false;
+        for (const [instanceId, live] of closing) {
+          const closed = yield* Scope.close(live.scope, Exit.void).pipe(Effect.exit);
+          if (Exit.isSuccess(closed)) continue;
+          const reason =
+            "Provider shutdown failed. Automatic replacement is blocked for this server session; see server logs for cleanup details.";
+          const snapshot: ServerProvider = {
+            ...closingSnapshots.get(instanceId)!,
+            status: "error",
+            message: reason,
+            unavailableReason: reason,
+          };
+          state.failedDisposals.set(instanceId, { cause: closed.cause, snapshot });
+          if (nextKeys.has(instanceId)) {
+            unavailable.set(instanceId, snapshot);
+            unavailableChanged = true;
+          }
+          yield* Effect.logError(
+            "Provider instance shutdown failed",
+            { instanceId, driver: live.instance.driverKind },
+            closed.cause,
+          );
+        }
+        yield* Ref.set(state.unavailable, new Map(unavailable));
+        if (unavailableChanged) yield* PubSub.publish(state.changes, undefined);
+      }).pipe(Effect.uninterruptible);
+    }
+
+    // Do not mask potentially slow driver creation. Disposal outcomes and
+    // routing state are already committed if creation is interrupted.
+    const currentEntries = yield* Ref.get(state.entries);
+    const currentUnavailable = yield* Ref.get(state.unavailable);
+    const builtEntries = new Map<ProviderInstanceId, LiveEntry>();
+    const builtUnavailable = new Map<ProviderInstanceId, ServerProvider>();
+    const pendingEntries = new Map(currentEntries);
+    const pendingUnavailable = new Map(currentUnavailable);
+    let creationChanged = false;
+
+    yield* Effect.gen(function* () {
       for (const [rawInstanceId, entry] of nextRaw) {
         const instanceId = ProviderInstanceId.make(rawInstanceId);
-        nextOrder.push(instanceId);
+        const failedDisposal = state.failedDisposals.get(instanceId);
+        if (failedDisposal !== undefined) {
+          builtUnavailable.set(instanceId, failedDisposal.snapshot);
+          continue;
+        }
 
-        const existing = previousEntries.get(instanceId);
-        if (existing !== undefined && !replacedIds.has(instanceId)) {
+        const existing = currentEntries.get(instanceId);
+        if (existing !== undefined) {
           // No-op update: keep the existing live entry and scope.
           builtEntries.set(instanceId, existing);
           continue;
         }
 
-        const result = yield* buildEntry({
+        yield* buildEntry({
           driversById,
           parentScope,
           instanceId,
           rawInstanceId,
           entry,
+          state,
+          onBuilt: (result) =>
+            Effect.gen(function* () {
+              if (result.kind === "live") {
+                builtEntries.set(instanceId, result.live);
+                pendingEntries.set(instanceId, result.live);
+                pendingUnavailable.delete(instanceId);
+                creationChanged = true;
+              } else {
+                builtUnavailable.set(instanceId, result.snapshot);
+                pendingUnavailable.set(instanceId, result.snapshot);
+                creationChanged ||= !Equal.equals(
+                  currentUnavailable.get(instanceId),
+                  result.snapshot,
+                );
+              }
+              // Commit this acquisition before another driver can fail or suspend.
+              yield* Ref.set(state.entries, new Map(pendingEntries));
+              yield* Ref.set(state.unavailable, new Map(pendingUnavailable));
+            }).pipe(Effect.uninterruptible),
         });
-        if (result.kind === "live") {
-          builtEntries.set(instanceId, result.live);
-        } else {
-          builtUnavailable.set(instanceId, result.snapshot);
-        }
       }
-
-      if (previousOrder.length === nextOrder.length) {
-        for (let i = 0; i < previousOrder.length; i++) {
-          if (previousOrder[i] !== nextOrder[i]) {
-            orderChanged = true;
-            break;
-          }
-        }
-      } else {
-        orderChanged = true;
-      }
-
+      const currentOrder = [...currentEntries.keys()];
       const entriesChanged =
-        orderChanged ||
-        removedIds.length > 0 ||
-        replacedIds.size > 0 ||
-        builtEntries.size !== previousEntries.size;
+        builtEntries.size !== currentEntries.size ||
+        [...builtEntries].some(
+          ([id, live], index) => currentOrder[index] !== id || currentEntries.get(id) !== live,
+        );
       const unavailableChanged =
-        builtUnavailable.size !== previousUnavailable.size ||
+        builtUnavailable.size !== currentUnavailable.size ||
         [...builtUnavailable].some(([id, snapshot]) => {
-          const prev = previousUnavailable.get(id);
+          const prev = currentUnavailable.get(id);
           return prev === undefined || !Equal.equals(prev, snapshot);
-        }) ||
-        [...previousUnavailable].some(([id]) => !builtUnavailable.has(id));
+        });
 
-      yield* Ref.set(state.entries, builtEntries);
-      yield* Ref.set(state.unavailable, builtUnavailable);
-
-      if (entriesChanged || unavailableChanged) {
-        yield* PubSub.publish(state.changes, undefined);
-      }
-    });
+      yield* Effect.gen(function* () {
+        yield* Ref.set(state.entries, builtEntries);
+        yield* Ref.set(state.unavailable, builtUnavailable);
+        if (entriesChanged || unavailableChanged) {
+          yield* PubSub.publish(state.changes, undefined);
+        }
+        creationChanged = false;
+      }).pipe(Effect.uninterruptible);
+    }).pipe(
+      Effect.onExit((exit) => {
+        if (Exit.isSuccess(exit) || !creationChanged) return Effect.void;
+        // A failed batch still exposes earlier successes and settled cleanup.
+        return PubSub.publish(state.changes, undefined).pipe(Effect.asVoid);
+      }),
+    );
+  });
 };
 
 /**
@@ -351,12 +454,6 @@ export const makeProviderInstanceRegistry = <R>(input: {
       input.drivers.map((driver) => [driver.driverKind, driver]),
     );
 
-    // Capture the enclosing scope so per-instance child scopes can be
-    // attached to it at `reconcile` time. Without this, `reconcile`
-    // called later (e.g. from the hydration layer) would attach child
-    // scopes to the *caller's* scope instead of the registry's.
-    const parentScope = yield* Scope.Scope;
-
     // Capture the driver R context at construction time so `reconcile`
     // can be invoked later without re-providing driver dependencies.
     // The service tag's declared `reconcile: Effect<void>` hides R from
@@ -367,11 +464,20 @@ export const makeProviderInstanceRegistry = <R>(input: {
     const unavailable = yield* Ref.make<ReadonlyMap<ProviderInstanceId, ServerProvider>>(new Map());
     const changes = yield* PubSub.unbounded<void>();
     yield* Effect.addFinalizer(() => PubSub.shutdown(changes));
+    // Instances do not depend on one another. Begin their bounded shutdowns
+    // together so the backend waits for the longest cleanup, not their sum.
+    // Each instance's child scope still runs its own finalizers sequentially.
+    // Capture this scope here so later reconciliation retains registry ownership.
+    const parentScope = yield* Scope.fork(yield* Scope.Scope, "parallel");
 
-    const state: RegistryState = { entries, unavailable, changes };
+    const state: RegistryState = { entries, unavailable, changes, failedDisposals: new Map() };
+    const reconcileLock = yield* Semaphore.make(1);
     const reconcileWithR = makeReconcile({ state, driversById, parentScope });
     const reconcile: ProviderInstanceRegistryMutatorShape["reconcile"] = (configMap) =>
-      reconcileWithR(configMap).pipe(Effect.provideContext(driverContext));
+      reconcileWithR(configMap).pipe(
+        Effect.provideContext(driverContext),
+        reconcileLock.withPermits(1),
+      );
 
     // Hydrate the initial configMap synchronously so callers can read
     // `listInstances` immediately after this effect completes.

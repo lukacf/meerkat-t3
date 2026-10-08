@@ -1,8 +1,6 @@
 import {
-  AuthStandardClientScopes,
   EnvironmentId,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
-  type DesktopBridge,
   type DesktopSshEnvironmentTarget,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
@@ -12,7 +10,7 @@ import {
   canRetainCachedPlatformRegistrationAfterRefreshFailure,
   canReuseCachedPlatformRegistration,
   primaryRegistrationToRetainAfterTopologyRead,
-  provisionDesktopSshEnvironment,
+  makeDesktopSshEnvironmentGateway,
   readPrimaryEnvironmentTargetResult,
   secondaryRegistrationsToRetainAfterTopologyRead,
   secondaryBearerExpiresAtEpochMs,
@@ -26,73 +24,41 @@ const TARGET: DesktopSshEnvironmentTarget = {
   port: 22,
 };
 
-function makeBridge(
-  calls: string[],
-  options?: { readonly failDescriptor?: boolean },
-): DesktopBridge {
-  return {
-    ensureSshEnvironment: async (target: DesktopSshEnvironmentTarget) => {
-      calls.push("ensure");
-      return {
-        target,
-        httpBaseUrl: "http://127.0.0.1:3201/",
-        wsBaseUrl: "ws://127.0.0.1:3201/",
-        pairingToken: "pairing-token",
-      };
-    },
-    fetchSshEnvironmentDescriptor: async () => {
-      calls.push("descriptor");
-      if (options?.failDescriptor === true) {
-        throw new Error("descriptor unavailable");
-      }
-      return {
-        environmentId: EnvironmentId.make("environment-ssh"),
-        label: "SSH environment",
-        platform: {
-          os: "linux",
-          arch: "x64",
-        },
-        serverVersion: "0.0.0-test",
-        capabilities: {
-          repositoryIdentity: true,
-        },
-      };
-    },
-    bootstrapSshBearerSession: async () => {
-      calls.push("token");
-      return {
-        access_token: "bearer-token",
-        issued_token_type: "urn:ietf:params:oauth:token-type:access_token",
-        token_type: "Bearer",
-        expires_in: 3_600,
-        scope: AuthStandardClientScopes.join(" "),
-      };
-    },
-  } as unknown as DesktopBridge;
-}
-
-describe("desktop SSH pairing", () => {
-  it.effect("fetches the descriptor before consuming the one-time credential", () =>
+describe("desktop SSH availability", () => {
+  it.effect("permanently blocks new and saved connections without calling desktop setup", () =>
     Effect.gen(function* () {
-      const calls: string[] = [];
-
-      const provisioned = yield* provisionDesktopSshEnvironment(makeBridge(calls), TARGET);
-
-      expect(provisioned.environmentId).toBe(EnvironmentId.make("environment-ssh"));
-      expect(calls).toEqual(["ensure", "descriptor", "token"]);
+      const gateway = makeDesktopSshEnvironmentGateway(() => {
+        throw new Error("unsupported SSH must not access the desktop bridge");
+      });
+      for (const operation of [
+        gateway.provision(TARGET),
+        gateway.prepare({
+          connectionId: "saved-ssh",
+          expectedEnvironmentId: EnvironmentId.make("environment-ssh"),
+          target: TARGET,
+        }),
+      ]) {
+        const error = yield* operation.pipe(Effect.flip);
+        expect(error).toMatchObject({
+          _tag: "ConnectionBlockedError",
+          reason: "unsupported",
+          detail: "SSH connections are not available in this prototype. Use this Mac.",
+        });
+      }
     }),
   );
 
-  it.effect("does not consume the credential when descriptor discovery fails", () =>
+  it.effect("still disconnects an existing tunnel and tolerates a browser without desktop", () =>
     Effect.gen(function* () {
-      const calls: string[] = [];
-
-      yield* provisionDesktopSshEnvironment(
-        makeBridge(calls, { failDescriptor: true }),
-        TARGET,
-      ).pipe(Effect.flip);
-
-      expect(calls).toEqual(["ensure", "descriptor"]);
+      const targets: DesktopSshEnvironmentTarget[] = [];
+      const gateway = makeDesktopSshEnvironmentGateway(() => ({
+        disconnectSshEnvironment: async (target) => {
+          targets.push(target);
+        },
+      }));
+      yield* gateway.disconnect(TARGET);
+      expect(targets).toEqual([TARGET]);
+      yield* makeDesktopSshEnvironmentGateway(() => undefined).disconnect(TARGET);
     }),
   );
 });

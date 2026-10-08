@@ -55,6 +55,10 @@ function makeLayer(
   encryptionAvailable = true,
   failDecrypt: Ref.Ref<boolean> | null = null,
   fileSystemLayer: Layer.Layer<FileSystem.FileSystem> = NodeServices.layer,
+  safeStorageLayer: Layer.Layer<ElectronSafeStorage.ElectronSafeStorage> = makeSafeStorageLayer(
+    encryptionAvailable,
+    failDecrypt,
+  ),
 ) {
   const environmentLayer = DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/src",
@@ -71,7 +75,6 @@ function makeLayer(
       Layer.mergeAll(NodeServices.layer, DesktopConfig.layerTest({ T3CODE_HOME: baseDir })),
     ),
   );
-  const safeStorageLayer = makeSafeStorageLayer(encryptionAvailable, failDecrypt);
   const dependencies = Layer.mergeAll(
     environmentLayer,
     safeStorageLayer,
@@ -101,6 +104,36 @@ const withStore = <A, E, R>(
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped);
 
 describe("DesktopConnectionCatalogStore", () => {
+  it.effect("opens a fresh or empty profile without accessing OS secure storage", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-connection-catalog-test-",
+      });
+      const secureStorageUnexpected = Effect.die(
+        new Error("An empty connection catalog must not access OS secure storage"),
+      );
+      const safeStorageLayer = Layer.succeed(ElectronSafeStorage.ElectronSafeStorage, {
+        isEncryptionAvailable: secureStorageUnexpected,
+        encryptString: () => secureStorageUnexpected,
+        decryptString: () => secureStorageUnexpected,
+        selectedStorageBackend: Effect.succeedNone,
+      });
+      yield* Effect.gen(function* () {
+        const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        assert.deepStrictEqual(yield* store.get, Option.none());
+
+        yield* fileSystem.makeDirectory(environment.stateDir, { recursive: true });
+        yield* fileSystem.writeFileString(
+          environment.savedEnvironmentRegistryPath,
+          '{"version":1,"records":[]}',
+        );
+        assert.deepStrictEqual(yield* store.get, Option.none());
+      }).pipe(Effect.provide(makeLayer(baseDir, true, null, NodeServices.layer, safeStorageLayer)));
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   it.effect("persists, reads, and clears an encrypted connection catalog", () =>
     withStore(
       Effect.gen(function* () {

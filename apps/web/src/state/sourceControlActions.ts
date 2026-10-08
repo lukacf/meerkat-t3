@@ -12,8 +12,9 @@ import type {
   EnvironmentId,
   GitActionProgressEvent,
   GitResolvePullRequestResult,
-  GitStackedAction,
+  GitRunStackedActionInput,
   SourceControlCloneProtocol,
+  SourceControlPublishResume,
   SourceControlRepositoryVisibility,
   ThreadId,
 } from "@t3tools/contracts";
@@ -212,15 +213,11 @@ export function useGitStackedAction(scope: SourceControlActionScope) {
   );
 
   const action = useCallback(
-    async (input: {
-      actionId: string;
-      action: GitStackedAction;
-      commitMessage?: string;
-      featureBranch?: boolean;
-      filePaths?: string[];
-      threadId?: ThreadId;
-      onProgress?: (event: GitActionProgressEvent) => void;
-    }) => {
+    async (
+      input: Omit<GitRunStackedActionInput, "cwd"> & {
+        onProgress?: (event: GitActionProgressEvent) => void;
+      },
+    ) => {
       if (resolveScope(scope) === null) {
         return AsyncResult.failure<never, VcsActionUnavailableError>(
           Cause.fail(
@@ -232,15 +229,7 @@ export function useGitStackedAction(scope: SourceControlActionScope) {
           ),
         );
       }
-      return runStackedAction({
-        actionId: input.actionId,
-        action: input.action,
-        ...(input.commitMessage ? { commitMessage: input.commitMessage } : {}),
-        ...(input.featureBranch ? { featureBranch: true } : {}),
-        ...(input.filePaths?.length ? { filePaths: input.filePaths } : {}),
-        ...(input.threadId !== undefined ? { threadId: input.threadId } : {}),
-        ...(input.onProgress ? { onProgress: input.onProgress } : {}),
-      });
+      return runStackedAction(input);
     },
     [runStackedAction, scope],
   );
@@ -274,6 +263,7 @@ export function useSourceControlPublishRepositoryAction(scope: SourceControlActi
       visibility: SourceControlRepositoryVisibility;
       remoteName: string;
       protocol: SourceControlCloneProtocol;
+      resume?: SourceControlPublishResume;
     }) => {
       const target = resolveScope(scope);
       if (target === null) {

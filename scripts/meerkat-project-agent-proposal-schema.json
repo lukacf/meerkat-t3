@@ -1,0 +1,69 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "title": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 100
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 320
+    },
+    "agents": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 48,
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 48
+          },
+          "role": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 48,
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          },
+          "focus": {
+            "type": "string",
+            "minLength": 3,
+            "maxLength": 180
+          },
+          "charter": {
+            "type": "string",
+            "minLength": 20,
+            "maxLength": 800
+          },
+          "recommended": {
+            "type": "boolean"
+          },
+          "ownership_paths": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 6,
+            "description": "One to six exact, inspected repo-relative files or directories that scope this agent's initial study. No globs, guesses, absolute paths, or parent traversal.",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 120
+            }
+          }
+        },
+        "required": ["id", "label", "role", "focus", "charter", "recommended", "ownership_paths"]
+      }
+    }
+  },
+  "required": ["title", "agents"]
+}

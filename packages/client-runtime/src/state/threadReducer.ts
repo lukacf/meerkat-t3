@@ -347,12 +347,30 @@ export function applyThreadDetailEvent(
         },
       };
 
+    case "thread.prepared-turn-changed":
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          preparedTurn: event.payload.preparedTurn,
+          ...(event.payload.preparedTurn.phase === "released"
+            ? {
+                messages: thread.messages.filter(
+                  (message) => message.id !== event.payload.preparedTurn.command.message.messageId,
+                ),
+              }
+            : {}),
+          updatedAt: event.payload.preparedTurn.updatedAt,
+        },
+      };
+
     // ── Turn lifecycle ──────────────────────────────────────────────
     case "thread.turn-start-requested":
       return {
         kind: "updated",
         thread: {
           ...thread,
+          preparedTurn: null,
           ...(event.payload.modelSelection !== undefined
             ? { modelSelection: event.payload.modelSelection }
             : {}),
@@ -363,6 +381,10 @@ export function applyThreadDetailEvent(
       };
 
     case "thread.turn-interrupt-requested": {
+      // MobKit acknowledges a cancellation request before the member stops.
+      if (thread.session?.providerName === "meerkat") {
+        return { kind: "unchanged" };
+      }
       if (event.payload.turnId === undefined) {
         return { kind: "unchanged" };
       }
@@ -409,7 +431,7 @@ export function applyThreadDetailEvent(
           ...entry,
           text: message.streaming
             ? `${entry.text}${message.text}`
-            : message.text.length > 0
+            : event.payload.replaceText || message.text.length > 0
               ? message.text
               : entry.text,
           streaming: message.streaming,

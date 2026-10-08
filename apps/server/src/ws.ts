@@ -1,3 +1,18 @@
+import { makeMeerkatWorkspaceCheckpoints } from "./provider/meerkat/MeerkatWorkspaceCheckpoints.ts";
+import { makeMeerkatUsageService } from "./provider/meerkat/MeerkatUsageService.ts";
+import {
+  makeProjectTerminalService,
+  makeThreadTerminalLaunchResolver,
+  isProjectTerminalOwner,
+  threadTerminalMetadata,
+} from "./terminal/ProjectTerminal.ts";
+import { ProjectTerminalError, type ProjectTerminalEvent } from "@t3tools/contracts";
+import { makeMeerkatMediaService } from "./provider/meerkat/MeerkatMediaService.ts";
+import { makeMeerkatControlsService } from "./provider/meerkat/MeerkatControlsService.ts";
+import { makeMeerkatCoordinatorWorkService } from "./provider/meerkat/MeerkatCoordinatorWorkService.ts";
+import { makeMeerkatThreadRecoveryService } from "./provider/meerkat/MeerkatThreadRecoveryService.ts";
+import { makeMeerkatAttentionService } from "./provider/meerkat/MeerkatAttentionService.ts";
+import * as PreparedTurnRecovery from "./orchestration/PreparedTurnRecovery.ts";
 import {
   sameUsageLimitCommandCoverage,
   withUsageLimitsCommands,
@@ -16,6 +31,7 @@ import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
 import {
   DEFAULT_AUTOMATIC_GIT_FETCH_INTERVAL,
@@ -35,6 +51,8 @@ import {
   type FileManagerRevealKind,
   type OrchestrationClientOrigin,
   type OrchestrationCommand,
+  type ThreadPreparedTurn,
+  GitCommandError,
   type GitActionProgressEvent,
   type GitManagerServiceError,
   OrchestrationDispatchCommandError,
@@ -57,6 +75,9 @@ import {
   ProjectWriteFileError,
   ProviderUploadFeedbackError,
   ProviderSetupError,
+  MeerkatTeamError,
+  MeerkatAgentQueueError,
+  MeerkatThreadRecoveryError,
   RelayClientInstallFailedError,
   type RelayClientInstallProgressEvent,
   ServerSelfUpdateError,
@@ -87,6 +108,14 @@ import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as ServerConfig from "./config.ts";
+import {
+  ProfileRestoreReview,
+  commandStartsRestoredWork,
+  readRestoreReviewSnapshot,
+  requireRestoreReviewReleased,
+  restoreReviewStatus,
+} from "./restoreReview.ts";
+import { RestoreReviewError } from "@t3tools/contracts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -97,7 +126,7 @@ import {
 import { makeThreadLiveEventCoalescer } from "./orchestration/ThreadLiveEventCoalescer.ts";
 import { makeLiveStreamBudget, type RetainedLiveItem } from "./orchestration/LiveStreamBudget.ts";
 import {
-  cleanupFailedUploadedAttachments,
+  cleanupFailedUploadedAttachmentsIfUnowned,
   normalizeDispatchCommand,
 } from "./orchestration/Normalizer.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
@@ -116,6 +145,11 @@ import * as ProviderSessionDirectory from "./provider/Services/ProviderSessionDi
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import { ProviderAuthService } from "./provider/Services/ProviderAuthService.ts";
 import { ProviderInstanceRegistry } from "./provider/Services/ProviderInstanceRegistry.ts";
+import type { ProviderInstance } from "./provider/ProviderDriver.ts";
+import { ProviderInstanceSettingsReconciler } from "./provider/Services/ProviderInstanceSettingsReconciler.ts";
+import { makeMeerkatTeamService } from "./provider/meerkat/MeerkatTeamService.ts";
+import { makeMeerkatAgentQueueService } from "./provider/meerkat/MeerkatAgentQueueService.ts";
+import { makeMeerkatConversationSearch } from "./provider/meerkat/MeerkatConversationSearch.ts";
 import { makeProviderInstallation } from "./provider/providerInstallation.ts";
 import * as ServerSelfUpdate from "./cloud/selfUpdate.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -136,8 +170,10 @@ import { readWorkflowScript } from "./orchestration/workflowScriptQuery.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
 import * as VcsStatusBroadcaster from "./vcs/VcsStatusBroadcaster.ts";
 import * as VcsProvisioningService from "./vcs/VcsProvisioningService.ts";
+import { makeGitIdentity } from "./git/GitIdentity.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import { linkCreatedPullRequest } from "./git/linkCreatedPullRequest.ts";
+import { CreatedPullRequestLinkStore } from "./git/CreatedPullRequestLinkStore.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
@@ -349,7 +385,9 @@ export function isThreadDetailEvent(event: OrchestrationEvent): event is Extract
       | "thread.activity-appended"
       | "thread.turn-diff-completed"
       | "thread.reverted"
-      | "thread.session-set";
+      | "thread.session-set"
+      | "thread.prepared-turn-changed"
+      | "thread.turn-start-requested";
   }
 > {
   return (
@@ -358,7 +396,9 @@ export function isThreadDetailEvent(event: OrchestrationEvent): event is Extract
     event.type === "thread.activity-appended" ||
     event.type === "thread.turn-diff-completed" ||
     event.type === "thread.reverted" ||
-    event.type === "thread.session-set"
+    event.type === "thread.session-set" ||
+    event.type === "thread.prepared-turn-changed" ||
+    event.type === "thread.turn-start-requested"
   );
 }
 
@@ -499,6 +539,7 @@ const makeWsRpcLayer = (
   clientOrigin: OrchestrationClientOrigin,
   clientAnalyticsProps: Readonly<Record<string, unknown>>,
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
+  meerkat: Effect.Success<typeof makeMeerkatServerServices>,
 ) =>
   WsRpcGroup.toLayer(
     Effect.gen(function* () {
@@ -517,6 +558,7 @@ const makeWsRpcLayer = (
               Effect.orElseSucceed(() => null),
             );
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+      const preparedTurnRecovery = yield* PreparedTurnRecovery.make;
       const threadDeletionReactor = yield* ThreadDeletionReactor;
       const analytics = yield* AnalyticsService.AnalyticsService;
       // Every command dispatched on this connection carries the connecting
@@ -526,11 +568,12 @@ const makeWsRpcLayer = (
         clientOrigin.surface !== undefined || clientOrigin.appVersion !== undefined;
       const dispatchFromClient: OrchestrationEngine.OrchestrationEngineShape["dispatch"] = (
         command,
+        options,
       ) =>
-        orchestrationEngine.dispatch(
-          command,
-          hasClientOrigin ? { origin: clientOrigin } : undefined,
-        );
+        orchestrationEngine.dispatch(command, {
+          ...options,
+          ...(hasClientOrigin ? { origin: clientOrigin } : {}),
+        });
       const recordClientCommandAnalytics = (command: OrchestrationCommand) => {
         switch (command.type) {
           case "thread.create":
@@ -553,10 +596,14 @@ const makeWsRpcLayer = (
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
       const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
+      const createdPullRequestLinks = yield* CreatedPullRequestLinkStore;
       const review = yield* ReviewService.ReviewService;
       const vcsProvisioning = yield* VcsProvisioningService.VcsProvisioningService;
+      const gitIdentity = yield* makeGitIdentity;
       const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
       const terminalManager = yield* TerminalManager.TerminalManager;
+      const projectTerminal = yield* makeProjectTerminalService();
+      const resolveThreadTerminalLaunch = yield* makeThreadTerminalLaunchResolver();
       const previewManager = yield* PreviewManager.PreviewManager;
       const deviceService = yield* DeviceService.DeviceService;
       const deviceHostContext =
@@ -570,6 +617,15 @@ const makeWsRpcLayer = (
       const providerMaintenanceRunner = yield* ProviderMaintenanceRunner.ProviderMaintenanceRunner;
       const providerAuth = yield* ProviderAuthService;
       const providerInstances = yield* ProviderInstanceRegistry;
+      const workspacePath = yield* Path.Path;
+      const providerSettingsReconciler = yield* ProviderInstanceSettingsReconciler;
+      const { meerkatTeam, meerkatControls, meerkatAgentQueue, meerkatAttention } = meerkat;
+      const meerkatConversationSearch = yield* makeMeerkatConversationSearch;
+      const meerkatMedia = yield* makeMeerkatMediaService(meerkatTeam);
+      const meerkatCheckpoints = yield* makeMeerkatWorkspaceCheckpoints(meerkatTeam);
+      const meerkatUsage = yield* makeMeerkatUsageService;
+      const meerkatCoordinatorWork = yield* makeMeerkatCoordinatorWorkService(meerkatTeam);
+      const meerkatThreadRecovery = yield* makeMeerkatThreadRecoveryService();
       const providerInstallation = yield* makeProviderInstallation();
       const serverUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
       const config = yield* ServerConfig.ServerConfig;
@@ -1074,19 +1130,157 @@ const makeWsRpcLayer = (
           .worktreeSubmodules;
       });
 
+      const validatePreparedWorkspace = (
+        command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
+        projectId: ProjectId,
+        projectCwd: string,
+        cwd: string,
+        initialNativeInstance?: ProviderInstance,
+        expectedProviderIdentity?: ProviderInstance["continuationIdentity"],
+      ) =>
+        Effect.gen(function* () {
+          const threadId = command.threadId;
+          const selected = command.modelSelection;
+          const selection =
+            selected ??
+            Option.getOrNull(yield* projectionSnapshotQuery.getThreadShellById(threadId))
+              ?.modelSelection;
+          if (!selection) return;
+          const instance = yield* providerInstances.getInstance(selection.instanceId);
+          const invalidBinding = () =>
+            new OrchestrationDispatchCommandError({
+              message:
+                "The thread or provider changed while checking this worktree's model. Refresh before retrying.",
+            });
+          if (initialNativeInstance && instance !== initialNativeInstance)
+            return yield* invalidBinding();
+          if (!instance) return yield* invalidBinding();
+          if (
+            expectedProviderIdentity &&
+            (instance.continuationIdentity.driverKind !== expectedProviderIdentity.driverKind ||
+              instance.continuationIdentity.continuationKey !==
+                expectedProviderIdentity.continuationKey)
+          )
+            return yield* invalidBinding();
+          const checkBinding = Effect.gen(function* () {
+            const current = Option.getOrNull(
+              yield* projectionSnapshotQuery.getThreadShellById(threadId),
+            );
+            if (
+              !current ||
+              current.projectId !== projectId ||
+              current.worktreePath !== cwd ||
+              (!command.modelSelection &&
+                (current.modelSelection.instanceId !== selection.instanceId ||
+                  current.modelSelection.model !== selection.model)) ||
+              (yield* providerInstances.getInstance(selection.instanceId)) !== instance
+            )
+              return yield* invalidBinding();
+            const project = Option.getOrNull(
+              yield* projectionSnapshotQuery.getProjectShellById(current.projectId),
+            );
+            if (
+              !project ||
+              workspacePath.resolve(project.workspaceRoot) !== workspacePath.resolve(projectCwd)
+            )
+              return yield* invalidBinding();
+          });
+          yield* checkBinding;
+          if (instance.driverKind !== "meerkat") return;
+          const catalog = yield* instance.snapshotForCwd
+            ? instance.snapshotForCwd(cwd)
+            : instance.snapshot.getSnapshot;
+          // Older providers without scoped discovery retain their existing admission.
+          if (!instance.snapshotForCwd && !catalog.supportsWorkspaceReadiness) return;
+          if (
+            !instance.snapshotForCwd ||
+            !instance.enabled ||
+            !catalog.installed ||
+            !catalog.enabled ||
+            catalog.status === "error" ||
+            catalog.status === "disabled" ||
+            catalog.availability === "unavailable"
+          )
+            return yield* new OrchestrationDispatchCommandError({
+              message:
+                "Could not check this worktree's Meerkat models. Refresh the provider and try again.",
+            });
+          const model = catalog.models.find((candidate) => candidate.slug === selection.model);
+          if (!model)
+            return yield* new OrchestrationDispatchCommandError({
+              message:
+                "The selected model is unavailable in this worktree's Meerkat catalog. Choose an available model before retrying.",
+            });
+          if (
+            model.credentialState === "needs_auth" ||
+            model.credentialState === "reauth_required" ||
+            (catalog.auth.status === "unauthenticated" &&
+              model.credentialState !== "connected" &&
+              model.credentialState !== "host_managed")
+          )
+            return yield* new OrchestrationDispatchCommandError({
+              message: "Connect the selected model's account for this worktree before retrying.",
+            });
+          yield* checkBinding;
+        });
+
+      const existingPreparedSubmission = (input: { threadId: ThreadId; commandId: CommandId }) =>
+        preparedTurnRecovery.get({ threadId: input.threadId, recoveryId: input.commandId }).pipe(
+          Effect.flatMap((state) => {
+            if (state.status === "accepted") return Effect.succeed({ sequence: state.sequence });
+            if (state.status === "missing") return Effect.succeed(null);
+            return Effect.fail(
+              new OrchestrationDispatchCommandError({
+                message:
+                  state.status === "rejected"
+                    ? state.message
+                    : "Your original message and checkout are saved. Open the thread to retry or edit that message.",
+                bootstrapThreadDisposition: "retained",
+              }),
+            );
+          }),
+        );
+
       const dispatchBootstrapTurnStart = (
         command: Extract<OrchestrationCommand, { type: "thread.turn.start" }>,
       ): Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError> =>
         Effect.gen(function* () {
+          const previous = yield* existingPreparedSubmission(command);
+          if (previous) return previous;
           const bootstrap = command.bootstrap;
-          const { bootstrap: _bootstrap, ...finalTurnStartCommand } = command;
+          const { bootstrap: _bootstrap, ...unfrozenTurnStartCommand } = command;
+          let finalTurnStartCommand = unfrozenTurnStartCommand;
           let createdThread = false;
           let targetProjectId = bootstrap?.createThread?.projectId;
           let targetProjectCwd = bootstrap?.prepareWorktree?.projectCwd;
           let targetWorktreePath = bootstrap?.createThread?.worktreePath ?? null;
+          let createdWorktreePath: string | null = null;
+          let initialNativeInstance: ProviderInstance | undefined;
+          let initialProviderIdentity: ProviderInstance["continuationIdentity"] | undefined;
           // The setup script's terminal, once started. Cancel closes only this
           // one so terminals the user opened meanwhile survive.
           let setupTerminalId: string | null = null;
+          let preparedTurn: ThreadPreparedTurn | null = null;
+          let preparedTurnSaved = false;
+          let admittedResult: { readonly sequence: number } | null = null;
+          const preparationWrites = yield* Semaphore.make(1);
+          const updatePreparedTurn = (patch: Partial<ThreadPreparedTurn>) =>
+            preparationWrites.withPermit(
+              Effect.gen(function* () {
+                if (!preparedTurn || admittedResult) return;
+                const updatedAt = yield* nowIso;
+                const next = { ...preparedTurn, ...patch, updatedAt };
+                yield* dispatchFromClient({
+                  type: "thread.prepared-turn.set",
+                  commandId: yield* serverCommandId("bootstrap-prepared-turn"),
+                  threadId: command.threadId,
+                  preparedTurn: next,
+                  createdAt: updatedAt,
+                });
+                preparedTurn = next;
+                preparedTurnSaved = true;
+              }),
+            );
 
           // Set once the checkout starts; see the session.set below.
           let preparingSessionSet = false;
@@ -1215,11 +1409,15 @@ const makeWsRpcLayer = (
           const runSetupProgram = () =>
             Effect.gen(function* () {
               if (!bootstrap?.runSetupScript || !targetWorktreePath) {
+                yield* updatePreparedTurn({ setup: "skipped" });
                 yield* track(worktreeSetupTracker.stageStatus(threadId, "setup-script", "skipped"));
                 return null;
               }
               const worktreePath = targetWorktreePath;
               const requestedAt = yield* nowIso;
+              // Record the uncertain launch boundary before the setup runner
+              // can start a process. A restart must not rerun it automatically.
+              yield* updatePreparedTurn({ setup: "sync_running" });
               yield* track(worktreeSetupTracker.stageStatus(threadId, "setup-script", "running"));
               const setupResult = yield* projectSetupScriptRunner
                 .runForThread({
@@ -1244,6 +1442,7 @@ const makeWsRpcLayer = (
                         requestedAt,
                         worktreePath,
                       }).pipe(
+                        Effect.andThen(updatePreparedTurn({ setup: "failed" })),
                         Effect.andThen(
                           track(
                             worktreeSetupTracker.stageStatus(
@@ -1265,7 +1464,10 @@ const makeWsRpcLayer = (
                             "skipped",
                             "no setup script",
                           ),
-                        ).pipe(Effect.as(null));
+                        ).pipe(
+                          Effect.andThen(updatePreparedTurn({ setup: "skipped" })),
+                          Effect.as(null),
+                        );
                       }
                       setupTerminalId = setupResult.terminalId;
                       return recordSetupScriptStarted({
@@ -1275,6 +1477,11 @@ const makeWsRpcLayer = (
                         scriptName: setupResult.scriptName,
                         terminalId: setupResult.terminalId,
                       }).pipe(
+                        Effect.andThen(
+                          updatePreparedTurn({
+                            setup: setupResult.async ? "async_running" : "sync_running",
+                          }),
+                        ),
                         Effect.andThen(
                           track(
                             worktreeSetupTracker.update(threadId, (snapshot) => ({
@@ -1303,6 +1510,9 @@ const makeWsRpcLayer = (
               // anyone would otherwise wait on it. The tracker update is a
               // no-op once the snapshot has been dropped.
               const completionFiber = yield* setupResult.completion.pipe(
+                Effect.tap((completion) =>
+                  updatePreparedTurn({ setup: completion.exitCode === 0 ? "finished" : "failed" }),
+                ),
                 Effect.flatMap((completion) => {
                   if (completion.exitCode === 0) {
                     return worktreeSetupTracker.stageStatus(threadId, "setup-script", "done");
@@ -1329,6 +1539,28 @@ const makeWsRpcLayer = (
 
           const bootstrapProgram = Effect.gen(function* () {
             const prepareWorktree = bootstrap?.prepareWorktree;
+            let initialSelection =
+              command.modelSelection ?? bootstrap?.createThread?.modelSelection;
+            if (prepareWorktree && !bootstrap?.createThread) {
+              const owner = Option.getOrNull(
+                yield* projectionSnapshotQuery
+                  .getThreadShellById(threadId)
+                  .pipe(Effect.orElseSucceed(() => Option.none())),
+              );
+              targetProjectId = owner?.projectId;
+              initialSelection ??= owner?.modelSelection;
+            }
+            if (prepareWorktree && initialSelection) {
+              finalTurnStartCommand = {
+                ...finalTurnStartCommand,
+                modelSelection: initialSelection,
+              };
+              // Removing or replacing this native instance during setup must
+              // not turn the final check into a donor-provider bypass.
+              const instance = yield* providerInstances.getInstance(initialSelection.instanceId);
+              initialProviderIdentity = instance?.continuationIdentity;
+              if (instance?.driverKind === "meerkat") initialNativeInstance = instance;
+            }
             let shouldPrepareWorktree = prepareWorktree
               ? yield* gitWorkflow.isRepository(prepareWorktree.projectCwd)
               : false;
@@ -1464,13 +1696,45 @@ const makeWsRpcLayer = (
             }
 
             if (prepareWorktree && shouldPrepareWorktree && worktreeBaseRef) {
+              if (
+                !targetProjectId ||
+                !finalTurnStartCommand.modelSelection ||
+                !initialProviderIdentity
+              ) {
+                return yield* new OrchestrationDispatchCommandError({
+                  message: "The project and model must be available before preparing a worktree.",
+                });
+              }
+              const preparedProject = Option.getOrNull(
+                yield* projectionSnapshotQuery.getProjectShellById(targetProjectId),
+              );
+              if (
+                !preparedProject ||
+                workspacePath.resolve(preparedProject.workspaceRoot) !==
+                  workspacePath.resolve(prepareWorktree.projectCwd)
+              ) {
+                return yield* new OrchestrationDispatchCommandError({
+                  message:
+                    "The project's checkout changed before worktree preparation. Refresh the project before retrying.",
+                });
+              }
+              preparedTurn = {
+                recoveryId: command.commandId,
+                projectId: targetProjectId,
+                projectCwd: preparedProject.workspaceRoot,
+                providerIdentity: initialProviderIdentity,
+                expectedCwd: null,
+                command: finalTurnStartCommand,
+                phase: "preparing",
+                setup: "not_started",
+                createdAt: command.createdAt,
+                updatedAt: command.createdAt,
+              };
+              yield* updatePreparedTurn({});
               if (bootstrap?.createThread && createdThread) {
-                // The checkout and setup script can run for minutes before the
-                // turn starts, and the created thread carries no message or
-                // turn until then. Project a starting session now so every
-                // client lists the thread as working and a reopened thread
-                // knows to follow the setup stream. A failed or cancelled setup
-                // deletes the thread, so nothing lingers.
+                // The starting session exposes ongoing setup to every client.
+                // Ordinary failures retain the prepared message; an explicit
+                // cancellation still removes this owned new thread.
                 const preparingAt = yield* nowIso;
                 yield* dispatchFromClient({
                   type: "thread.session.set",
@@ -1506,6 +1770,20 @@ const makeWsRpcLayer = (
                 },
                 {
                   submodules,
+                  beforeWorktreeCreate: (path) =>
+                    updatePreparedTurn({ expectedCwd: path }).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new GitCommandError({
+                            operation: "prepare-worktree-recovery",
+                            command: "git worktree add",
+                            cwd: prepareWorktree.projectCwd,
+                            detail:
+                              "Could not save this checkout's recovery information. No checkout was created.",
+                            cause,
+                          }),
+                      ),
+                    ),
                   progress: {
                     // Git has registered the directory at this point, so a
                     // cancel during the submodule step can still remove it.
@@ -1584,6 +1862,7 @@ const makeWsRpcLayer = (
                 }),
               }));
               targetWorktreePath = worktree.worktree.path;
+              createdWorktreePath = targetWorktreePath;
               yield* dispatchFromClient({
                 type: "thread.meta.update",
                 commandId: yield* serverCommandId("bootstrap-thread-meta-update"),
@@ -1591,18 +1870,35 @@ const makeWsRpcLayer = (
                 branch: worktree.worktree.refName,
                 worktreePath: targetWorktreePath,
               });
+              yield* updatePreparedTurn({ phase: "ready", expectedCwd: targetWorktreePath });
               yield* refreshGitStatus(targetWorktreePath);
             }
 
             const pendingSetupScript = yield* runSetupProgram();
 
+            // Only a newly created checkout needs this last scoped check. Its
+            // account can differ from the parent checkout checked by the client.
+            if (createdWorktreePath && bootstrap?.prepareWorktree && targetProjectId) {
+              yield* validatePreparedWorkspace(
+                finalTurnStartCommand,
+                targetProjectId,
+                bootstrap.prepareWorktree.projectCwd,
+                createdWorktreePath,
+                initialNativeInstance,
+                initialProviderIdentity,
+              );
+            }
             yield* track(worktreeSetupTracker.stageStatus(threadId, "agent", "running"));
             // Past this point a cancel would roll back a thread whose turn has
             // started. Drop the cancel handle and make the handoff atomic.
             yield* track(worktreeSetupTracker.markUncancellable(threadId));
             const started = yield* Effect.uninterruptible(
-              dispatchFromClient(finalTurnStartCommand),
+              dispatchFromClient(
+                finalTurnStartCommand,
+                preparedTurnSaved ? { preparedTurnRecoveryId: command.commandId } : undefined,
+              ),
             );
+            admittedResult = started;
             yield* track(worktreeSetupTracker.stageStatus(threadId, "agent", "done"));
             // An async setup script outlives the handoff: the snapshot stays
             // running so the client keeps its row next to the agent's work,
@@ -1640,6 +1936,14 @@ const makeWsRpcLayer = (
                     threadId,
                     detail: Cause.pretty(cleanupCause),
                   }).pipe(
+                    Effect.andThen(
+                      preparedTurnSaved
+                        ? updatePreparedTurn({
+                            phase: "preparing",
+                            reason: `${dispatchError.message} Cleanup could not finish. Edit the saved message to continue.`,
+                          }).pipe(Effect.ignoreCause({ log: true }))
+                        : Effect.void,
+                    ),
                     // The thread outlived its setup. Its preparing session
                     // must not read as working forever, so record the failure
                     // on it instead.
@@ -1650,7 +1954,19 @@ const makeWsRpcLayer = (
                           )
                         : Effect.void,
                     ),
-                    Effect.flatMap(() => Effect.fail(dispatchError)),
+                    Effect.flatMap(() =>
+                      Effect.fail(
+                        preparedTurnSaved
+                          ? new OrchestrationDispatchCommandError({
+                              message: dispatchError.message,
+                              ...(dispatchError.cause !== undefined
+                                ? { cause: dispatchError.cause }
+                                : {}),
+                              bootstrapThreadDisposition: "retained",
+                            })
+                          : dispatchError,
+                      ),
+                    ),
                   ),
                 onSuccess: (threadDeleted) =>
                   Effect.fail(
@@ -1673,6 +1989,9 @@ const makeWsRpcLayer = (
           const settledBootstrapProgram = bootstrapProgram.pipe(
             Effect.interruptible,
             Effect.catchCause((cause) => {
+              // The receipt is authoritative even if a later progress write
+              // fails. Never turn an accepted send into a restored draft.
+              if (admittedResult) return Effect.succeed(admittedResult);
               const dispatchError = toBootstrapDispatchCommandCauseError(cause);
               if (Cause.hasInterruptsOnly(cause)) {
                 // A user cancel interrupts the forked bootstrap fiber. The
@@ -1729,6 +2048,24 @@ const makeWsRpcLayer = (
                   ),
                 );
               }
+              const handleFailure = preparedTurnSaved
+                ? Effect.gen(function* () {
+                    yield* updatePreparedTurn({
+                      phase: preparedTurn?.phase === "preparing" ? "preparing" : "blocked",
+                      reason: dispatchError.message,
+                    }).pipe(Effect.ignoreCause({ log: true }));
+                    if (preparingSessionSet) {
+                      yield* markPreparingSessionFailed(dispatchError.message).pipe(
+                        Effect.ignoreCause({ log: true }),
+                      );
+                    }
+                    return yield* new OrchestrationDispatchCommandError({
+                      message: dispatchError.message,
+                      ...(dispatchError.cause !== undefined ? { cause: dispatchError.cause } : {}),
+                      bootstrapThreadDisposition: "retained",
+                    });
+                  })
+                : cleanupAndFail(cause, dispatchError);
               return track(
                 worktreeSetupTracker
                   .finish(threadId, "failed", dispatchError.message)
@@ -1737,7 +2074,7 @@ const makeWsRpcLayer = (
                       snapshot ? recordWorktreeSetup(snapshot) : Effect.void,
                     ),
                   ),
-              ).pipe(Effect.andThen(cleanupAndFail(cause, dispatchError)));
+              ).pipe(Effect.andThen(handleFailure));
             }),
             // Cancellation must finish recording and rollback after the bootstrap is interrupted.
             Effect.uninterruptible,
@@ -1794,7 +2131,14 @@ const makeWsRpcLayer = (
               );
 
         return startup
-          .enqueueCommand(dispatchEffect)
+          .enqueueCommand(
+            (commandStartsRestoredWork(normalizedCommand)
+              ? requireRestoreReviewReleased.pipe(
+                  Effect.mapError((cause) => toDispatchCommandError(cause, cause.message)),
+                )
+              : Effect.void
+            ).pipe(Effect.andThen(dispatchEffect)),
+          )
           .pipe(
             Effect.mapError((cause) =>
               toDispatchCommandError(cause, "Failed to dispatch orchestration command"),
@@ -1830,6 +2174,7 @@ const makeWsRpcLayer = (
             auth,
             cwd: config.cwd,
             keybindingsConfigPath: config.keybindingsConfigPath,
+            restoreReview: yield* restoreReviewStatus,
             keybindings: keybindingsConfig.keybindings,
             issues: keybindingsConfig.issues,
             providers,
@@ -1872,12 +2217,108 @@ const makeWsRpcLayer = (
           .refreshStatus(cwd)
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
+      const onProjectCloned: ProjectCloneTracker.ProjectCloneHooks["onCloned"] = (project) =>
+        // A new or recovered clone must replace the empty directory's cached identity.
+        repositoryIdentityResolver.resolve(project.workspaceRoot, { refresh: true }).pipe(
+          Effect.andThen(
+            Effect.gen(function* () {
+              const command = yield* normalizeDispatchCommand({
+                type: "project.meta.update",
+                commandId: yield* serverCommandId("project-clone-done"),
+                projectId: project.projectId,
+              });
+              yield* dispatchNormalizedCommand(command);
+            }),
+          ),
+          Effect.andThen(refreshGitStatus(project.workspaceRoot)),
+          Effect.ignoreCause({ log: true }),
+          Effect.provideContext(normalizerContext),
+        );
+
+      const lookupThreadProjectForClone = (threadId: ThreadId) =>
+        projectionSnapshotQuery.getThreadShellById(threadId).pipe(
+          Effect.map((thread) => (Option.isSome(thread) ? thread.value.projectId : null)),
+          Effect.mapError(
+            (cause) =>
+              new OrchestrationDispatchCommandError({
+                message: "Could not verify the repository's clone state. Try again.",
+                cause,
+              }),
+          ),
+        );
+      const withReadyMeerkatProject = <A, E, R>(
+        projectId: ProjectId,
+        work: Effect.Effect<A, E, R>,
+      ) =>
+        ProjectCloneTracker.requireProjectCloneReady(projectCloneTracker, projectId).pipe(
+          Effect.mapError(
+            (cause) =>
+              new MeerkatTeamError({
+                projectId,
+                operation: "project-agent",
+                message: cause.message,
+              }),
+          ),
+          Effect.andThen(work),
+        );
+      const withReadyMeerkatQueue = <A, E, R>(projectId: ProjectId, work: Effect.Effect<A, E, R>) =>
+        ProjectCloneTracker.requireProjectCloneReady(projectCloneTracker, projectId).pipe(
+          Effect.mapError(
+            (cause) => new MeerkatAgentQueueError({ projectId, message: cause.message }),
+          ),
+          Effect.andThen(work),
+        );
+
       return WsRpcGroup.of({
+        [ORCHESTRATION_WS_METHODS.retryPreparedTurn]: (input) =>
+          observeRpcEffect(
+            ORCHESTRATION_WS_METHODS.retryPreparedTurn,
+            startup
+              .enqueueCommand(
+                Effect.gen(function* () {
+                  const existing = yield* preparedTurnRecovery.get(input);
+                  if (existing.status === "accepted") return { sequence: existing.sequence };
+                  yield* requireRestoreReviewReleased;
+                  if (existing.status === "pending") {
+                    yield* ProjectCloneTracker.requireProjectCloneReady(
+                      projectCloneTracker,
+                      existing.preparedTurn.projectId,
+                    );
+                  }
+                  return yield* preparedTurnRecovery.retry(
+                    input,
+                    (saved) =>
+                      validatePreparedWorkspace(
+                        saved.command,
+                        saved.projectId,
+                        saved.projectCwd,
+                        input.expectedCwd,
+                        undefined,
+                        saved.providerIdentity,
+                      ).pipe(
+                        Effect.mapError((cause) => toDispatchCommandError(cause, cause.message)),
+                      ),
+                    hasClientOrigin ? { origin: clientOrigin } : undefined,
+                  );
+                }),
+              )
+              .pipe(Effect.mapError((cause) => toDispatchCommandError(cause, cause.message))),
+          ),
         [ORCHESTRATION_WS_METHODS.dispatchCommand]: (command) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.dispatchCommand,
             Effect.gen(function* () {
-              yield* ProjectCloneTracker.rejectCommandsDuringClone(projectCloneTracker, command);
+              yield* ProjectCloneTracker.rejectCommandsDuringClone(
+                projectCloneTracker,
+                command,
+                lookupThreadProjectForClone,
+              );
+              if (command.type === "thread.turn.start" && command.bootstrap) {
+                // A replay must not re-claim uploaded files or create another
+                // checkout before checking the original durable request.
+                const previous = yield* existingPreparedSubmission(command);
+                if (previous) return previous;
+              }
               const normalizedCommand = yield* normalizeDispatchCommand(command);
               // Archive removes the thread from the client, so this transport
               // closes its session and terminals after the command lands.
@@ -1905,14 +2346,26 @@ const makeWsRpcLayer = (
                     ),
                   )
                 : false;
-              const result = yield* dispatchNormalizedCommand(normalizedCommand).pipe(
-                Effect.tapError(() => cleanupFailedUploadedAttachments(command, normalizedCommand)),
+              const dispatch = dispatchNormalizedCommand(normalizedCommand).pipe(
+                Effect.tapError((cause) =>
+                  cause.bootstrapThreadDisposition === "retained"
+                    ? Effect.void
+                    : cleanupFailedUploadedAttachmentsIfUnowned(command, normalizedCommand),
+                ),
+                Effect.tap(() =>
+                  ProjectCloneTracker.discardCloneForDeletedProject(
+                    projectCloneTracker,
+                    normalizedCommand,
+                  ),
+                ),
               );
+              // The engine can commit a deletion before the client disconnects.
+              // Keep its clone cleanup in the same cancellation boundary so a
+              // hidden project cannot retain a running clone or destination claim.
+              const result = yield* normalizedCommand.type === "project.delete"
+                ? Effect.uninterruptible(dispatch)
+                : dispatch;
               yield* recordClientCommandAnalytics(normalizedCommand);
-              yield* ProjectCloneTracker.discardCloneForDeletedProject(
-                projectCloneTracker,
-                normalizedCommand,
-              );
               if (archiveCommand) {
                 if (shouldStopSessionAfterCommand) {
                   yield* Effect.gen(function* () {
@@ -1957,6 +2410,13 @@ const makeWsRpcLayer = (
                       cause,
                     }),
               ),
+              (operation) =>
+                command.type === "thread.turn.start" && command.bootstrap
+                  ? worktreeSetupTracker.runBootstrapOnce(
+                      { threadId: command.threadId, commandId: command.commandId },
+                      operation,
+                    )
+                  : operation,
             ),
             { "rpc.aggregate": "orchestration" },
           ),
@@ -2357,10 +2817,47 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "server",
             },
           ),
+        [WS_METHODS.serverRestoreReviewSnapshot]: () =>
+          observeRpcEffect(WS_METHODS.serverRestoreReviewSnapshot, readRestoreReviewSnapshot),
+        [WS_METHODS.serverRestoreReviewConsent]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.serverRestoreReviewConsent,
+            Effect.gen(function* () {
+              const review = yield* ProfileRestoreReview;
+              if (!review)
+                return yield* new RestoreReviewError({
+                  message: "This environment has no pending profile restore.",
+                });
+              return yield* Effect.tryPromise({
+                try: () => review.consent(input.restoreId),
+                catch: (cause) =>
+                  new RestoreReviewError({
+                    message:
+                      cause instanceof Error
+                        ? cause.message
+                        : "Could not save recovery consent. The profile remains paused.",
+                  }),
+              });
+            }),
+          ),
         [WS_METHODS.serverRefreshProviders]: (input) =>
           observeRpcEffect(
             WS_METHODS.serverRefreshProviders,
             Effect.gen(function* () {
+              if (input.instanceId !== undefined) {
+                const instanceId = input.instanceId;
+                yield* providerSettingsReconciler.reconcileCurrentSettings.pipe(
+                  Effect.mapError(
+                    () =>
+                      new ProviderSetupError({
+                        instanceId,
+                        operation: "refresh-settings",
+                        detail:
+                          "Could not apply the saved provider settings. Try refreshing again.",
+                      }),
+                  ),
+                );
+              }
               // Only explicit catalog refreshes bypass T3's caches. Workspace
               // discovery and background status checks retain their timers.
               if (input.refreshModels) {
@@ -2394,10 +2891,17 @@ const makeWsRpcLayer = (
                 ? providerRegistry.refreshWorkspaceSnapshot({
                     instanceId: input.instanceId,
                     cwd: input.cwd,
+                    ...(input.refreshModels ? { invalidate: true } : {}),
                   })
                 : input.instanceId !== undefined
-                  ? providerRegistry.refreshInstance(input.instanceId)
-                  : providerRegistry.refresh();
+                  ? providerRegistry.refreshInstance(
+                      input.instanceId,
+                      input.refreshModels ? { invalidateWorkspaces: true } : undefined,
+                    )
+                  : providerRegistry.refresh(
+                      undefined,
+                      input.refreshModels ? { invalidateWorkspaces: true } : undefined,
+                    );
               if (input.refreshModels) {
                 const instances = yield* providerInstances.listInstances;
                 for (const instance of instances) {
@@ -2451,6 +2955,199 @@ const makeWsRpcLayer = (
               "rpc.aggregate": "server",
             },
           ),
+        [WS_METHODS.meerkatCheckpointCapture]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatCheckpointCapture, meerkatCheckpoints.capture(input)),
+        [WS_METHODS.meerkatCheckpoints]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatCheckpoints, meerkatCheckpoints.list(input)),
+        [WS_METHODS.meerkatCheckpointPreview]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatCheckpointPreview, meerkatCheckpoints.preview(input)),
+        [WS_METHODS.meerkatCheckpointRestore]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatCheckpointRestore, meerkatCheckpoints.restore(input)),
+        [WS_METHODS.meerkatCoordinatorWork]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatCoordinatorWork, meerkatCoordinatorWork.work(input)),
+        [WS_METHODS.meerkatThreadRecovery]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatThreadRecovery, meerkatThreadRecovery.status(input)),
+        [WS_METHODS.meerkatRecoverThread]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatRecoverThread, meerkatThreadRecovery.recover(input)),
+        [WS_METHODS.meerkatReconnectThread]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatReconnectThread,
+            ProjectCloneTracker.requireProjectCloneReady(projectCloneTracker, input.projectId).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new MeerkatThreadRecoveryError({
+                    projectId: input.projectId,
+                    threadId: input.threadId,
+                    message: cause.message,
+                  }),
+              ),
+              Effect.andThen(meerkatThreadRecovery.reconnect(input)),
+            ),
+          ),
+        [WS_METHODS.meerkatCoordinatorStop]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatCoordinatorStop, meerkatCoordinatorWork.stop(input)),
+        [WS_METHODS.meerkatCoordinatorSteer]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatCoordinatorSteer, meerkatCoordinatorWork.steer(input)),
+        [WS_METHODS.meerkatQuestions]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatQuestions, meerkatControls.questions(input)),
+        [WS_METHODS.meerkatApprovals]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatApprovals, meerkatControls.approvals(input)),
+        [WS_METHODS.meerkatApprovalDecide]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatApprovalDecide, meerkatControls.decideApproval(input)),
+        [WS_METHODS.meerkatQuestionAnswer]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatQuestionAnswer,
+            meerkatControls.answer(input).pipe(
+              Effect.tap(() =>
+                meerkatAttention.observeProject(input.projectId).pipe(
+                  Effect.catch((cause) =>
+                    Effect.logWarning("Could not refresh native attention after answering", {
+                      cause,
+                    }),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        [WS_METHODS.meerkatAttention]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatAttention, meerkatAttention.list(input)),
+        [WS_METHODS.meerkatAttentionSubscribe]: (input) =>
+          observeRpcStream(WS_METHODS.meerkatAttentionSubscribe, meerkatAttention.subscribe(input)),
+        [WS_METHODS.meerkatAttentionRead]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatAttentionRead, meerkatAttention.markRead(input)),
+        [WS_METHODS.meerkatAuthStatus]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatAuthStatus, meerkatControls.authStatus(input)),
+        [WS_METHODS.meerkatAuthAction]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatAuthAction,
+            meerkatControls.authAction(input, currentSessionId),
+          ),
+        [WS_METHODS.meerkatBrowserStatus]: (input) => meerkatMedia.browserStatus(input),
+        [WS_METHODS.meerkatBrowserGrant]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatBrowserGrant, meerkatMedia.browserGrant(input)),
+        [WS_METHODS.meerkatImageUpload]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatImageUpload, meerkatMedia.imageUpload(input)),
+        [WS_METHODS.meerkatImageRead]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatImageRead, meerkatMedia.imageRead(input)),
+        [WS_METHODS.meerkatProjectTeam]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatProjectTeam, meerkatTeam.projectTeam(input)),
+        [WS_METHODS.meerkatUsageSnapshot]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatUsageSnapshot, meerkatUsage.snapshot(input)),
+        [WS_METHODS.meerkatAgentActivity]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatAgentActivity, meerkatTeam.agentActivity(input)),
+        [WS_METHODS.meerkatProjectProposal]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatProjectProposal, meerkatTeam.projectProposal(input)),
+        [WS_METHODS.meerkatProjectProposalSetup]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatProjectProposalSetup,
+            withReadyMeerkatProject(input.projectId, meerkatTeam.projectProposalSetup(input)),
+          ),
+        [WS_METHODS.meerkatProjectProposalCreate]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatProjectProposalCreate,
+            withReadyMeerkatProject(input.projectId, meerkatTeam.projectProposalCreate(input)),
+          ),
+        [WS_METHODS.meerkatProjectAgentPrepare]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatProjectAgentPrepare,
+            withReadyMeerkatProject(input.projectId, meerkatTeam.projectAgentPrepare(input)),
+          ),
+        [WS_METHODS.meerkatProjectAgents]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatProjectAgents, meerkatTeam.projectAgents(input)),
+        [WS_METHODS.meerkatThreadConnections]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatThreadConnections,
+            meerkatTeam.threadConnections(input),
+          ),
+        [WS_METHODS.meerkatThreadConnectionsSet]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatThreadConnectionsSet,
+            input.agentIds.length > 0
+              ? withReadyMeerkatProject(input.projectId, meerkatTeam.threadConnectionsSet(input))
+              : meerkatTeam.threadConnectionsSet(input),
+          ),
+        [WS_METHODS.meerkatPeerConnections]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatPeerConnections, meerkatTeam.peerConnections(input)),
+        [WS_METHODS.meerkatPeerConnectionSet]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatPeerConnectionSet,
+            input.connected
+              ? withReadyMeerkatProject(
+                  input.source.projectId,
+                  withReadyMeerkatProject(
+                    input.target.projectId,
+                    meerkatTeam.peerConnectionSet(input),
+                  ),
+                )
+              : meerkatTeam.peerConnectionSet(input),
+          ),
+
+        [WS_METHODS.meerkatProjectAgentCreate]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatProjectAgentCreate,
+            withReadyMeerkatProject(input.projectId, meerkatTeam.projectAgentCreate(input)),
+          ),
+        [WS_METHODS.meerkatProjectAgentUpdate]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatProjectAgentUpdate,
+            input.revision || input.applyPending
+              ? withReadyMeerkatProject(input.projectId, meerkatTeam.projectAgentUpdate(input))
+              : meerkatTeam.projectAgentUpdate(input),
+          ),
+        [WS_METHODS.meerkatProjectAgentLifecycle]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatProjectAgentLifecycle,
+            input.action === "connect"
+              ? withReadyMeerkatProject(input.projectId, meerkatTeam.projectAgentLifecycle(input))
+              : meerkatTeam.projectAgentLifecycle(input),
+          ),
+        [WS_METHODS.meerkatAgentSend]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatAgentSend,
+            withReadyMeerkatProject(input.projectId, meerkatTeam.agentSend(input)),
+          ),
+        [WS_METHODS.meerkatAgentDeliveryReconcile]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatAgentDeliveryReconcile,
+            meerkatTeam
+              .agentDeliveryReconcile(input)
+              .pipe(Effect.map((receipt) => receipt ?? null)),
+          ),
+        [WS_METHODS.meerkatAgentQueue]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatAgentQueue, meerkatAgentQueue.list(input)),
+        [WS_METHODS.meerkatAgentQueueSubscribe]: (input) =>
+          observeRpcStream(
+            WS_METHODS.meerkatAgentQueueSubscribe,
+            meerkatAgentQueue.subscribe(input),
+          ),
+        [WS_METHODS.meerkatSearchConversations]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatSearchConversations, meerkatConversationSearch(input)),
+        [WS_METHODS.meerkatAgentQueueEnqueue]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatAgentQueueEnqueue,
+            withReadyMeerkatQueue(input.projectId, meerkatAgentQueue.enqueue(input)),
+          ),
+        [WS_METHODS.meerkatAgentQueueEdit]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatAgentQueueEdit, meerkatAgentQueue.edit(input)),
+        [WS_METHODS.meerkatAgentQueueMove]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatAgentQueueMove, meerkatAgentQueue.move(input)),
+        [WS_METHODS.meerkatAgentQueueCancel]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatAgentQueueCancel, meerkatAgentQueue.cancel(input)),
+        [WS_METHODS.meerkatAgentQueueRetry]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatAgentQueueRetry,
+            withReadyMeerkatQueue(input.projectId, meerkatAgentQueue.retry(input)),
+          ),
+        [WS_METHODS.meerkatAgentResume]: (input) =>
+          observeRpcEffect(
+            WS_METHODS.meerkatAgentResume,
+            withReadyMeerkatProject(input.projectId, meerkatTeam.agentResume(input)),
+          ),
+        [WS_METHODS.meerkatAgentStopCrew]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatAgentStopCrew, meerkatTeam.agentStopCrew(input)),
+        [WS_METHODS.meerkatAgentStop]: (input) =>
+          observeRpcEffect(WS_METHODS.meerkatAgentStop, meerkatTeam.agentStop(input)),
+
         [WS_METHODS.providerConsumeResetCredit]: (input) =>
           observeRpcEffect(
             WS_METHODS.providerConsumeResetCredit,
@@ -2606,6 +3303,14 @@ const makeWsRpcLayer = (
             {
               "rpc.aggregate": "server",
             },
+          ),
+        [WS_METHODS.serverUpdateProviderSettings]: ({ intent }) =>
+          observeRpcEffect(
+            WS_METHODS.serverUpdateProviderSettings,
+            serverSettings
+              .updateProviderSettings(intent)
+              .pipe(Effect.map(ServerSettings.redactServerSettingsForClient)),
+            { "rpc.aggregate": "server" },
           ),
         [WS_METHODS.serverUpdateSettings]: ({ patch }) =>
           observeRpcEffect(
@@ -2994,26 +3699,7 @@ const makeWsRpcLayer = (
                   yield* dispatchNormalizedCommand(normalizedCommand);
                   yield* recordClientCommandAnalytics(normalizedCommand);
                 }).pipe(Effect.provideContext(normalizerContext)),
-              onCloned: (project) =>
-                // The project was created against an empty directory, so its
-                // cached identity is "not a repository" until this refresh.
-                // Re-emitting the project shell carries the new identity to
-                // every client without a round trip.
-                repositoryIdentityResolver.resolve(project.workspaceRoot, { refresh: true }).pipe(
-                  Effect.andThen(
-                    Effect.gen(function* () {
-                      const command = yield* normalizeDispatchCommand({
-                        type: "project.meta.update",
-                        commandId: yield* serverCommandId("project-clone-done"),
-                        projectId: project.projectId,
-                      });
-                      yield* dispatchNormalizedCommand(command);
-                    }),
-                  ),
-                  Effect.andThen(refreshGitStatus(project.workspaceRoot)),
-                  Effect.ignoreCause({ log: true }),
-                  Effect.provideContext(normalizerContext),
-                ),
+              onCloned: onProjectCloned,
             }),
             { "rpc.aggregate": "source-control" },
           ),
@@ -3028,7 +3714,9 @@ const makeWsRpcLayer = (
         [WS_METHODS.projectCloneRetry]: (input) =>
           observeRpcEffect(
             WS_METHODS.projectCloneRetry,
-            projectCloneTracker.retry(input.projectId).pipe(Effect.map((applied) => ({ applied }))),
+            projectCloneTracker
+              .retry(input.projectId, onProjectCloned)
+              .pipe(Effect.map((applied) => ({ applied }))),
             { "rpc.aggregate": "source-control" },
           ),
         [WS_METHODS.subscribeProjectClones]: () =>
@@ -3312,12 +4000,20 @@ const makeWsRpcLayer = (
         [WS_METHODS.gitRunStackedAction]: (input) =>
           observeRpcStream(
             WS_METHODS.gitRunStackedAction,
-            Stream.callback<GitActionProgressEvent, GitManagerServiceError>((queue) =>
-              gitWorkflow
+            Stream.callback<GitActionProgressEvent, GitManagerServiceError>((queue) => {
+              let finishedEvent:
+                | Extract<GitActionProgressEvent, { kind: "action_finished" }>
+                | undefined;
+              return gitWorkflow
                 .runStackedAction(input, {
                   actionId: input.actionId,
                   progressReporter: {
-                    publish: (event) => Queue.offer(queue, event).pipe(Effect.asVoid),
+                    publish: (event) =>
+                      event.kind === "action_finished"
+                        ? Effect.sync(() => {
+                            finishedEvent = event;
+                          })
+                        : Queue.offer(queue, event).pipe(Effect.asVoid),
                   },
                 })
                 .pipe(
@@ -3325,7 +4021,7 @@ const makeWsRpcLayer = (
                     onFailure: (cause) => Queue.failCause(queue, cause),
                     onSuccess: (result) =>
                       (input.threadId === undefined
-                        ? Effect.void
+                        ? Effect.succeed(undefined)
                         : linkCreatedPullRequest({
                             threadId: input.threadId,
                             result,
@@ -3339,14 +4035,29 @@ const makeWsRpcLayer = (
                               ProjectionSnapshotQuery.ProjectionSnapshotQuery,
                               projectionSnapshotQuery,
                             ),
+                            Effect.provideService(
+                              CreatedPullRequestLinkStore,
+                              createdPullRequestLinks,
+                            ),
                           )
                       ).pipe(
+                        Effect.flatMap((linkStatus) =>
+                          finishedEvent === undefined
+                            ? Effect.void
+                            : Queue.offer(queue, {
+                                ...finishedEvent,
+                                result:
+                                  linkStatus === undefined
+                                    ? result
+                                    : { ...result, pr: { ...result.pr, linkStatus } },
+                              }).pipe(Effect.asVoid),
+                        ),
                         Effect.andThen(refreshGitStatus(input.cwd)),
                         Effect.andThen(Queue.end(queue).pipe(Effect.asVoid)),
                       ),
                   }),
-                ),
-            ),
+                );
+            }),
             { "rpc.aggregate": "vcs" },
           ),
         [WS_METHODS.gitResolvePullRequest]: (input) =>
@@ -3393,6 +4104,14 @@ const makeWsRpcLayer = (
             gitWorkflow.switchRef(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
             { "rpc.aggregate": "vcs" },
           ),
+        [WS_METHODS.gitIdentity]: (input) =>
+          observeRpcEffect(WS_METHODS.gitIdentity, gitIdentity.read(input), {
+            "rpc.aggregate": "git",
+          }),
+        [WS_METHODS.gitIdentityUpdate]: (input) =>
+          observeRpcEffect(WS_METHODS.gitIdentityUpdate, gitIdentity.update(input), {
+            "rpc.aggregate": "git",
+          }),
         [WS_METHODS.vcsInit]: (input) =>
           observeRpcEffect(
             WS_METHODS.vcsInit,
@@ -3411,25 +4130,56 @@ const makeWsRpcLayer = (
             review.getDiffFileContents(input),
             { "rpc.aggregate": "review" },
           ),
+        [WS_METHODS.projectTerminalAttach]: (input) =>
+          observeRpcStream(
+            WS_METHODS.projectTerminalAttach,
+            Stream.callback<ProjectTerminalEvent, ProjectTerminalError>((queue) =>
+              Effect.acquireRelease(
+                projectTerminal.attach(input, (event) => Queue.offer(queue, event)),
+                (unsubscribe) => Effect.sync(unsubscribe),
+              ),
+            ),
+            { "rpc.aggregate": "projectTerminal" },
+          ),
+        [WS_METHODS.projectTerminalWrite]: (input) => projectTerminal.write(input),
+        [WS_METHODS.projectTerminalResize]: (input) => projectTerminal.resize(input),
+        [WS_METHODS.projectTerminalClear]: (input) => projectTerminal.clear(input),
+        [WS_METHODS.projectTerminalClose]: (input) => projectTerminal.close(input),
         [WS_METHODS.terminalOpen]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalOpen, terminalManager.open(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalOpen,
+            resolveThreadTerminalLaunch(input).pipe(
+              Effect.flatMap((resolved) => terminalManager.open(resolved)),
+            ),
+            {
+              "rpc.aggregate": "terminal",
+            },
+          ),
         [WS_METHODS.terminalAttach]: (input) =>
           observeRpcStream(
             WS_METHODS.terminalAttach,
             Stream.callback<TerminalAttachStreamEvent, TerminalError>((queue) =>
               Effect.acquireRelease(
-                terminalManager.attachStream(input, (event) => Queue.offer(queue, event)),
+                resolveThreadTerminalLaunch(input).pipe(
+                  Effect.flatMap((resolved) =>
+                    terminalManager.attachStream(resolved, (event) => Queue.offer(queue, event)),
+                  ),
+                ),
                 (unsubscribe) => Effect.sync(unsubscribe),
               ),
             ),
             { "rpc.aggregate": "terminal" },
           ),
         [WS_METHODS.terminalWrite]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalWrite, terminalManager.write(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalWrite,
+            resolveThreadTerminalLaunch(input).pipe(
+              Effect.flatMap((resolved) => terminalManager.write(resolved)),
+            ),
+            {
+              "rpc.aggregate": "terminal",
+            },
+          ),
         [WS_METHODS.terminalResize]: (input) =>
           observeRpcEffect(WS_METHODS.terminalResize, terminalManager.resize(input), {
             "rpc.aggregate": "terminal",
@@ -3439,9 +4189,15 @@ const makeWsRpcLayer = (
             "rpc.aggregate": "terminal",
           }),
         [WS_METHODS.terminalRestart]: (input) =>
-          observeRpcEffect(WS_METHODS.terminalRestart, terminalManager.restart(input), {
-            "rpc.aggregate": "terminal",
-          }),
+          observeRpcEffect(
+            WS_METHODS.terminalRestart,
+            resolveThreadTerminalLaunch(input).pipe(
+              Effect.flatMap((resolved) => terminalManager.restart(resolved)),
+            ),
+            {
+              "rpc.aggregate": "terminal",
+            },
+          ),
         [WS_METHODS.terminalClose]: (input) =>
           observeRpcEffect(WS_METHODS.terminalClose, terminalManager.close(input), {
             "rpc.aggregate": "terminal",
@@ -3451,7 +4207,9 @@ const makeWsRpcLayer = (
             WS_METHODS.subscribeTerminalEvents,
             Stream.callback<TerminalEvent>((queue) =>
               Effect.acquireRelease(
-                terminalManager.subscribe((event) => Queue.offer(queue, event)),
+                terminalManager.subscribe((event) =>
+                  isProjectTerminalOwner(event.threadId) ? Effect.void : Queue.offer(queue, event),
+                ),
                 (unsubscribe) => Effect.sync(unsubscribe),
               ),
             ),
@@ -3462,7 +4220,10 @@ const makeWsRpcLayer = (
             WS_METHODS.subscribeTerminalMetadata,
             Stream.callback<TerminalMetadataStreamEvent>((queue) =>
               Effect.acquireRelease(
-                terminalManager.subscribeMetadata((event) => Queue.offer(queue, event)),
+                terminalManager.subscribeMetadata((event) => {
+                  const visible = threadTerminalMetadata(event);
+                  return visible ? Queue.offer(queue, visible) : Effect.void;
+                }),
                 (unsubscribe) => Effect.sync(unsubscribe),
               ),
             ),
@@ -3605,6 +4366,30 @@ const makeWsRpcLayer = (
             Effect.gen(function* () {
               const usageLimitsCommand = input.usageLimitsCommand === true;
               const config = yield* loadServerConfig({ usageLimitsCommand });
+              const restoreReview = yield* ProfileRestoreReview;
+              // The session shares and replays this config stream across mounts.
+              // Consent must publish here so every client receives the durable status.
+              // The service replays current status, covering consent during config load.
+              const restoreReviewUpdates = Stream.concat(
+                Stream.make(config.restoreReview),
+                restoreReview?.changes ?? Stream.empty,
+              ).pipe(
+                Stream.changesWith(
+                  (previous, next) =>
+                    previous.status === next.status &&
+                    previous.restoreId === next.restoreId &&
+                    previous.restoredAt === next.restoredAt &&
+                    previous.backupCreatedAt === next.backupCreatedAt &&
+                    previous.message === next.message,
+                ),
+                Stream.drop(1),
+                Stream.mapEffect(() => loadServerConfig({ usageLimitsCommand })),
+                Stream.map((config) => ({
+                  version: 1 as const,
+                  type: "snapshot" as const,
+                  config,
+                })),
+              );
               const keybindingsUpdates = keybindings.streamChanges.pipe(
                 Stream.map((event) => ({
                   version: 1 as const,
@@ -3692,7 +4477,10 @@ const makeWsRpcLayer = (
                   providerStatuses,
                   Stream.merge(
                     settingsUpdates,
-                    Stream.merge(environmentThemeUpdates, usageLimitSourceUpdates),
+                    Stream.merge(
+                      restoreReviewUpdates,
+                      Stream.merge(environmentThemeUpdates, usageLimitSourceUpdates),
+                    ),
                   ),
                 ),
               );
@@ -3782,8 +4570,39 @@ const makeWsRpcLayer = (
     }),
   );
 
+// Native queue ownership and observation outlive any client connection. One shared
+// service instance also lets a mutation on one socket wake subscribers on another.
+const makeMeerkatServerServices = Effect.gen(function* () {
+  const team = yield* makeMeerkatTeamService;
+  const cloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
+  const meerkatTeam = {
+    ...team,
+    // The queue outlives sockets, so admission must also cover background delivery.
+    agentSend: (input: Parameters<typeof team.agentSend>[0]) =>
+      ProjectCloneTracker.requireProjectCloneReady(cloneTracker, input.projectId).pipe(
+        Effect.mapError(
+          (cause) =>
+            new MeerkatTeamError({
+              projectId: input.projectId,
+              operation: "agent-control",
+              message: cause.message,
+            }),
+        ),
+        Effect.andThen(team.agentSend(input)),
+      ),
+  };
+  const meerkatControls = yield* makeMeerkatControlsService(meerkatTeam);
+  const meerkatAgentQueue = yield* makeMeerkatAgentQueueService(meerkatTeam, meerkatControls);
+  const meerkatAttention = yield* makeMeerkatAttentionService(meerkatTeam, meerkatControls);
+  yield* meerkatAgentQueue.recoverInterrupted;
+  yield* Effect.forkScoped(meerkatAgentQueue.run);
+  yield* Effect.forkScoped(meerkatAttention.run);
+  return { meerkatTeam, meerkatControls, meerkatAgentQueue, meerkatAttention };
+});
+
 export const websocketRpcRouteLayer = Layer.unwrap(
   Effect.gen(function* () {
+    const meerkat = yield* makeMeerkatServerServices;
     const previewAutomationBroker = yield* PreviewAutomationBroker.PreviewAutomationBroker;
     const baseServerSelfUpdate = yield* ServerSelfUpdate.ServerSelfUpdate;
     const config = yield* ServerConfig.ServerConfig;
@@ -3851,6 +4670,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               clientOrigin,
               clientAnalyticsProps,
               previewAutomationBroker,
+              meerkat,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),

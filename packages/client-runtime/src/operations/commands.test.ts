@@ -23,6 +23,7 @@ import * as RpcSession from "../rpc/session.ts";
 import type { WsRpcProtocolClient } from "../rpc/protocol.ts";
 import {
   archiveThread,
+  releasePreparedThreadTurn,
   createProject,
   revertThreadCheckpoint,
   reorderActiveThread,
@@ -76,6 +77,32 @@ const makeSupervisor = Effect.fn("TestEnvironmentCommands.makeSupervisor")(funct
 });
 
 describe("environment commands", () => {
+  it.effect(
+    "releases the exact saved request and checkout without constructing a replacement turn",
+    () =>
+      Effect.gen(function* () {
+        const dispatched: ClientOrchestrationCommand[] = [];
+        const supervisor = yield* makeSupervisor(dispatched);
+        const result = yield* releasePreparedThreadTurn({
+          threadId: ThreadId.make("saved-thread"),
+          recoveryId: CommandId.make("original-request"),
+          expectedCwd: "/checkout/saved",
+          commandId: CommandId.make("release-request"),
+          createdAt: "2026-10-04T12:00:00.000Z",
+        }).pipe(Effect.provideService(EnvironmentSupervisor.EnvironmentSupervisor, supervisor));
+        expect(result).toEqual({ sequence: 1 });
+        expect(dispatched).toEqual([
+          {
+            type: "thread.prepared-turn.release",
+            threadId: "saved-thread",
+            recoveryId: "original-request",
+            expectedCwd: "/checkout/saved",
+            commandId: "release-request",
+            createdAt: "2026-10-04T12:00:00.000Z",
+          },
+        ]);
+      }).pipe(Effect.provide(TEST_CRYPTO_LAYER)),
+  );
   it.effect("adds generated command metadata", () =>
     Effect.gen(function* () {
       const dispatched: ClientOrchestrationCommand[] = [];

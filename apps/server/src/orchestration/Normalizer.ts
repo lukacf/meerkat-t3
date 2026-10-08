@@ -1,6 +1,7 @@
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import {
   type ClientOrchestrationCommand,
@@ -22,6 +23,7 @@ import {
 import { ServerConfig } from "../config.ts";
 import { parseBase64DataUrl } from "../imageMime.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
+import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
 
 export const canonicalizeClientCommandTimestamps = (
   command: ClientOrchestrationCommand,
@@ -381,4 +383,32 @@ export const cleanupFailedUploadedAttachments = Effect.fn(
     }
   }
   yield* removeClaimedAttachmentPaths(claimedPaths);
+});
+
+/** A failed response does not establish that the persisted message owns no files. */
+export const cleanupFailedUploadedAttachmentsIfUnowned = Effect.fn(
+  "Normalizer.cleanupFailedUploadedAttachmentsIfUnowned",
+)(function* (command: ClientOrchestrationCommand, normalizedCommand: OrchestrationCommand) {
+  if (normalizedCommand.type === "thread.turn.start") {
+    const query = yield* ProjectionSnapshotQuery;
+    const ownedOrUnknown = yield* query.getThreadDetailById(normalizedCommand.threadId).pipe(
+      Effect.map(
+        (thread) =>
+          Option.isSome(thread) &&
+          (thread.value.preparedTurn?.command.message.messageId ===
+            normalizedCommand.message.messageId ||
+            thread.value.messages.some(
+              (message) => message.id === normalizedCommand.message.messageId,
+            )),
+      ),
+      Effect.catchCause((cause) =>
+        Effect.logWarning(
+          "Retaining uploaded files because message ownership could not be checked",
+          { threadId: normalizedCommand.threadId, cause },
+        ).pipe(Effect.as(true)),
+      ),
+    );
+    if (ownedOrUnknown) return;
+  }
+  yield* cleanupFailedUploadedAttachments(command, normalizedCommand);
 });

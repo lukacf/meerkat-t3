@@ -2,7 +2,13 @@ import {
   ConnectionTransientError,
   PrimaryConnectionTarget,
 } from "@t3tools/client-runtime/connection";
-import { EnvironmentId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ProviderInstanceId,
+  ThreadId,
+  type OrchestrationThreadDetailSnapshot,
+} from "@t3tools/contracts";
 import { ConnectionCatalogDocument } from "@t3tools/client-runtime/platform";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -16,6 +22,8 @@ import {
   makeBrowserGitHubRoutingPermissions,
   makeCatalogBackend,
   makeCatalogStore,
+  decodeThreadSnapshotCache,
+  encodeThreadSnapshotCache,
 } from "./storage";
 
 const emptyCatalog = {
@@ -28,6 +36,76 @@ const emptyCatalog = {
 } as const;
 const decodeCatalog = Schema.decodeUnknownSync(Schema.fromJsonString(ConnectionCatalogDocument));
 const encodeCatalog = Schema.encodeSync(Schema.fromJsonString(ConnectionCatalogDocument));
+const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+
+describe("thread snapshot cache migration", () => {
+  for (const recovery of ["absent", "null"] as const) {
+    it.effect(
+      `rejects a legacy cursor with ${recovery} recovery, then loads a fresh snapshot`,
+      () =>
+        Effect.gen(function* () {
+          const environmentId = EnvironmentId.make("cached-environment");
+          const now = "2026-10-04T00:00:00.000Z";
+          const snapshot: OrchestrationThreadDetailSnapshot = {
+            snapshotSequence: 500,
+            thread: {
+              id: ThreadId.make("cached-thread"),
+              projectId: ProjectId.make("cached-project"),
+              title: "Cached thread",
+              modelSelection: {
+                instanceId: ProviderInstanceId.make("meerkat"),
+                model: "fixture-b",
+              },
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              branch: null,
+              worktreePath: "/repo-checkout",
+              ...(recovery === "null" ? { preparedTurn: null } : {}),
+              pullRequests: [],
+              latestTurn: null,
+              createdAt: now,
+              updatedAt: now,
+              archivedAt: null,
+              settledOverride: null,
+              settledAt: null,
+              deletedAt: null,
+              messages: [],
+              proposedPlans: [],
+              activities: [],
+              checkpoints: [],
+              session: null,
+            },
+          };
+          const legacy = encodeJson({
+            schemaVersion: 4,
+            environmentId,
+            threadId: snapshot.thread.id,
+            snapshot,
+          });
+          const failure = yield* decodeThreadSnapshotCache(
+            environmentId,
+            snapshot.thread.id,
+            legacy,
+          ).pipe(Effect.flip);
+          expect(failure.operation).toBe("load-thread");
+          const current = yield* encodeThreadSnapshotCache(environmentId, snapshot);
+          expect(
+            yield* decodeThreadSnapshotCache(environmentId, snapshot.thread.id, current),
+          ).toEqual(Option.some(snapshot));
+          expect(
+            yield* decodeThreadSnapshotCache(
+              EnvironmentId.make("other"),
+              snapshot.thread.id,
+              current,
+            ),
+          ).toEqual(Option.none());
+          expect(
+            yield* decodeThreadSnapshotCache(environmentId, ThreadId.make("other"), current),
+          ).toEqual(Option.none());
+        }),
+    );
+  }
+});
 
 afterEach(() => {
   vi.unstubAllGlobals();

@@ -1,5 +1,6 @@
 import { ChevronRightIcon, ExternalLinkIcon, SearchIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "@tanstack/react-router";
 
 import {
   decodeThirdPartyLicenseManifest,
@@ -14,7 +15,7 @@ import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { InputGroup, InputGroupAddon, InputGroupInput } from "../ui/input-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { SettingsPageContainer, SettingsSection } from "./settingsLayout";
+import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 
 type LicenseManifestState =
   | { readonly status: "loading" }
@@ -222,8 +223,23 @@ export function OpenSourceLicensesPanel() {
 
   return (
     <SettingsPageContainer>
+      <SettingsSection title="Desktop runtime notices">
+        <SettingsRow
+          title="Meerkat, MobKit and Chromium"
+          description="Their license notices are included in the installed Mac app. The offline guide explains where to find them."
+          control={
+            <Button
+              render={<Link to="/help" search={{ topic: "licenses" }} />}
+              size="sm"
+              variant="outline"
+            >
+              Find bundled notices
+            </Button>
+          }
+        />
+      </SettingsSection>
       <SettingsSection
-        title="Third-party notices"
+        title="Interface and JavaScript notices"
         headerAction={
           state.status === "ready" ? (
             <LicenseHeaderAction

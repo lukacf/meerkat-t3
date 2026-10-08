@@ -1,5 +1,5 @@
 import { isValidElement, type ReactElement, type ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { DesktopUpdateState } from "@t3tools/contracts";
 
 const testState = vi.hoisted(() => ({
@@ -63,6 +63,17 @@ function downloadedState(overrides: Partial<DesktopUpdateState> = {}): DesktopUp
 describe("showDesktopUpdateDownloadedToast", () => {
   beforeEach(() => {
     testState.addToast.mockReset();
+    vi.stubEnv("VITE_MEERKAT_RELEASE_REPOSITORY", "example/meerkat");
+  });
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("omits external links when the prototype has no release repository", () => {
+    vi.stubEnv("VITE_MEERKAT_RELEASE_REPOSITORY", "");
+    const openExternal = vi.fn();
+    showDesktopUpdateDownloadedToast({ openExternal }, downloadedState());
+    expect(findReleaseNotesLink(getDescription())).toBeNull();
+    expect(openExternal).not.toHaveBeenCalled();
   });
 
   it("opens the downloaded version's release notes", async () => {
@@ -73,7 +84,7 @@ describe("showDesktopUpdateDownloadedToast", () => {
     link?.props.onClick?.();
     await vi.waitFor(() => {
       expect(openExternal).toHaveBeenCalledWith(
-        "https://github.com/pingdotgg/t3code/releases/tag/v0.0.30",
+        "https://github.com/example/meerkat/releases/tag/v0.0.30",
       );
     });
     expect(testState.addToast).toHaveBeenCalledTimes(1);
@@ -91,7 +102,7 @@ describe("showDesktopUpdateDownloadedToast", () => {
 
     await vi.waitFor(() => {
       expect(openExternal).toHaveBeenCalledWith(
-        "https://github.com/pingdotgg/t3code/releases/tag/v0.0.30",
+        "https://github.com/example/meerkat/releases/tag/v0.0.30",
       );
     });
   });

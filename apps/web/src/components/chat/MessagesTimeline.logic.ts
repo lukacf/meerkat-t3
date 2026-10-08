@@ -784,10 +784,12 @@ function deriveTurnFolds(input: {
               lastEntryEnd,
           );
     const duration = elapsedMs !== null ? formatDuration(elapsedMs) : null;
+    // An interrupted turn can come from the runtime or a lost connection; it
+    // does not establish that the user pressed Stop.
     const label = isLatestInterruptedTurn
       ? duration
-        ? `You stopped after ${duration}`
-        : "You stopped this response"
+        ? `Interrupted after ${duration}`
+        : "Response interrupted"
       : duration
         ? `Worked for ${duration}`
         : "Worked";

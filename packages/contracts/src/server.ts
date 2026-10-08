@@ -26,6 +26,7 @@ import { ModelCapabilities } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerProviderUsageLimits, UsageLimitSourceSnapshots } from "./providerUsageLimits.ts";
 import { ServerSettings } from "./settings.ts";
+import { RestoreReviewStatus } from "./restoreReview.ts";
 
 const KeybindingsMalformedConfigIssue = Schema.Struct({
   kind: Schema.Literal("keybindings.malformed-config"),
@@ -71,6 +72,9 @@ export const ServerProviderModel = Schema.Struct({
   name: TrimmedNonEmptyString,
   shortName: Schema.optional(TrimmedNonEmptyString),
   subProvider: Schema.optional(TrimmedNonEmptyString),
+  credentialState: Schema.optional(
+    Schema.Literals(["connected", "needs_auth", "reauth_required", "host_managed", "unknown"]),
+  ),
   aliases: Schema.optional(Schema.Array(TrimmedNonEmptyString)),
   badge: Schema.optional(Schema.Literal("new")),
   isCustom: Schema.Boolean,
@@ -120,6 +124,14 @@ export const ServerProviderWorkspaceSnapshot = Schema.Struct({
   checkedAt: IsoDateTime,
   slashCommands: Schema.Array(ServerProviderSlashCommand),
   skills: Schema.Array(ServerProviderSkill),
+  readiness: Schema.optional(
+    Schema.Struct({
+      status: ServerProviderState,
+      auth: ServerProviderAuth,
+      models: Schema.Array(ServerProviderModel),
+      message: Schema.optional(TrimmedNonEmptyString),
+    }),
+  ),
 });
 export type ServerProviderWorkspaceSnapshot = typeof ServerProviderWorkspaceSnapshot.Type;
 
@@ -220,6 +232,11 @@ export const ServerProvider = Schema.Struct({
   requiresNewThreadForModelChange: Schema.optional(Schema.Boolean),
   supportsConversationRollback: Schema.optional(Schema.Boolean),
   supportsTextGeneration: Schema.optional(Schema.Boolean),
+  // When true, auth and models must come from the exact cwd snapshot.
+  // Missing workspace readiness means it has not been checked, not a fallback.
+  supportsWorkspaceReadiness: Schema.optional(Schema.Boolean),
+  // Thread account targets are server-resolved; older servers only accept project scopes.
+  supportsThreadAuthScope: Schema.optional(Schema.Boolean),
   setup: Schema.optional(
     Schema.Struct({
       canAuthenticate: Schema.Boolean,
@@ -568,6 +585,8 @@ export function environmentThemeFileHasColors(file: EnvironmentThemeFile): boole
 }
 
 export const ServerConfig = Schema.Struct({
+  /** Restored profiles remain held until review consent and a subsequent restart. */
+  restoreReview: Schema.optionalKey(RestoreReviewStatus),
   environment: ExecutionEnvironmentDescriptor,
   auth: ServerAuthDescriptor,
   cwd: TrimmedNonEmptyString,

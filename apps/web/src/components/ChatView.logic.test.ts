@@ -45,6 +45,7 @@ import {
   dismissBranchMismatchForSession,
   ENVIRONMENT_RECONNECT_WARNING_GRACE_MS,
   getAntigravitySendBlockReason,
+  getMeerkatSendBlockReason,
   getStartedThreadModelChangeBlockReason,
   hasEnvironmentReconnectWarningGraceElapsed,
   hasServerAcknowledgedLocalDispatch,
@@ -55,6 +56,7 @@ import {
   rememberCheckoutIsRepo,
   resolveBackgroundDraftWorkspaceOptions,
   resolveComposerInteractionMode,
+  resolveComposerRuntimeMode,
   restorePlanFollowUpComposer,
   resolveComposerProviderSelection,
   resolveDraftPromotionNavigationTarget,
@@ -86,6 +88,7 @@ import {
   shouldShowBranchMismatchBanner,
   shouldShowPlanFollowUpPrompt,
   shouldWriteThreadErrorToCurrentServerThread,
+  clearRetriedThreadError,
   waitForRevertedMessage,
   prepareRevertedMessageAttachments,
 } from "./ChatView.logic";
@@ -1349,17 +1352,80 @@ describe("resolveComposerProviderSelection", () => {
     expect(getAntigravitySendBlockReason(provider, "gpt-model")).toBeNull();
   });
 
-  it("does not continue an existing Antigravity thread in another profile after deletion", () => {
-    const missingInstanceId = ProviderInstanceId.make("google_work");
+  it.each(["antigravity", "meerkat"])(
+    "does not continue an existing %s thread in another instance after deletion",
+    (driver) => {
+      const missingInstanceId = ProviderInstanceId.make(`${driver}_work`);
+      const selection = resolveComposerProviderSelection({
+        entries: [entry(driver)],
+        candidateInstanceIds: [missingInstanceId],
+        lockedProvider: ProviderDriverKind.make(driver),
+        lockedInstanceId: missingInstanceId,
+      });
+
+      expect(selection.selectedProviderEntry).toBeUndefined();
+      expect(selection.unavailableProviderInstanceId).toBe(missingInstanceId);
+    },
+  );
+
+  it.each(["available", "disabled", "deleted"] as const)(
+    "keeps the locked Meerkat target when a stale draft selects another instance and the original is %s",
+    (state) => {
+      const original = entry("meerkat", "meerkat_work", { enabled: state === "available" });
+      const replacement = entry("meerkat", "meerkat_personal", {
+        continuation: { groupKey: "meerkat:instance:meerkat_personal" },
+      });
+      const selection = resolveComposerProviderSelection({
+        entries: state === "deleted" ? [replacement] : [original, replacement],
+        candidateInstanceIds: [replacement.instanceId, original.instanceId],
+        lockedProvider: ProviderDriverKind.make("meerkat"),
+        lockedInstanceId: original.instanceId,
+      });
+
+      expect(selection.selectedProviderEntry?.instanceId).toBe(
+        state === "available" ? original.instanceId : undefined,
+      );
+      expect(selection.unavailableProviderInstanceId).toBe(
+        state === "available" ? undefined : original.instanceId,
+      );
+    },
+  );
+
+  it("keeps new Meerkat drafts free to fall back when their selected instance is missing", () => {
+    const missingInstanceId = ProviderInstanceId.make("meerkat_work");
+    const replacement = entry("meerkat", "meerkat_personal");
     const selection = resolveComposerProviderSelection({
-      entries: [entry("antigravity")],
+      entries: [replacement],
       candidateInstanceIds: [missingInstanceId],
-      lockedProvider: ProviderDriverKind.make("antigravity"),
-      lockedInstanceId: missingInstanceId,
+      lockedProvider: null,
+      lockedInstanceId: null,
     });
 
-    expect(selection.selectedProviderEntry).toBeUndefined();
-    expect(selection.unavailableProviderInstanceId).toBe(missingInstanceId);
+    expect(selection.selectedProviderEntry?.instanceId).toBe(replacement.instanceId);
+    expect(selection.unavailableProviderInstanceId).toBeUndefined();
+  });
+
+  it("uses known continuation groups for Meerkat instance compatibility", () => {
+    const original = entry("meerkat", "meerkat_work", {
+      enabled: false,
+      continuation: { groupKey: "work-state" },
+    });
+    const compatible = entry("meerkat", "meerkat_work_alias", {
+      continuation: { groupKey: "work-state" },
+    });
+    const incompatible = entry("meerkat", "meerkat_personal", {
+      continuation: { groupKey: "personal-state" },
+    });
+    const selection = resolveComposerProviderSelection({
+      entries: [original, compatible, incompatible],
+      candidateInstanceIds: [incompatible.instanceId, compatible.instanceId, original.instanceId],
+      lockedProvider: ProviderDriverKind.make("meerkat"),
+      lockedInstanceId: original.instanceId,
+    });
+
+    expect(selection.selectedProviderEntry?.instanceId).toBe(compatible.instanceId);
+    expect(selection.lockedContinuationGroupKey).toBe("work-state");
+    expect(selection.unavailableProviderInstanceId).toBeUndefined();
   });
 
   it("does not treat the empty draft placeholder as a provider setup target", () => {
@@ -1390,6 +1456,131 @@ describe("resolveComposerProviderSelection", () => {
     });
 
     expect(selection.selectedProviderEntry).toBeUndefined();
+  });
+});
+
+describe("getMeerkatSendBlockReason", () => {
+  const provider = ProviderDriverKind.make("meerkat");
+
+  it.each(["auto-accept-edits", "auto"] as const)(
+    "requires a supported access choice from %s",
+    (runtimeMode) => {
+      expect(
+        getMeerkatSendBlockReason({ provider, runtimeMode, images: [], fileAttachmentCount: 0 }),
+      ).toContain("Choose one in the access menu");
+    },
+  );
+
+  it.each(["read-only", "approval-required", "full-access"] as const)(
+    "blocks generic files while allowing text and images with %s",
+    (runtimeMode) => {
+      expect(
+        getMeerkatSendBlockReason({
+          provider,
+          runtimeMode,
+          images: [],
+          fileAttachmentCount: 1,
+        }),
+      ).toContain("Remove the files");
+      expect(
+        getMeerkatSendBlockReason({
+          provider,
+          runtimeMode,
+          images: [],
+          fileAttachmentCount: 0,
+        }),
+      ).toBeNull();
+      expect(
+        getMeerkatSendBlockReason({
+          provider,
+          runtimeMode,
+          images: ["image/png", "image/jpeg", "image/gif", "image/webp"].map((mimeType) => ({
+            mimeType,
+            sizeBytes: 1024,
+          })),
+          fileAttachmentCount: 0,
+        }),
+      ).toBeNull();
+    },
+  );
+
+  it("validates restored or provider-switched image drafts against native limits", () => {
+    const image = { mimeType: "image/png", sizeBytes: 10 * 1024 * 1024 };
+    const input = { provider, runtimeMode: "full-access" as const, fileAttachmentCount: 0 };
+    expect(
+      getMeerkatSendBlockReason({ ...input, images: Array.from({ length: 8 }, () => image) }),
+    ).toBeNull();
+    expect(
+      getMeerkatSendBlockReason({ ...input, images: Array.from({ length: 9 }, () => image) }),
+    ).toContain("up to 8 images");
+    expect(
+      getMeerkatSendBlockReason({
+        ...input,
+        images: [{ ...image, sizeBytes: image.sizeBytes + 1 }],
+      }),
+    ).toContain("10 MiB");
+    expect(
+      getMeerkatSendBlockReason({ ...input, images: [{ ...image, mimeType: "image/svg+xml" }] }),
+    ).toContain("Remove unsupported images");
+  });
+
+  it("preserves other providers' supported modes and attachments", () => {
+    expect(
+      getMeerkatSendBlockReason({
+        provider: ProviderDriverKind.make("codex"),
+        runtimeMode: "approval-required",
+        images: [{ mimeType: "image/svg+xml", sizeBytes: 20 * 1024 * 1024 }],
+        fileAttachmentCount: 1,
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("resolveComposerRuntimeMode", () => {
+  it.each(["read-only", "approval-required", "full-access"] as const)(
+    "preserves native %s access despite stale requested or draft permissions",
+    (runtimeMode) => {
+      expect(
+        resolveComposerRuntimeMode({
+          session: { providerName: "meerkat", runtimeMode },
+          composerRuntimeMode: runtimeMode === "full-access" ? "read-only" : "full-access",
+          threadRuntimeMode: runtimeMode === "full-access" ? "approval-required" : "full-access",
+          defaultRuntimeMode: "full-access",
+        }),
+      ).toBe(runtimeMode);
+    },
+  );
+
+  it("keeps explicit access choices for new conversations and other providers", () => {
+    for (const session of [null, { providerName: "codex", runtimeMode: "full-access" as const }]) {
+      expect(
+        resolveComposerRuntimeMode({
+          session,
+          composerRuntimeMode: "approval-required",
+          threadRuntimeMode: "full-access",
+          defaultRuntimeMode: "read-only",
+        }),
+      ).toBe("approval-required");
+    }
+  });
+
+  it("uses existing thread access and then the current project default when no choice exists", () => {
+    expect(
+      resolveComposerRuntimeMode({
+        session: null,
+        composerRuntimeMode: null,
+        threadRuntimeMode: "approval-required",
+        defaultRuntimeMode: "read-only",
+      }),
+    ).toBe("approval-required");
+    expect(
+      resolveComposerRuntimeMode({
+        session: null,
+        composerRuntimeMode: null,
+        threadRuntimeMode: undefined,
+        defaultRuntimeMode: "read-only",
+      }),
+    ).toBe("read-only");
   });
 });
 
@@ -1779,6 +1970,63 @@ describe("shouldWriteThreadErrorToCurrentServerThread", () => {
         targetThreadId: threadId,
       }),
     ).toBe(false);
+  });
+});
+
+describe("accepted prepared retry error cleanup", () => {
+  const capturedError = { message: "Original checkout model unavailable", at: 1 };
+  const otherError = { message: "Another thread failed", at: 2 };
+  const errors = { "env:original": capturedError, "env:other": otherError };
+
+  it("removes only the captured local failure so the authoritative new session can surface", () => {
+    expect(
+      clearRetriedThreadError({
+        errors,
+        capturedError,
+        threadKey: "env:original",
+        currentThreadKey: "env:original",
+      }),
+    ).toEqual({ "env:other": otherError });
+    expect(errors["env:original"]).toBe(capturedError);
+  });
+
+  it("keeps a newer failure, even when it has the same message", () => {
+    const next = { ...errors, "env:original": { ...capturedError, at: 3 } };
+    expect(
+      clearRetriedThreadError({
+        errors: next,
+        capturedError,
+        threadKey: "env:original",
+        currentThreadKey: "env:original",
+      }),
+    ).toBe(next);
+  });
+
+  it("does not clear errors after navigation or when no failure was captured", () => {
+    expect(
+      clearRetriedThreadError({
+        errors,
+        capturedError,
+        threadKey: "env:original",
+        currentThreadKey: "env:other",
+      }),
+    ).toBe(errors);
+    expect(
+      clearRetriedThreadError({
+        errors,
+        capturedError,
+        threadKey: "env:original",
+        currentThreadKey: null,
+      }),
+    ).toBe(errors);
+    expect(
+      clearRetriedThreadError({
+        errors,
+        capturedError: undefined,
+        threadKey: "env:original",
+        currentThreadKey: "env:original",
+      }),
+    ).toBe(errors);
   });
 });
 

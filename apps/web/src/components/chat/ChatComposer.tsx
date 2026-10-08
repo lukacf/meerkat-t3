@@ -1,7 +1,8 @@
+import { useConversationPaneActive } from "../team/ConversationPaneContext";
 import { DESKTOP_PASTE_AS_TEXT_EVENT } from "../../lib/desktopPasteAsText";
 import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { usePrimaryEnvironmentId } from "../../state/environments";
-import { runtimeModeConfig, runtimeModeOptions } from "./runtimeModeConfig";
+import { runtimeModeConfig, runtimeModeDescription, runtimeModeOptions } from "./runtimeModeConfig";
 import { useRightPanelStore } from "~/rightPanelStore";
 import { AttachmentFilePreview } from "../files/AttachmentFilePreview";
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
@@ -37,6 +38,8 @@ import type {
 import {
   ProviderDriverKind,
   ProviderInstanceId,
+  MEERKAT_MAX_IMAGE_BYTES,
+  MEERKAT_MAX_IMAGES,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
@@ -49,6 +52,15 @@ import {
   wouldTextPasteExceedLimit,
 } from "@t3tools/client-runtime/text-paste";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
+import { serializeProviderSkillSelection } from "@t3tools/shared/meerkatSkills";
+import {
+  getComposerModelSendBlock,
+  projectHomeAccountSetupMessage,
+  resolveComposerPrimaryActionAvailability,
+  type ComposerModelSendBlock,
+  type ProjectHomeAccountSetup,
+} from "./composerModelReadiness";
+import { useRestoreReview } from "../team/useRestoreReview";
 import { folderDropTarget, resolveDroppedFolderPath } from "./folderDrop";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import { USAGE_LIMITS_COMMAND } from "@t3tools/shared/usageLimits";
@@ -58,6 +70,7 @@ import {
   type ReactNode,
   useCallback,
   useEffect,
+  useId,
   useImperativeHandle,
   useLayoutEffect,
   useMemo,
@@ -83,6 +96,7 @@ import { listContinuationForEnter, listIndentForTab } from "../../composer-list-
 import {
   deriveComposerSendState,
   getAntigravitySendBlockReason,
+  getMeerkatSendBlockReason,
   readFileAsDataUrl,
   resolveComposerInteractionMode,
   resolveComposerProviderSelection,
@@ -114,6 +128,7 @@ import {
   useComposerThreadDraft,
   useEffectiveComposerModelState,
 } from "../../composerDraftStore";
+import { useProviderWorkspaceReadiness } from "../../hooks/useProviderWorkspaceReadiness";
 import {
   MAX_STASH_ENTRIES,
   partitionStashAttachments,
@@ -245,7 +260,11 @@ import { useEnvironmentQuery } from "~/state/query";
 import { useDebouncedValue } from "~/state/queries";
 import { ProviderModelPicker } from "./ProviderModelPicker";
 import { resolveModelPickerSelectedModel } from "./ModelPickerContent";
-import { type ComposerCommandItem, ComposerCommandMenu } from "./ComposerCommandMenu";
+import {
+  type ComposerCommandItem,
+  ComposerCommandMenu,
+  composerCommandOptionId,
+} from "./ComposerCommandMenu";
 import { ComposerPendingApprovalActions } from "./ComposerPendingApprovalActions";
 import { CompactComposerControlsMenu } from "./CompactComposerControlsMenu";
 import { ComposerImageThumbnail } from "./ComposerImageThumbnail";
@@ -929,6 +948,7 @@ function ComposerCommandMenuLayer(props: { anchor: HTMLElement | null; children:
   );
 }
 import { Button } from "../ui/button";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { Select, SelectItem, SelectPopup, SelectValue } from "../ui/select";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { toastManager } from "../ui/toast";
@@ -936,6 +956,7 @@ import {
   FileIcon,
   BotIcon,
   CircleAlertIcon,
+  InfoIcon,
   PaperclipIcon,
   PencilRulerIcon,
   PlayIcon,
@@ -1076,6 +1097,9 @@ function useRestingComposerControlsLayout(host: HTMLDivElement | null, useContro
 
 const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
   showInteractionModeToggle: boolean;
+  meerkatAccessModes?: boolean;
+  readOnlyAvailable?: boolean;
+  accessModeLocked?: boolean;
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
   size?: "sm" | "xs";
@@ -1155,28 +1179,46 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
             <SelectValue data-composer-control-label>{runtimeModeOption.label}</SelectValue>
           </TooltipTrigger>
           <SelectPopup alignItemWithTrigger={false} {...composerFloatingLayerProps}>
-            {runtimeModeOptions.map((mode) => {
-              const option = runtimeModeConfig[mode];
-              const OptionIcon = option.icon;
-              return (
-                <SelectItem key={mode} value={mode} hideIndicator className="min-w-64">
-                  <div className="flex min-w-0 items-center gap-3">
-                    <div className="grid min-w-0 flex-1 gap-0.5">
-                      <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
-                        <OptionIcon className="size-3.5 shrink-0 text-muted-foreground" />
-                        {option.label}
-                      </span>
-                      <span className="text-muted-foreground text-xs leading-4">
-                        {option.description}
-                      </span>
+            {runtimeModeOptions
+              .filter((mode) =>
+                props.meerkatAccessModes
+                  ? (mode === "read-only" && props.readOnlyAvailable) ||
+                    mode === "approval-required" ||
+                    mode === "full-access"
+                  : mode !== "read-only",
+              )
+              .map((mode) => {
+                const option = runtimeModeConfig[mode];
+                const OptionIcon = option.icon;
+                return (
+                  <SelectItem
+                    key={mode}
+                    value={mode}
+                    disabled={props.accessModeLocked && mode !== props.runtimeMode}
+                    hideIndicator
+                    className="min-w-64"
+                  >
+                    <div className="flex min-w-0 items-center gap-3">
+                      <div className="grid min-w-0 flex-1 gap-0.5">
+                        <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
+                          <OptionIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                          {option.label}
+                        </span>
+                        <span className="text-muted-foreground text-xs leading-4">
+                          {props.accessModeLocked && mode !== props.runtimeMode
+                            ? "Start a new conversation to change access."
+                            : runtimeModeDescription(mode, props.meerkatAccessModes)}
+                        </span>
+                      </div>
                     </div>
-                  </div>
-                </SelectItem>
-              );
-            })}
+                  </SelectItem>
+                );
+              })}
           </SelectPopup>
         </Select>
-        <TooltipPopup side="top">{runtimeModeOption.description}</TooltipPopup>
+        <TooltipPopup side="top">
+          {runtimeModeDescription(props.runtimeMode, props.meerkatAccessModes)}
+        </TooltipPopup>
       </Tooltip>
 
       {interactionModeToggle}
@@ -1302,6 +1344,7 @@ export interface ChatComposerHandle {
     selectedModelSelection: ModelSelection;
     multipleModelSelections: ReadonlyArray<ModelSelection> | null;
     providerAvailable: boolean;
+    modelSendBlock: ComposerModelSendBlock | null;
     selectedProvider: ProviderDriverKind;
     selectedModel: string;
     selectedProviderModels: ReadonlyArray<ServerProvider["models"][number]>;
@@ -1398,6 +1441,8 @@ export interface ChatComposerProps {
   providerStatuses: ServerProvider[];
   /** False until the environment's server config has arrived at least once. */
   providerCatalogKnown: boolean;
+  /** Project-home account guidance remains beside the authoritative composer block. */
+  projectHomeAccountSetup?: ProjectHomeAccountSetup | null;
   activeProjectDefaultModelSelection: ModelSelection | null | undefined;
   activeThreadModelSelection: ModelSelection | null | undefined;
 
@@ -1483,6 +1528,7 @@ export interface ChatComposerProps {
 // --------------------------------------------------------------------------
 
 export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps) {
+  const paneActive = useConversationPaneActive();
   const {
     composerDraftTarget,
     environmentId,
@@ -1527,6 +1573,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     lockedProvider,
     providerStatuses,
     providerCatalogKnown,
+    projectHomeAccountSetup,
     activeProjectDefaultModelSelection,
     activeThreadModelSelection,
     activeContextWindow,
@@ -1579,6 +1626,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onFileOpen,
   } = props;
   const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const restoreReview = useRestoreReview(environmentId);
   const composerDraftTargetKey = composerTargetKey(composerDraftTarget);
   // Opening a running thread resyncs for a few frames. Show the sync row, and
   // hide the tasks row for it, only when the sync lasts. Logic that depends on
@@ -1862,12 +1910,20 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // Instance-aware projection of the wire provider list. One entry per
   // configured instance (default built-in + any custom `providerInstances.*`),
   // sorted default-first per driver kind for a stable picker order.
+  const workspaceReadiness = useProviderWorkspaceReadiness({
+    environmentId,
+    cwd: gitCwd,
+    providers: providerStatuses,
+  });
   const providerInstanceEntries = useMemo<ReadonlyArray<ProviderInstanceEntry>>(
     () =>
       sortProviderInstanceEntries(
-        applyProviderInstanceSettings(deriveProviderInstanceEntries(providerStatuses), settings),
+        applyProviderInstanceSettings(
+          deriveProviderInstanceEntries(workspaceReadiness.providers),
+          settings,
+        ),
       ),
-    [providerStatuses, settings],
+    [workspaceReadiness.providers, settings],
   );
   const selectedProviderByThreadId = composerDraft.activeProvider ?? null;
   const {
@@ -1922,27 +1978,50 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const selectedProvider: ProviderDriverKind =
     selectedProviderEntry?.driverKind ?? requestedDriverKind;
 
-  const { modelOptions: composerModelOptions, selectedModel } = useEffectiveComposerModelState({
-    threadRef: composerDraftTarget,
-    providers: providerStatuses,
-    selectedProvider,
-    selectedInstanceId,
-    threadModelSelection: activeThreadModelSelection,
-    projectModelSelection: activeProjectDefaultModelSelection,
-    settings,
-  });
-  const providerSendBlockReason = getAntigravitySendBlockReason(
-    selectedProviderEntry?.snapshot,
-    selectedModel,
-  );
-  const sendDisabledReason =
-    externalSendDisabledReason ??
-    (multipleModelSelections?.length === 0 ? "Select at least one model." : null) ??
-    (activePendingProgress
-      ? attachmentBlockReason
-      : (attachmentBlockReason ??
-        (multipleModelSelections === null ? providerSendBlockReason : null)));
-  const isSendDisabled = sendDisabledReason !== null;
+  const { modelOptions: composerModelOptions, selectedModel: effectiveSelectedModel } =
+    useEffectiveComposerModelState({
+      threadRef: composerDraftTarget,
+      providers: workspaceReadiness.providers,
+      selectedProvider,
+      selectedInstanceId,
+      threadModelSelection: activeThreadModelSelection,
+      projectModelSelection: activeProjectDefaultModelSelection,
+      settings,
+    });
+  // An empty refreshed catalog must not replace an active native selection
+  // with the driver's static fallback. Explicit draft changes still reach
+  // resolveMeerkatTurnDispatch, which rejects model changes during steering.
+  const nativeCatalogFallbackSelection =
+    selectedProvider === "meerkat" &&
+    phase === "running" &&
+    selectedProviderEntry?.models.length === 0 &&
+    activeThreadModelSelection?.instanceId === selectedInstanceId
+      ? (composerDraft.modelSelectionByProvider?.[selectedInstanceId] ?? activeThreadModelSelection)
+      : null;
+  const selectedModel = nativeCatalogFallbackSelection?.model ?? effectiveSelectedModel;
+  const includesMeerkat =
+    multipleModelSelections === null
+      ? selectedProvider === "meerkat"
+      : multipleModelSelections.some((selection) =>
+          providerInstanceEntries.some(
+            (entry) => entry.instanceId === selection.instanceId && entry.driverKind === "meerkat",
+          ),
+        );
+  const allModelsMeerkat =
+    includesMeerkat &&
+    (multipleModelSelections === null ||
+      multipleModelSelections.every((selection) =>
+        providerInstanceEntries.some(
+          (entry) => entry.instanceId === selection.instanceId && entry.driverKind === "meerkat",
+        ),
+      ));
+  const providerSendBlockReason =
+    getMeerkatSendBlockReason({
+      provider: includesMeerkat ? ProviderDriverKind.make("meerkat") : selectedProvider,
+      runtimeMode,
+      images: composerImages,
+      fileAttachmentCount: composerFiles.length,
+    }) ?? getAntigravitySendBlockReason(selectedProviderEntry?.snapshot, selectedModel);
   const selectedProviderStatus = useMemo(
     () => selectedProviderEntry?.snapshot ?? null,
     [selectedProviderEntry],
@@ -1973,6 +2052,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   }, [gitCwd, selectedProviderStatus]);
   useEffect(() => {
     if (!gitCwd || !selectedProviderEntry) return;
+    if (
+      selectedProviderEntry.driverKind === "meerkat" &&
+      selectedProviderStatus?.supportsWorkspaceReadiness === true
+    )
+      return;
     const key = `${environmentId}:${selectedProviderEntry.instanceId}:${gitCwd}`;
     const hasWorkspaceSnapshot = selectedProviderStatus?.workspaceSnapshots?.some(
       (snapshot) => snapshot.cwd === gitCwd,
@@ -2007,7 +2091,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         retryLater();
       }
     }, retryLater);
-  }, [environmentId, gitCwd, prompt, refreshProviders, selectedProviderEntry]);
+  }, [
+    environmentId,
+    gitCwd,
+    prompt,
+    refreshProviders,
+    selectedProviderEntry,
+    selectedProviderStatus,
+  ]);
   const selectedProviderModels = useMemo<ReadonlyArray<ServerProvider["models"][number]>>(
     () => selectedProviderEntry?.models ?? [],
     [selectedProviderEntry],
@@ -2025,11 +2116,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         models: selectedProviderModels,
         promptInjectionState: composerPromptInjectionState,
         modelOptions: composerModelOptions?.[selectedInstanceId],
+        preserveNativeTurnOptions: selectedProvider === "meerkat" && phase === "running",
         planModeEnabled: settings.planModeEnabled,
       }),
     [
       composerModelOptions,
       composerPromptInjectionState,
+      phase,
       selectedInstanceId,
       selectedModel,
       selectedProvider,
@@ -2039,9 +2132,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   );
 
   const selectedPromptEffort = composerProviderState.promptEffort;
-  const selectedModelOptionsForDispatch = composerProviderState.modelOptionsForDispatch;
+  const selectedModelOptionsForDispatch = nativeCatalogFallbackSelection
+    ? nativeCatalogFallbackSelection.options
+    : composerProviderState.modelOptionsForDispatch;
   const { enabled: planModeUiEnabled, interactionMode } = resolveComposerInteractionMode({
-    planModeEnabled: settings.planModeEnabled,
+    planModeEnabled: settings.planModeEnabled && !includesMeerkat,
     provider: selectedProviderStatus,
     interactionMode: requestedInteractionMode,
   });
@@ -2071,6 +2166,55 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     return out;
   }, [providerInstanceEntries, selectedInstanceId, selectedModelForPicker, settings]);
+  const modelSendBlock = useMemo(
+    () =>
+      getComposerModelSendBlock({
+        entries: providerInstanceEntries,
+        selections: multipleModelSelections ?? [selectedModelSelection],
+        modelOptionsByInstance,
+        catalogKnown: providerCatalogKnown,
+        pendingWorkspaceInstanceIds: workspaceReadiness.pendingInstanceIds,
+        restoreReview,
+        nativeInstanceIds: new Set(
+          providerInstanceEntries
+            .filter((entry) => entry.driverKind === "meerkat")
+            .map((entry) => entry.instanceId),
+        ),
+        continuesActiveTurn:
+          activePendingProgress !== null || (selectedProvider === "meerkat" && phase === "running"),
+      }),
+    [
+      activePendingProgress,
+      modelOptionsByInstance,
+      multipleModelSelections,
+      phase,
+      providerCatalogKnown,
+      workspaceReadiness.pendingInstanceIds,
+      restoreReview,
+      providerInstanceEntries,
+      selectedModelSelection,
+      selectedProvider,
+    ],
+  );
+  const sendDisabledReason =
+    externalSendDisabledReason ??
+    modelSendBlock?.reason ??
+    (runtimeMode === "read-only" && !allModelsMeerkat
+      ? "Read-only access requires a Meerkat model for every selected conversation."
+      : null) ??
+    (multipleModelSelections?.length === 0 ? "Select at least one model." : null) ??
+    (activePendingProgress
+      ? attachmentBlockReason
+      : (attachmentBlockReason ??
+        (multipleModelSelections === null || includesMeerkat ? providerSendBlockReason : null)));
+  const isSendDisabled = sendDisabledReason !== null;
+  const primaryActionAvailability = resolveComposerPrimaryActionAvailability({
+    environmentUnavailable: environmentUnavailable !== null,
+    noProviderAvailable,
+    providerCatalogPending,
+    projectSelectionRequired,
+    sendDisabledReason,
+  });
   const selectedModelForPickerWithCustomFallback = useMemo(() => {
     const currentOptions = modelOptionsByInstance.get(selectedInstanceId) ?? [];
     return currentOptions.some((option) => option.slug === selectedModelForPicker)
@@ -2108,6 +2252,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     resetTrigger: resetComposerTrigger,
   } = useComposerTriggerState(() => detectComposerTrigger(prompt, prompt.length));
   const [composerHighlightedItemId, setComposerHighlightedItemId] = useState<string | null>(null);
+  const composerSuggestionListId = useId();
   // Active ArrowUp recall. Cleared on edit and on thread switch.
   const promptHistoryPositionRef = useRef<ComposerPromptHistoryPosition | null>(null);
   const [composerHighlightedSearchKey, setComposerHighlightedSearchKey] = useState<string | null>(
@@ -2116,6 +2261,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const [isDragOverComposer, setIsDragOverComposer] = useState(false);
   const [isComposerFooterCompact, setIsComposerFooterCompact] = useState(false);
   const [isComposerPrimaryActionsCompact, setIsComposerPrimaryActionsCompact] = useState(false);
+  const composerCompactnessRef = useRef({ footerCompact: false, primaryActionsCompact: false });
   const [isComposerModelPickerOpen, setIsComposerModelPickerOpen] = useState(false);
   const isMobileViewport = useMediaQuery("max-sm");
   const {
@@ -2204,6 +2350,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       pasteAsTextShortcutUntilRef.current = 0;
     };
     const onDesktopPasteAsText = () => {
+      if (!paneActive() || !composerFormRef.current?.getClientRects().length) return;
       const activeElement = document.activeElement;
       const blocksPasteToFocus =
         activeElement instanceof Element &&
@@ -2225,7 +2372,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       window.removeEventListener("keydown", onKeyDown, true);
       window.removeEventListener("blur", onBlur);
     };
-  }, []);
+  }, [paneActive]);
 
   // ------------------------------------------------------------------
   // Derived: composer send state
@@ -2399,11 +2546,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       }));
       const query = composerTrigger.query.trim().toLowerCase();
       const skillItems = slashMenuSkills.map((skill) => ({
-        id: `skill:${selectedProvider}:${skill.name}`,
+        id: `skill:${selectedProvider}:${skill.path}`,
         type: "skill" as const,
         provider: selectedProvider,
         skill,
-        label: `/skill:${skill.name}`,
+        label: `/skill:${skill.path.startsWith("meerkat-skill://") ? formatProviderSkillDisplayName(skill) : skill.name}`,
         description:
           skill.shortDescription ??
           skill.description ??
@@ -2420,7 +2567,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     if (composerTrigger.kind === "skill") {
       return searchProviderSkills(selectedProviderSkills, composerTrigger.query).map((skill) => ({
-        id: `skill:${selectedProvider}:${skill.name}`,
+        id: `skill:${selectedProvider}:${skill.path}`,
         type: "skill" as const,
         provider: selectedProvider,
         skill,
@@ -2539,7 +2686,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const showCollapsedMobilePromptRow =
     isComposerCollapsedMobile && !isComposerApprovalState && pendingUserInputs.length === 0;
   const showComposerAttachAction =
-    fileStagingLimit !== null &&
+    (includesMeerkat || fileStagingLimit !== null) &&
     (!activePendingProgress ||
       (supportsQuestionAttachments &&
         activePendingProgress.activeQuestion?.allowCustomAnswer !== false));
@@ -2852,6 +2999,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           description: `${reason} Remove the chip or attach the file again.`,
         });
       };
+      if (includesMeerkat && record.kind === "file") {
+        fail("Meerkat supports image attachments only.");
+        return;
+      }
       const sourceConnection = readPreparedConnection(sourceEnvironmentId);
       if (!sourceConnection) {
         fail("The environment it came from is not connected.");
@@ -2909,7 +3060,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           fail("The draft rejected this attachment (duplicate or attachment limit reached).");
       }
     },
-    [addComposerFilesToDraft, addComposerImage, attachmentTargetKey, createAssetUrl],
+    [
+      addComposerFilesToDraft,
+      addComposerImage,
+      attachmentTargetKey,
+      createAssetUrl,
+      includesMeerkat,
+    ],
   );
   const importAttachmentRecord = useCallback(
     async (
@@ -3190,9 +3347,13 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   useLayoutEffect(() => {
     const composerForm = composerFormRef.current;
     if (!composerForm) return;
-    const measureComposerFormWidth = () => composerForm.clientWidth;
-    const measureFooterCompactness = () => {
-      const composerFormWidth = measureComposerFormWidth();
+    let lastMeasuredWidth: number | undefined;
+    const updateFooterCompactness = () => {
+      const composerFormWidth = composerForm.clientWidth;
+      // Typing also resizes the form's height. Do not enqueue React updates
+      // for those notifications, or for widths within the same layout band.
+      if (composerFormWidth === lastMeasuredWidth) return;
+      lastMeasuredWidth = composerFormWidth;
       const footerCompact = shouldUseCompactComposerFooter(composerFormWidth, {
         hasWideActions: composerFooterHasWideActions,
       });
@@ -3201,27 +3362,19 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         shouldUseCompactComposerPrimaryActions(composerFormWidth, {
           hasWideActions: composerFooterHasWideActions,
         });
-      return {
-        primaryActionsCompact,
-        footerCompact,
-      };
+      const previous = composerCompactnessRef.current;
+      composerCompactnessRef.current = { footerCompact, primaryActionsCompact };
+      if (previous.primaryActionsCompact !== primaryActionsCompact) {
+        setIsComposerPrimaryActionsCompact(primaryActionsCompact);
+      }
+      if (previous.footerCompact !== footerCompact) {
+        setIsComposerFooterCompact(footerCompact);
+      }
     };
 
-    const initialCompactness = measureFooterCompactness();
-    setIsComposerPrimaryActionsCompact(initialCompactness.primaryActionsCompact);
-    setIsComposerFooterCompact(initialCompactness.footerCompact);
+    updateFooterCompactness();
     if (typeof ResizeObserver === "undefined") return;
-    const observer = new ResizeObserver(() => {
-      const nextCompactness = measureFooterCompactness();
-      setIsComposerPrimaryActionsCompact((previous) =>
-        previous === nextCompactness.primaryActionsCompact
-          ? previous
-          : nextCompactness.primaryActionsCompact,
-      );
-      setIsComposerFooterCompact((previous) =>
-        previous === nextCompactness.footerCompact ? previous : nextCompactness.footerCompact,
-      );
-    });
+    const observer = new ResizeObserver(updateFooterCompactness);
 
     observer.observe(composerForm);
     return () => {
@@ -3657,7 +3810,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         return;
       }
       if (item.type === "skill") {
-        const replacement = `$${item.skill.name} `;
+        const replacement = `${serializeProviderSkillSelection(item.skill)} `;
         const replacementRangeEnd = extendReplacementRangeForTrailingSpace(
           snapshot.value,
           trigger.rangeEnd,
@@ -3786,8 +3939,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   const submitComposer = useCallback(
     (event?: { preventDefault: () => void }, intent: ComposerSubmissionIntent = "foreground") => {
-      if (noProviderAvailable || isSendDisabled) {
+      if ((!activePendingProgress && noProviderAvailable) || isSendDisabled) {
         event?.preventDefault();
+        if (modelSendBlock?.action?.kind === "settings") {
+          onOpenProviderSetup(modelSendBlock.action.instanceId);
+        } else if (modelSendBlock?.action?.kind === "models") {
+          setIsComposerScrollCollapsed(false);
+          setIsComposerFocused(true);
+          setIsComposerModelPickerOpen(true);
+        }
         return;
       }
       // A send while a pasted image is still compressing would strand that
@@ -3842,19 +4002,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       blurMobileComposerAfterSend,
       isSendDisabled,
       noProviderAvailable,
+      modelSendBlock,
+      onOpenProviderSetup,
+      setIsComposerScrollCollapsed,
+      setIsComposerFocused,
       onSend,
       promptRef,
       shouldBlurMobileComposerOnSubmit,
     ],
   );
   const submitCitationAndSend = useCallback(() => {
-    const intent = composerSubmissionIntentForEnter({
-      isMobileViewport,
-      shiftKey: false,
-      modifierKey: true,
-      isDraftThread: routeKind === "draft",
-    });
-    submitComposer(undefined, intent ?? "foreground");
+    const intent = !isMobileViewport && routeKind === "draft" ? "background" : "foreground";
+    submitComposer(undefined, intent);
   }, [isMobileViewport, routeKind, submitComposer]);
   const compactThreadContext = useCallback(() => {
     if (
@@ -4724,6 +4883,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     isDragOverComposer ||
     isPreparingWorktree ||
     showProviderUnavailable ||
+    modelSendBlock !== null ||
     projectSelectionRequired ||
     environmentUnavailable !== null ||
     composerSubmissionError !== null ||
@@ -4862,6 +5022,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     if (!isComposerScrollCollapsed) return;
     let frame: number | null = null;
     const onWindowFocus = () => {
+      if (!paneActive() || !composerFormRef.current?.getClientRects().length) return;
       windowRefocusInFlightRef.current = true;
       if (frame !== null) window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(() => {
@@ -4875,7 +5036,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (frame !== null) window.cancelAnimationFrame(frame);
       windowRefocusInFlightRef.current = false;
     };
-  }, [isComposerScrollCollapsed]);
+  }, [isComposerScrollCollapsed, paneActive]);
 
   useEffect(() => {
     if (!canTrackComposerScrollGesture) return;
@@ -4979,6 +5140,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       content: (
         <ComposerFooterModeControls
           showInteractionModeToggle={planModeUiEnabled}
+          meerkatAccessModes={includesMeerkat}
+          readOnlyAvailable={allModelsMeerkat}
+          accessModeLocked={lockedProvider === "meerkat"}
           interactionMode={interactionMode}
           runtimeMode={runtimeMode}
           size={composerControlsInStrip ? "xs" : "sm"}
@@ -5072,7 +5236,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         size={composerControlsInStrip ? "xs" : "sm"}
         triggerClassName={
           composerControlsInStrip
-            ? "min-w-13 shrink text-xs! @max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:w-0 @max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:flex-none"
+            ? selectedProvider === "meerkat"
+              ? "min-w-13 max-w-40 shrink text-xs!"
+              : "min-w-13 shrink text-xs! @max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:w-0 @max-[640px]/composer-surface:[&_[data-chat-provider-model-picker-label]]:flex-none"
             : "-ms-2.5 min-w-13"
         }
         terminalOpen={terminalOpen}
@@ -5135,6 +5301,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           <CompactComposerControlsMenu
             interactionMode={interactionMode}
             runtimeMode={runtimeMode}
+            meerkatAccessModes={includesMeerkat}
+            readOnlyAvailable={allModelsMeerkat}
+            accessModeLocked={lockedProvider === "meerkat"}
             size={composerControlsInStrip ? "xs" : "sm"}
             hidden={composerControlsHidden || hiddenRestingBlockIds.length === 0}
             showInteractionModeToggle={planModeUiEnabled && hiddenRestingBlockIds.includes("mode")}
@@ -5209,6 +5378,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
 
   useEffect(() => {
     const handler = (event: globalThis.KeyboardEvent) => {
+      if (!paneActive() || !composerFormRef.current?.getClientRects().length) return;
       const command = resolveShortcutCommand(event, keybindings, {
         context: {
           terminalFocus: getTerminalFocusOwner() !== null,
@@ -5237,6 +5407,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     return () => window.removeEventListener("keydown", handler, true);
   }, [
     activePendingProgress,
+    paneActive,
     isComposerApprovalState,
     isComposerModelPickerOpen,
     keybindings,
@@ -5325,9 +5496,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     const replacedReattachMarkerIds = new Set<string>();
     const acceptedImages: File[] = [];
     const acceptedFiles: ComposerFileAttachment[] = [];
+    const attachmentLimit = includesMeerkat
+      ? Math.min(MEERKAT_MAX_IMAGES, PROVIDER_SEND_TURN_MAX_ATTACHMENTS)
+      : PROVIDER_SEND_TURN_MAX_ATTACHMENTS;
     let error: string | null = null;
     for (const file of files) {
       const attachmentKind = classifyComposerAttachmentFile(file);
+      if (includesMeerkat && attachmentKind === "file") {
+        error =
+          "Meerkat supports image attachments only. Paste text into the message or attach an image.";
+        continue;
+      }
       const fileMimeType =
         attachmentKind === "file"
           ? (videoMimeType({ name: file.name, mimeType: file.type }) ??
@@ -5348,8 +5527,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       if (matchingReattachMarker) {
         replacedReattachMarkerIds.add(matchingReattachMarker.id);
       }
-      if (!matchingReattachMarker && reservedCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
-        error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`;
+      if (!matchingReattachMarker && reservedCount >= attachmentLimit) {
+        error = `You can attach up to ${attachmentLimit} ${includesMeerkat ? "images" : "files"} per message.`;
         // Keep scanning: a later file in this batch can still replace a
         // needs-reattach marker without needing a free slot.
         continue;
@@ -5432,7 +5611,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         // refused; files already within it pass through byte-for-byte.
         const compressed = await prepareImageForAttachment(
           file,
-          PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+          includesMeerkat
+            ? Math.min(MEERKAT_MAX_IMAGE_BYTES, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES)
+            : PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
         );
         if (!compressed.ok) {
           compressionError =
@@ -5577,6 +5758,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       Boolean(activeThreadId) &&
       !isRevertingCheckpointRef.current &&
       questionCanAttach &&
+      !includesMeerkat &&
       hasAttachmentSlot;
     if (!canStageAttachment || fileStagingLimit === null) {
       if (!wouldExceedInputLimit) {
@@ -6029,8 +6211,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               )
             : null,
         providerAvailable:
-          multipleModelSelections !== null ||
-          (!noProviderAvailable && providerSendBlockReason === null),
+          modelSendBlock === null &&
+          (multipleModelSelections !== null ||
+            (!noProviderAvailable && providerSendBlockReason === null)),
+        modelSendBlock,
         selectedProvider,
         selectedModel,
         selectedProviderModels,
@@ -6086,6 +6270,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setMultipleModelSelections,
       routeKind,
       noProviderAvailable,
+      modelSendBlock,
       providerSendBlockReason,
       selectedPromptEffort,
       selectedProvider,
@@ -6099,6 +6284,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       setIsComposerScrollCollapsed,
     ],
   );
+
+  const retainedProviderMessage = projectHomeAccountSetupMessage({
+    accountSetup: projectHomeAccountSetup,
+    environmentId,
+    cwd: gitCwd,
+    modelSendBlock,
+  });
+  const additionalProviderMessage =
+    retainedProviderMessage?.trim() &&
+    retainedProviderMessage.trim() !== modelSendBlock?.reason.trim()
+      ? retainedProviderMessage
+      : null;
 
   // Render
   // ------------------------------------------------------------------
@@ -6300,12 +6497,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               showPlanFollowUpPrompt={false}
                               promptHasText={false}
                               isSendBusy={isSendBusy}
-                              sendDisabledReason={sendDisabledReason}
+                              sendDisabledReason={primaryActionAvailability.sendDisabledReason}
                               isConnecting={isConnecting}
                               isEnvironmentUnavailable={
-                                environmentUnavailable !== null ||
-                                noProviderAvailable ||
-                                projectSelectionRequired
+                                primaryActionAvailability.isEnvironmentUnavailable
                               }
                               isPreparingWorktree={false}
                               hasSendableContent={false}
@@ -6367,7 +6562,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             data-chat-composer-surface="true"
             data-chat-composer-mobile-collapsed={isComposerCollapsedMobile ? "true" : "false"}
             className={cn(
-              "rounded-3xl transition-[background-color] duration-200",
+              "rounded-2xl transition-[background-color] duration-200",
               isDragOverComposer ? "bg-accent/45 ring-1 ring-primary/70" : null,
               projectSelectionRequired ? "opacity-75" : null,
               composerProviderState.composerSurfaceClassName,
@@ -6431,6 +6626,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               className={cn(
                 "relative px-3 pb-2 sm:px-4",
                 "pt-3.5 sm:pt-4",
+                !isComposerResting &&
+                  !isComposerApprovalState &&
+                  !activePendingProgress &&
+                  "sm:pt-3",
                 isComposerApprovalState && "pb-3 sm:pb-4",
                 isComposerCollapsedMobile && "hidden",
                 isComposerResting && "py-2 sm:py-2",
@@ -6457,6 +6656,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
               {composerMenuOpen && !isComposerApprovalState && (
                 <ComposerCommandMenuLayer anchor={composerMenuAnchor}>
                   <ComposerCommandMenu
+                    listId={composerSuggestionListId}
                     items={composerMenuItems}
                     resolvedTheme={resolvedTheme}
                     isLoading={isComposerMenuLoading}
@@ -6845,6 +7045,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 ) : null}
                 <ComposerContextActionsContext value={composerContextActions}>
                   <ComposerPromptEditor
+                    ariaLabel={activePendingProgress ? "Your answer" : "Message"}
+                    suggestionList={
+                      composerMenuOpen && !isComposerApprovalState && activeComposerMenuItem
+                        ? {
+                            id: composerSuggestionListId,
+                            activeOptionId: composerCommandOptionId(
+                              composerSuggestionListId,
+                              activeComposerMenuItem.id,
+                            ),
+                          }
+                        : undefined
+                    }
                     editorRef={composerEditorRef}
                     richTextEnabled={settings.composerRichTextEnabled}
                     value={
@@ -6862,6 +7074,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     containerClassName={cn(isComposerResting && "min-w-0 flex-1")}
                     className={cn(
                       showMobilePendingAnswerActions && "max-sm:pb-12",
+                      !isComposerResting &&
+                        !isComposerApprovalState &&
+                        !activePendingProgress &&
+                        "sm:min-h-20",
                       isComposerResting &&
                         "my-0 max-h-8 min-h-8 overflow-hidden py-0 whitespace-pre! leading-8",
                       isComposerApprovalState && "min-h-10",
@@ -6917,13 +7133,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       showPlanFollowUpPrompt={false}
                       promptHasText={false}
                       isSendBusy={isSendBusy}
-                      sendDisabledReason={sendDisabledReason}
+                      sendDisabledReason={primaryActionAvailability.sendDisabledReason}
                       isConnecting={isConnecting}
-                      isEnvironmentUnavailable={
-                        environmentUnavailable !== null ||
-                        noProviderAvailable ||
-                        projectSelectionRequired
-                      }
+                      isEnvironmentUnavailable={primaryActionAvailability.isEnvironmentUnavailable}
                       isPreparingWorktree={false}
                       hasSendableContent={false}
                       preserveComposerFocusOnPointerDown
@@ -6939,6 +7151,70 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
             <ComposerPromptLengthValidation
               message={providerInputSubmissionError ?? composerSubmissionError}
             />
+            {modelSendBlock && !isComposerApprovalState && !activePendingProgress ? (
+              <div
+                role="status"
+                className="mx-3 mb-2 rounded-lg bg-muted/50 px-2.5 py-2 text-xs text-muted-foreground"
+                data-chat-composer-model-readiness="true"
+              >
+                <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+                  <div className="flex min-w-0 flex-1 items-start gap-2">
+                    <span
+                      aria-hidden="true"
+                      className="mt-1.5 size-1.5 shrink-0 rounded-full bg-warning"
+                    />
+                    <p className="whitespace-pre-wrap [overflow-wrap:anywhere]">
+                      {modelSendBlock.reason}
+                    </p>
+                  </div>
+                  {additionalProviderMessage ? (
+                    <Popover>
+                      <PopoverTrigger
+                        render={
+                          <Button
+                            type="button"
+                            variant="ghost-muted"
+                            size="icon-xs"
+                            aria-label="Provider details"
+                          />
+                        }
+                      >
+                        <InfoIcon />
+                      </PopoverTrigger>
+                      <PopoverPopup
+                        aria-label="Provider details"
+                        width="md"
+                        padding="compact"
+                        side="top"
+                        align="end"
+                        {...composerFloatingLayerProps}
+                      >
+                        <p className="text-xs whitespace-pre-wrap [overflow-wrap:anywhere]">
+                          {additionalProviderMessage}
+                        </p>
+                      </PopoverPopup>
+                    </Popover>
+                  ) : null}
+                  {modelSendBlock.action ? (
+                    <Button
+                      variant="outline"
+                      size="compact"
+                      onClick={() => {
+                        if (modelSendBlock.action?.kind === "settings") {
+                          onOpenProviderSetup(modelSendBlock.action.instanceId);
+                        } else {
+                          openModelPicker();
+                        }
+                      }}
+                    >
+                      {modelSendBlock.accountSetup
+                        ? "Connect account"
+                        : modelSendBlock.action.label}
+                    </Button>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
 
             {/* Bottom toolbar */}
             {isComposerCollapsedMobile || isComposerApprovalState ? null : (
@@ -6980,6 +7256,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       <input
                         ref={attachmentInputRef}
                         type="file"
+                        accept={
+                          includesMeerkat
+                            ? "image/png,image/jpeg,image/gif,image/webp,image/heic,image/heif,.heic,.heif"
+                            : undefined
+                        }
                         multiple
                         className="hidden"
                         onChange={(event) => {
@@ -7002,13 +7283,15 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                               size="icon-sm"
                               onPointerDown={(event) => event.preventDefault()}
                               onClick={() => attachmentInputRef.current?.click()}
-                              aria-label="Attach files"
+                              aria-label={includesMeerkat ? "Attach images" : "Attach files"}
                             />
                           }
                         >
                           <PaperclipIcon />
                         </TooltipTrigger>
-                        <TooltipPopup>Attach files</TooltipPopup>
+                        <TooltipPopup>
+                          {includesMeerkat ? "Attach images" : "Attach files"}
+                        </TooltipPopup>
                       </Tooltip>
                     </>
                   ) : null}
@@ -7026,13 +7309,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     }
                     promptHasText={prompt.trim().length > 0}
                     isSendBusy={isSendBusy}
-                    sendDisabledReason={sendDisabledReason}
+                    sendDisabledReason={primaryActionAvailability.sendDisabledReason}
                     isConnecting={isConnecting}
-                    isEnvironmentUnavailable={
-                      environmentUnavailable !== null ||
-                      noProviderAvailable ||
-                      projectSelectionRequired
-                    }
+                    isEnvironmentUnavailable={primaryActionAvailability.isEnvironmentUnavailable}
                     isPreparingWorktree={isPreparingWorktree}
                     hasSendableContent={composerSendState.hasSendableContent}
                     preserveComposerFocusOnPointerDown={isMobileViewport || isComposerResting}

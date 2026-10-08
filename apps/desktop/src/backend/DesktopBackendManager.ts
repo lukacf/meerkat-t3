@@ -25,6 +25,7 @@
 
 import * as Brand from "effect/Brand";
 import * as Cause from "effect/Cause";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -49,6 +50,7 @@ import {
   type DesktopTelemetryControlMessage as DesktopTelemetryControlMessageValue,
 } from "@t3tools/contracts";
 import { waitForHttpReady as waitForHttpReadyShared } from "@t3tools/shared/httpReadiness";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import * as DesktopObservability from "../app/DesktopObservability.ts";
 import * as DesktopTelemetryPublisher from "../telemetry/DesktopTelemetryPublisher.ts";
@@ -65,7 +67,16 @@ const DEFAULT_BACKEND_READINESS_TIMEOUT = Duration.minutes(1);
 const DEFAULT_BACKEND_READINESS_INTERVAL = Duration.millis(100);
 const DEFAULT_BACKEND_READINESS_REQUEST_TIMEOUT = Duration.seconds(1);
 const DEFAULT_BACKEND_TERMINATE_GRACE = Duration.seconds(2);
+// Native providers currently allow 342s for cleanup plus 5s for escalation.
+// Instances close in parallel. This is an emergency ceiling for a stuck
+// backend, not evidence that native cleanup completed successfully.
+const DEFAULT_BACKEND_SHUTDOWN_TIMEOUT = Duration.minutes(10);
+// Covers graceful shutdown, process-group escalation and output draining.
+// A timed-out close retains ownership of the old run until it really ends.
+const DEFAULT_BACKEND_STOP_TIMEOUT = Duration.minutes(11);
 const DEFAULT_BACKEND_OUTPUT_DRAIN_TIMEOUT = Duration.seconds(5);
+const DEFAULT_BACKEND_TELEMETRY_DRAIN_TIMEOUT = Duration.seconds(1);
+const DEFAULT_BACKEND_PARENT_LIFETIME_DRAIN_TIMEOUT = Duration.seconds(1);
 const BACKEND_READINESS_PATH = "/.well-known/t3/environment";
 const { logWarning: logBackendProcessWarning } =
   DesktopObservability.makeComponentLogger("desktop-backend-process");
@@ -213,10 +224,24 @@ export class BackendProcessExitStatusError extends Schema.TaggedError<BackendPro
   }
 }
 
+export class BackendProcessShutdownError extends Schema.TaggedError<BackendProcessShutdownError>()(
+  "BackendProcessShutdownError",
+  {
+    ...backendProcessContextSchema,
+    pid: Schema.Number,
+    detail: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Desktop backend cleanup is incomplete for process ${this.pid}: ${this.detail}`;
+  }
+}
+
 export const BackendProcessError = Schema.Union([
   BackendProcessBootstrapEncodeError,
   BackendProcessSpawnError,
   BackendProcessExitStatusError,
+  BackendProcessShutdownError,
 ]);
 export type BackendProcessError = typeof BackendProcessError.Type;
 
@@ -227,6 +252,9 @@ interface RunBackendProcessOptions extends DesktopBackendStartConfig {
   ) => Effect.Effect<void>;
   readonly readinessTimeout?: Duration.Duration;
   readonly outputDrainTimeout?: Duration.Duration;
+  readonly shutdownTimeout?: Duration.Duration;
+  readonly signalShutdown?: (pid: number) => Effect.Effect<void>;
+  readonly onShutdownFailure?: (error: BackendProcessShutdownError) => Effect.Effect<void>;
   readonly onStarted?: (pid: number) => Effect.Effect<void>;
   readonly onExitObserved?: () => Effect.Effect<void>;
   readonly onReady?: () => Effect.Effect<void>;
@@ -357,15 +385,15 @@ const closeRun = (
     onSome: (fiber) => Fiber.await(fiber).pipe(Effect.asVoid),
   });
   const close = Scope.close(run.scope, Exit.void).pipe(Effect.andThen(waitForFiber));
-  const timeout = options?.timeout;
-
-  if (!timeout) {
-    return close.pipe(Effect.as(true));
-  }
+  const timeout = options?.timeout ?? DEFAULT_BACKEND_STOP_TIMEOUT;
 
   return Effect.forkIn(close, parentScope).pipe(
     Effect.flatMap((closeFiber) =>
-      Fiber.await(closeFiber).pipe(Effect.timeoutOption(timeout), Effect.map(Option.isSome)),
+      Fiber.await(closeFiber).pipe(
+        Effect.interruptible,
+        Effect.timeoutOption(timeout),
+        Effect.map(Option.isSome),
+      ),
     ),
   );
 };
@@ -441,7 +469,13 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
   options: RunBackendProcessOptions,
 ): Effect.fn.Return<BackendProcessExit, BackendProcessError, BackendProcessRunRequirements> {
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  const bootstrapJson = yield* encodeBootstrapJson(options.bootstrap).pipe(
+  const platform = yield* HostProcessPlatform;
+  const bootstrap = { ...options.bootstrap };
+  if (options.bootstrapDelivery === "stdin") {
+    // WSL transports only stdin, so it cannot uphold an extra-pipe contract.
+    delete bootstrap.desktopParentLifetimeFd;
+  }
+  const bootstrapJson = yield* encodeBootstrapJson(bootstrap).pipe(
     Effect.mapError(
       (cause) =>
         new BackendProcessBootstrapEncodeError({
@@ -464,12 +498,18 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     if (options.bootstrap.desktopTelemetryFd !== undefined) {
       additionalFds[`fd${options.bootstrap.desktopTelemetryFd}`] = {
         type: "input",
-        stream: options.desktopTelemetryStream,
       };
     }
     if (options.bootstrap.desktopTelemetryControlFd !== undefined) {
       additionalFds[`fd${options.bootstrap.desktopTelemetryControlFd}`] = {
         type: "output",
+      };
+    }
+    if (bootstrap.desktopParentLifetimeFd !== undefined) {
+      // A fresh spawn pipe keeps the writer in the GUI; never inherit a
+      // numeric parent descriptor into this backend or later descendants.
+      additionalFds[`fd${bootstrap.desktopParentLifetimeFd}`] = {
+        type: "input",
       };
     }
   }
@@ -503,6 +543,149 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     ),
   );
   const outputFibers: Array<Fiber.Fiber<void, never>> = [];
+  let shutdownFailure: BackendProcessShutdownError | undefined;
+
+  // The spawner's release signals the entire process group. Let the backend
+  // close its provider scopes first: a group SIGTERM races the native client's
+  // EOF/receipt shutdown protocol. Register after spawn so this runs before
+  // the spawner's release, which remains the bounded escalation path.
+  // Windows/WSL do not expose the POSIX leader-only SIGTERM contract.
+  if (options.signalShutdown !== undefined || platform !== "win32") {
+    yield* Effect.addFinalizer(() =>
+      Effect.gen(function* () {
+        if (!(yield* handle.isRunning.pipe(Effect.catchCause(() => Effect.succeed(false))))) {
+          return;
+        }
+        const pid = Number(handle.pid);
+        const recordFailure = (detail: string) => {
+          shutdownFailure = new BackendProcessShutdownError({
+            executablePath: options.executablePath,
+            entryPath: options.entryPath,
+            cwd: options.cwd,
+            httpBaseUrl: options.httpBaseUrl,
+            pid,
+            detail,
+          });
+          return logBackendProcessWarning(shutdownFailure.message).pipe(
+            Effect.andThen(options.onShutdownFailure?.(shutdownFailure) ?? Effect.void),
+          );
+        };
+        const signal =
+          options.signalShutdown ??
+          ((ownedPid: number) =>
+            Effect.sync(() => {
+              try {
+                process.kill(ownedPid, "SIGTERM");
+              } catch (error) {
+                // The child can exit between isRunning and signaling it.
+                if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+              }
+            }));
+        const signaled = yield* signal(pid).pipe(Effect.exit);
+        if (Exit.isFailure(signaled)) {
+          yield* recordFailure(
+            `could not request graceful shutdown: ${Cause.pretty(signaled.cause)}`,
+          );
+          return;
+        }
+        const timeout = options.shutdownTimeout ?? DEFAULT_BACKEND_SHUTDOWN_TIMEOUT;
+        const exited = yield* handle.exitCode.pipe(
+          Effect.exit,
+          // Scope finalizers are uninterruptible. Only this wait must be
+          // interruptible so the timeout can release the group finalizer.
+          Effect.interruptible,
+          Effect.timeoutOption(timeout),
+        );
+        if (Option.isNone(exited)) {
+          yield* recordFailure(
+            `no exit after ${Duration.toMillis(timeout)}ms; escalating to process-group termination`,
+          );
+        }
+      }),
+    );
+  }
+
+  if (options.bootstrapDelivery === "fd3" && options.bootstrap.desktopTelemetryFd !== undefined) {
+    const fd = options.bootstrap.desktopTelemetryFd;
+    const endTelemetry = yield* Deferred.make<void>();
+    // Own this writer separately from the process scope. Normal stream
+    // completion sends EOF; interrupting the spawner's writer leaves the
+    // descriptor open while the backend is trying to shut down.
+    const writer = yield* options.desktopTelemetryStream.pipe(
+      Stream.interruptWhen(Deferred.await(endTelemetry)),
+      Stream.run(handle.getInputFd(fd)),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : logBackendProcessWarning("desktop telemetry input stopped", {
+              fd,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+      Effect.forkChild,
+    );
+    // Registered after the leader shutdown finalizer so EOF happens first.
+    // A blocked write must not prevent SIGTERM and the owned shutdown budget.
+    yield* Effect.addFinalizer(() =>
+      Effect.gen(function* () {
+        yield* Deferred.succeed(endTelemetry, undefined);
+        const drained = yield* Fiber.await(writer).pipe(
+          Effect.interruptible,
+          Effect.timeoutOption(DEFAULT_BACKEND_TELEMETRY_DRAIN_TIMEOUT),
+        );
+        if (Option.isNone(drained)) {
+          yield* logBackendProcessWarning(
+            "desktop telemetry input did not finish before shutdown",
+            {
+              fd,
+              timeoutMs: Duration.toMillis(DEFAULT_BACKEND_TELEMETRY_DRAIN_TIMEOUT),
+            },
+          );
+        }
+      }),
+    );
+  }
+
+  if (bootstrap.desktopParentLifetimeFd !== undefined) {
+    const fd = bootstrap.desktopParentLifetimeFd;
+    const endParentLifetime = yield* Deferred.make<void>();
+    // Bootstrap is one-shot and telemetry can end independently. Hold this
+    // empty writer for the whole backend lifetime. GUI loss closes its OS
+    // endpoint even when no Effect finalizer gets a chance to run.
+    const writer = yield* Stream.never.pipe(
+      Stream.interruptWhen(Deferred.await(endParentLifetime)),
+      Stream.run(handle.getInputFd(fd)),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause)
+          ? Effect.void
+          : logBackendProcessWarning("desktop parent lifetime input stopped", {
+              fd,
+              cause: Cause.pretty(cause),
+            }),
+      ),
+      Effect.forkChild,
+    );
+    // LIFO scope release completes the sink before telemetry and the leader
+    // shutdown wait. Merely interrupting the writer would not send EOF.
+    yield* Effect.addFinalizer(() =>
+      Effect.gen(function* () {
+        yield* Deferred.succeed(endParentLifetime, undefined);
+        const drained = yield* Fiber.await(writer).pipe(
+          Effect.interruptible,
+          Effect.timeoutOption(DEFAULT_BACKEND_PARENT_LIFETIME_DRAIN_TIMEOUT),
+        );
+        if (Option.isNone(drained)) {
+          yield* logBackendProcessWarning(
+            "desktop parent lifetime input did not finish before shutdown",
+            {
+              fd,
+              timeoutMs: Duration.toMillis(DEFAULT_BACKEND_PARENT_LIFETIME_DRAIN_TIMEOUT),
+            },
+          );
+        }
+      }),
+    );
+  }
 
   yield* options.onStarted?.(handle.pid) ?? Effect.void;
   if (
@@ -551,6 +734,8 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
       pid: Number(handle.pid),
     };
     const onOutputFailure = options.onOutputFailure ?? (() => Effect.void);
+    // A requested stop closes the process scope before the child exits. Keep
+    // output readers with the observing fiber so shutdown output can still drain.
     outputFibers.push(
       yield* drainBackendOutput(
         outputContext,
@@ -558,14 +743,14 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
         handle.stdout,
         onOutput,
         onOutputFailure,
-      ).pipe(Effect.forkScoped),
+      ).pipe(Effect.forkChild),
       yield* drainBackendOutput(
         outputContext,
         "stderr",
         handle.stderr,
         onOutput,
         onOutputFailure,
-      ).pipe(Effect.forkScoped),
+      ).pipe(Effect.forkChild),
     );
   }
   // Probe readiness in a loop while the backend process is still alive
@@ -609,6 +794,9 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
     ),
     Effect.exit,
   );
+  if (Exit.isFailure(exit) && Cause.hasInterruptsOnly(exit.cause)) {
+    return yield* Effect.failCause(exit.cause);
+  }
   yield* options.onExitObserved?.() ?? Effect.void;
   yield* Effect.forEach(outputFibers, Fiber.await, {
     concurrency: "unbounded",
@@ -616,7 +804,16 @@ export const runBackendProcess = Effect.fn("runBackendProcess")(function* (
   }).pipe(
     Effect.timeout(options.outputDrainTimeout ?? DEFAULT_BACKEND_OUTPUT_DRAIN_TIMEOUT),
     Effect.ignore,
+    Effect.ensuring(
+      Effect.forEach(outputFibers, Fiber.interrupt, {
+        concurrency: "unbounded",
+        discard: true,
+      }),
+    ),
   );
+  if (shutdownFailure !== undefined) {
+    return yield* Effect.fail(shutdownFailure);
+  }
   if (Exit.isFailure(exit)) {
     return yield* Effect.failCause(exit.cause);
   }
@@ -828,6 +1025,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
 
         const finalizeRun = Effect.fn("desktop.backendInstance.finalizeRun")(function* (
           reason: string,
+          failed: boolean,
         ) {
           yield* mutex.withPermits(1)(
             Effect.gen(function* () {
@@ -884,7 +1082,7 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
               if (isCurrentRun) {
                 yield* desktopTelemetryPublisher.removeControlSource(spec.id);
                 if (Option.isSome(pid)) {
-                  if (exitObserved && !stopRequested) {
+                  if (exitObserved && (!stopRequested || failed)) {
                     yield* backendOutputLog.persistFailure({
                       details: `pid=${pid.value} ${reason}`,
                     });
@@ -965,13 +1163,19 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
             },
           ),
           onOutput: (streamName, chunk) => backendOutputLog.writeOutputChunk(streamName, chunk),
+          onShutdownFailure: (error) =>
+            backendOutputLog.persistFailureSnapshot({ details: error.message }),
         }).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
           Effect.provideService(HttpClient.HttpClient, httpClient),
           Scope.provide(runScope),
           Effect.matchEffect({
-            onFailure: (error) => finalizeRun(error.message),
-            onSuccess: (exit) => finalizeRun(exit.reason),
+            onFailure: (error) => finalizeRun(error.message, true),
+            onSuccess: (exit) =>
+              finalizeRun(
+                exit.reason,
+                Option.exists(exit.code, (code) => code !== 0),
+              ),
           }),
           Effect.ensuring(Scope.close(runScope, Exit.void).pipe(Effect.ignore)),
         );
@@ -1086,6 +1290,9 @@ export const makeBackendInstance = Effect.fn("makeBackendInstance")(function* (
         Effect.gen(function* () {
           const closed = yield* closeRun(run, parentScope, options);
           if (!closed) {
+            const details = `Backend shutdown did not finish within ${Duration.toMillis(options?.timeout ?? DEFAULT_BACKEND_STOP_TIMEOUT)}ms; cleanup remains incomplete. The existing run still owns its resources.`;
+            yield* logInstanceError(details);
+            yield* backendOutputLog.persistFailureSnapshot({ details });
             return;
           }
           const cleanup = yield* mutex.withPermits(1)(

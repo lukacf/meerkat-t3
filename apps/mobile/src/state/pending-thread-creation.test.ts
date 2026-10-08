@@ -13,10 +13,14 @@ import {
   isPendingThreadCreationVisible,
   pendingThreadCreationMessage,
   pendingThreadCreationShell,
+  pendingThreadCreationOutcomesAtom,
+  recordPendingThreadCreationOutcome,
+  retireReleasedPreparedCreationOutcome,
   resolvePendingThreadCreation,
   type PendingThreadCreation,
 } from "./pending-thread-creation";
 import type { QueuedThreadMessage } from "./thread-outbox-model";
+import { appAtomRegistry } from "./atom-registry";
 
 const creation: QueuedThreadMessage = {
   environmentId: EnvironmentId.make("environment-1"),
@@ -49,6 +53,67 @@ describe("resolvePendingThreadCreation", () => {
   const threadKey = `${creation.environmentId}:${creation.threadId}`;
   const pending: PendingThreadCreation = { message: creation, outcome: null };
   const prompt = { id: creation.messageId };
+
+  it("retires only the matching released original so an edited replacement can use the conversation", () => {
+    const failed: PendingThreadCreation = {
+      message: creation,
+      outcome: { kind: "failed", message: creation, reason: "Old setup failure" },
+    };
+    const detail = {
+      messages: [],
+      latestTurn: null,
+      session: null,
+      preparedTurn: { phase: "released", command: { commandId: creation.commandId } },
+    };
+    const outcome = failed.outcome!;
+    recordPendingThreadCreationOutcome(outcome);
+    const pendingFromStore = () => {
+      const stored = appAtomRegistry.get(pendingThreadCreationOutcomesAtom)[threadKey];
+      return stored ? { message: stored.message, outcome: stored } : null;
+    };
+    retireReleasedPreparedCreationOutcome(threadKey, {
+      phase: "blocked",
+      command: { commandId: creation.commandId },
+    });
+    expect(pendingFromStore()).toEqual(failed);
+    retireReleasedPreparedCreationOutcome(threadKey, {
+      phase: "released",
+      command: { commandId: "unrelated" },
+    });
+    expect(pendingFromStore()).toEqual(failed);
+    const previous = resolvePendingThreadCreation({
+      threadKey,
+      pending: pendingFromStore(),
+      previous: failed,
+      detail,
+    });
+    expect(previous).toBeNull();
+    retireReleasedPreparedCreationOutcome(threadKey, detail.preparedTurn);
+    expect(pendingFromStore()).toBeNull();
+    expect(
+      resolvePendingThreadCreation({
+        threadKey,
+        pending: pendingFromStore(),
+        previous,
+        detail: {
+          messages: [{ id: "replacement-message" }],
+          latestTurn: { turnId: "replacement-turn" },
+          session: { status: "running" },
+        },
+      }),
+    ).toBeNull();
+    expect(
+      resolvePendingThreadCreation({
+        threadKey,
+        pending: failed,
+        previous: null,
+        detail: {
+          ...detail,
+          preparedTurn: { phase: "released", command: { commandId: "unrelated" } },
+        },
+      }),
+    ).toBe(failed);
+  });
 
   it("keeps setup visible through the prompt echo and shell cleanup until detail has a turn", () => {
     let previous = resolvePendingThreadCreation({

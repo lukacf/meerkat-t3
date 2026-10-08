@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
+  getMeerkatReasoningSelection,
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
   isClaudeUltrathinkPrompt,
@@ -26,6 +27,7 @@ export type ComposerProviderStateInput = {
   models: ReadonlyArray<ServerProviderModel>;
   promptInjectionState?: ComposerPromptInjectionState;
   modelOptions: ReadonlyArray<ProviderOptionSelection> | null | undefined;
+  preserveNativeTurnOptions?: boolean;
   planModeEnabled: boolean;
 };
 
@@ -105,9 +107,26 @@ export function getComposerProviderState(input: ComposerProviderStateInput): Com
     model,
     models,
     modelOptions,
+    preserveNativeTurnOptions = false,
     promptInjectionState = "none",
     planModeEnabled,
   } = input;
+  if (provider === "meerkat") {
+    const reasoning = getMeerkatReasoningSelection(
+      models.find((candidate) => candidate.slug === model)?.capabilities,
+      modelOptions,
+    );
+    const value = reasoning.options?.[0]?.value;
+    return {
+      provider,
+      promptEffort: typeof value === "string" ? value : null,
+      // Active steering compares the entire saved selection. Fresh turns keep
+      // explicit reasoning for admission without reviving hidden cache controls.
+      modelOptionsForDispatch: preserveNativeTurnOptions
+        ? (modelOptions ?? undefined)
+        : reasoning.options,
+    };
+  }
   if (provider === "opencode") {
     const normalizedModel = normalizeModelSlug(model, provider);
     const modelIsInCatalog = models.some((candidate) => candidate.slug === normalizedModel);

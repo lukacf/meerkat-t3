@@ -2,7 +2,7 @@ import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { useAtomValue } from "@effect/atom-react";
 import { useLocation, useNavigate } from "@tanstack/react-router";
 import { Atom } from "effect/unstable/reactivity";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import {
   ensureClientSettingsHydrated,
@@ -84,6 +84,10 @@ export function FirstRunGate({
   const hydrationStatus = useClientSettingsHydrationStatus();
   const hydrated = hydrationStatus === "ready";
   const completeOnboarding = useCompleteOnboarding();
+  const onboardingProgress = useClientSettings((settings) => settings.onboardingProgress);
+  const providerRecovery =
+    hydrated && onboardingProgress !== null && pathname === "/settings/providers";
+  const resumed = useRef(false);
   const onboardingCompletedAt = useClientSettings((settings) => settings.onboardingCompletedAt);
   const bootstrapped = useAllEnvironmentShellsBootstrapped();
   const { environments, isReady: environmentCatalogReady } = useEnvironments();
@@ -102,7 +106,13 @@ export function FirstRunGate({
         : "pending",
     stalled: false,
   }));
-  const { decision, stalled } = gateState;
+  const { stalled } = gateState;
+  const decision =
+    hydrated && onboardingProgress
+      ? onboardingProgress.step === "first-task"
+        ? "app"
+        : "wizard"
+      : gateState.decision;
   const settingsReadFailed = hydrationStatus === "failed" || hydrationStatus === "retrying";
   // A workspace still counts as fresh when its only content is the server's
   // own cwd auto-bootstrap: web mode creates a project + thread from cwd at
@@ -130,6 +140,7 @@ export function FirstRunGate({
         localEnvironmentDisabled: isLocalEnvironmentDisabled(),
         hydrated,
         completed: onboardingCompletedAt !== null,
+        progressStep: onboardingProgress?.step,
         catalogReady: environmentCatalogReady,
         environmentCount: environments.length,
       })
@@ -137,6 +148,7 @@ export function FirstRunGate({
         enabled,
         hydrated,
         completed: onboardingCompletedAt !== null,
+        progressStep: onboardingProgress?.step,
         bootstrapped,
         authoritative: primaryShellLive,
         workspaceAuthoritative: workspaceEvidenceLive,
@@ -152,7 +164,7 @@ export function FirstRunGate({
       });
 
   useEffect(() => {
-    if (decision === "wizard" || !hydrated) return;
+    if (decision === "wizard" || !hydrated || onboardingProgress !== null) return;
 
     if (persistCompletion && onboardingCompletedAt === null) {
       void completeOnboarding().catch(() => undefined);
@@ -167,6 +179,7 @@ export function FirstRunGate({
     hydrated,
     nextDecision,
     onboardingCompletedAt,
+    onboardingProgress,
     persistCompletion,
   ]);
 
@@ -183,21 +196,126 @@ export function FirstRunGate({
   }, [decision, enabled, hydrated]);
 
   useEffect(() => {
-    if (decision === "wizard" && pathname !== "/welcome") {
+    if (decision === "wizard" && pathname !== "/welcome" && !providerRecovery) {
       void navigate({ to: "/welcome", replace: true });
     }
-  }, [decision, navigate, pathname]);
+  }, [decision, navigate, pathname, providerRecovery]);
+
+  useEffect(() => {
+    if (
+      resumed.current ||
+      providerRecovery ||
+      !hydrated ||
+      onboardingProgress?.step !== "first-task" ||
+      !onboardingProgress.projectRef ||
+      !environmentCatalogReady ||
+      !bootstrapped
+    )
+      return;
+    const { environmentId, projectId } = onboardingProgress.projectRef;
+    // Wait for the selected project to arrive; never substitute an unrelated workspace.
+    if (
+      !projects.some(
+        (project) => project.environmentId === environmentId && project.id === projectId,
+      )
+    )
+      return;
+    resumed.current = true;
+    if (
+      onboardingProgress.threadId &&
+      threads.some(
+        (thread) =>
+          thread.environmentId === environmentId && thread.id === onboardingProgress.threadId,
+      )
+    ) {
+      void navigate({
+        to: "/$environmentId/$threadId",
+        params: { environmentId, threadId: onboardingProgress.threadId },
+        replace: true,
+      });
+    } else {
+      void navigate({
+        to: "/$environmentId/projects/$projectId/start",
+        params: { environmentId, projectId },
+        replace: true,
+      });
+    }
+  }, [
+    bootstrapped,
+    environmentCatalogReady,
+    hydrated,
+    navigate,
+    onboardingProgress,
+    projects,
+    providerRecovery,
+    threads,
+  ]);
 
   if (settingsReadFailed) {
     return <FirstRunRecovery reason="settings" retrying={hydrationStatus === "retrying"} />;
   }
-  if (decision !== "app") {
+  if (decision !== "app" && !providerRecovery) {
     return stalled ? <FirstRunRecovery reason="connection" /> : null;
   }
-  return children;
+  const setupEnvironment = environments.find(
+    (environment) => environment.environmentId === onboardingProgress?.projectRef?.environmentId,
+  );
+  const missingSetupProject =
+    onboardingProgress?.step === "first-task" &&
+    environmentCatalogReady &&
+    onboardingProgress.projectRef &&
+    (setupEnvironment?.connection.phase !== "connected" ||
+      (bootstrapped &&
+        !projects.some(
+          (project) =>
+            project.environmentId === onboardingProgress.projectRef?.environmentId &&
+            project.id === onboardingProgress.projectRef.projectId,
+        )));
+  return (
+    <>
+      {children}
+      {providerRecovery ? (
+        <aside
+          className="fixed right-4 bottom-4 z-50 max-w-sm space-y-2 rounded-lg border border-border bg-popover p-4 text-popover-foreground shadow-lg"
+          aria-label="Resume setup"
+        >
+          <p className="text-sm font-medium">Setup is saved</p>
+          <p className="text-xs text-muted-foreground">
+            Return to setup after fixing your provider.
+          </p>
+          <Button size="sm" onClick={() => void navigate({ to: "/welcome" })}>
+            Back to setup
+          </Button>
+        </aside>
+      ) : null}
+      {missingSetupProject && !providerRecovery ? (
+        <aside
+          className="fixed right-4 bottom-4 z-50 max-w-sm space-y-2 rounded-lg border border-border bg-popover p-4 text-popover-foreground shadow-lg"
+          aria-label="Resume setup"
+        >
+          <p className="text-sm font-medium">Your setup project is unavailable</p>
+          <p className="text-xs text-muted-foreground">
+            Reconnect its computer or choose another project to finish your first task.
+          </p>
+          <div className="flex gap-2">
+            <Button size="sm" onClick={() => void navigate({ to: "/welcome" })}>
+              Resume setup
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => void completeOnboarding().catch(() => undefined)}
+            >
+              Skip setup
+            </Button>
+          </div>
+        </aside>
+      ) : null}
+    </>
+  );
 }
 
-function FirstRunRecovery({
+export function FirstRunRecovery({
   reason,
   retrying = false,
 }: {

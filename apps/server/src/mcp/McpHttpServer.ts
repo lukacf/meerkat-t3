@@ -15,6 +15,10 @@ import { McpProtocol, McpSchema, McpServer, Tool } from "effect/unstable/ai";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/unstable/http";
 import { PreviewAutomationError } from "@t3tools/contracts";
 
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
+import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { ServerSettingsService } from "../serverSettings.ts";
+
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as DeviceService from "../device/DeviceService.ts";
@@ -82,33 +86,64 @@ export const normalizeMcpHttpResponse = (
     : response;
 };
 
-const makeMcpAuthMiddleware = McpSessionRegistry.McpSessionRegistry.pipe(
-  Effect.map((registry): McpAuthMiddleware =>
-    Effect.fn("McpHttpServer.authenticateRequest")(function* (httpEffect) {
-      const request = yield* HttpServerRequest.HttpServerRequest;
-      const authorization = request.headers.authorization;
-      const token =
-        authorization?.startsWith("Bearer ") === true
-          ? authorization.slice("Bearer ".length).trim()
-          : "";
-      const invocation = yield* registry.resolve(token);
-      if (!invocation) {
-        // Without this the only symptom of a dead credential is the agent
-        // quietly losing the whole `t3-code` toolkit for the rest of its
-        // session, with nothing on the server to explain why.
-        yield* Effect.logWarning("rejected MCP request with an unusable credential", {
-          reason: token.length === 0 ? "missing_bearer_token" : "unknown_or_expired_token",
-        });
-        return unauthorized;
-      }
-      return yield* httpEffect.pipe(
-        Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
-        Effect.map(normalizeMcpHttpResponse),
-      );
-    }),
-  ),
-  Effect.withSpan("McpHttpServer.makeAuthMiddleware"),
+/** Resolve policy at request time so disabling browser access revokes existing credentials. */
+export const applyCurrentBrowserPolicy = Effect.fn("McpHttpServer.applyCurrentBrowserPolicy")(
+  function* (invocation: McpInvocationContext.McpInvocationScope) {
+    if (!invocation.capabilities.has("preview")) return invocation;
+    const projection = yield* ProjectionSnapshotQuery;
+    const settings = yield* ServerSettingsService;
+    const allowed = yield* Effect.gen(function* () {
+      const thread = yield* projection.getThreadShellById(invocation.threadId);
+      if (Option.isNone(thread)) return false;
+      const current = yield* settings.getSettings;
+      return resolveProjectSettings(current, thread.value.projectId).settings
+        .enableAgentBrowserAccess;
+    }).pipe(Effect.orElseSucceed(() => false));
+    if (allowed) return invocation;
+    return {
+      ...invocation,
+      capabilities: new Set(
+        [...invocation.capabilities].filter((capability) => capability !== "preview"),
+      ),
+    };
+  },
 );
+
+export const makeMcpAuthMiddleware = Effect.gen(function* () {
+  const registry = yield* McpSessionRegistry.McpSessionRegistry;
+  const projection = yield* ProjectionSnapshotQuery;
+  const settings = yield* ServerSettingsService;
+  return Effect.fn("McpHttpServer.authenticateRequest")(function* (
+    httpEffect: AuthenticatedHttpEffect,
+  ) {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const authorization = request.headers.authorization;
+    const token =
+      authorization?.startsWith("Bearer ") === true
+        ? authorization.slice("Bearer ".length).trim()
+        : "";
+    const credential = yield* registry.resolve(token);
+    if (!credential) {
+      yield* Effect.logWarning("rejected MCP request with an unusable credential", {
+        reason: token.length === 0 ? "missing_bearer_token" : "unknown_or_expired_token",
+      });
+      return unauthorized;
+    }
+    const policy = yield* applyCurrentBrowserPolicy(credential).pipe(
+      Effect.provideService(ProjectionSnapshotQuery, projection),
+      Effect.provideService(ServerSettingsService, settings),
+    );
+    const hostConnectionId = request.headers["x-t3-preview-host"];
+    const invocation = {
+      ...policy,
+      ...(hostConnectionId ? { previewHostConnectionId: hostConnectionId } : {}),
+    };
+    return yield* httpEffect.pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+      Effect.map(normalizeMcpHttpResponse),
+    );
+  }) satisfies McpAuthMiddleware;
+}).pipe(Effect.withSpan("McpHttpServer.makeAuthMiddleware"));
 
 const McpAuthMiddlewareLive = HttpRouter.middleware<{
   provides: McpInvocationContext.McpInvocationContext;

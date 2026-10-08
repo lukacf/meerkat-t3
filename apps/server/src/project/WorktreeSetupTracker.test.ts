@@ -1,5 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
-import { ThreadId, WorktreeSetupSnapshot } from "@t3tools/contracts";
+import {
+  CommandId,
+  OrchestrationDispatchCommandError,
+  ThreadId,
+  WorktreeSetupSnapshot,
+} from "@t3tools/contracts";
+import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
@@ -12,8 +18,179 @@ import * as TestClock from "effect/testing/TestClock";
 import * as WorktreeSetupTracker from "./WorktreeSetupTracker.ts";
 
 const threadId = ThreadId.make("thread-1");
+const commandId = CommandId.make("bootstrap-1");
+class BootstrapSequence extends Context.Service<BootstrapSequence, number>()(
+  "t3/project/WorktreeSetupTracker.test/BootstrapSequence",
+) {}
 
 describe("WorktreeSetupTracker", () => {
+  it.effect("joins the same active request using only the original operation and context", () =>
+    Effect.gen(function* () {
+      const tracker = yield* WorktreeSetupTracker.make;
+      const entered = yield* Deferred.make<void>();
+      const complete = yield* Deferred.make<void>();
+      let starts = 0;
+      const operation = Effect.gen(function* () {
+        starts += 1;
+        const sequence = yield* BootstrapSequence;
+        yield* Deferred.succeed(entered, undefined);
+        yield* Deferred.await(complete);
+        return { sequence };
+      });
+      const first = yield* tracker
+        .runBootstrapOnce({ threadId, commandId }, operation)
+        .pipe(Effect.provideService(BootstrapSequence, 41), Effect.forkChild);
+      yield* Deferred.await(entered);
+      const joined = yield* tracker
+        .runBootstrapOnce({ threadId, commandId }, operation)
+        .pipe(Effect.provideService(BootstrapSequence, 99), Effect.forkChild);
+      yield* Effect.yieldNow;
+      expect(starts).toBe(1);
+      yield* Deferred.succeed(complete, undefined);
+      expect(yield* Fiber.join(first)).toEqual({ sequence: 41 });
+      expect(yield* Fiber.join(joined)).toEqual({ sequence: 41 });
+      expect(starts).toBe(1);
+    }),
+  );
+
+  it.effect(
+    "rejects a competing request without replacing active setup or blocking another thread",
+    () =>
+      Effect.gen(function* () {
+        const tracker = yield* WorktreeSetupTracker.make;
+        const entered = yield* Deferred.make<void>();
+        const complete = yield* Deferred.make<void>();
+        const first = yield* tracker
+          .runBootstrapOnce(
+            { threadId, commandId },
+            Effect.gen(function* () {
+              yield* tracker.begin({
+                threadId,
+                branch: "original",
+                baseRef: "main",
+                stages: ["checkout"],
+                fiber: null,
+              });
+              yield* Deferred.succeed(entered, undefined);
+              yield* Deferred.await(complete);
+              return { sequence: 7 };
+            }),
+          )
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        const before = yield* tracker.get(threadId);
+        let competingStarts = 0;
+        const competing = yield* tracker
+          .runBootstrapOnce(
+            { threadId, commandId: CommandId.make("competing") },
+            Effect.sync(() => {
+              competingStarts += 1;
+              return { sequence: 8 };
+            }),
+          )
+          .pipe(Effect.result);
+        expect(competing._tag).toBe("Failure");
+        if (competing._tag === "Failure") {
+          expect(competing.failure.message).toContain("already preparing");
+          expect(competing.failure.bootstrapThreadDisposition).toBeUndefined();
+        }
+        expect(competingStarts).toBe(0);
+        expect(yield* tracker.get(threadId)).toEqual(before);
+        expect(
+          yield* tracker.runBootstrapOnce(
+            { threadId: ThreadId.make("independent"), commandId: CommandId.make("independent") },
+            Effect.succeed({ sequence: 9 }),
+          ),
+        ).toEqual({ sequence: 9 });
+        yield* Deferred.succeed(complete, undefined);
+        expect(yield* Fiber.join(first)).toEqual({ sequence: 7 });
+      }),
+  );
+
+  it.effect(
+    "keeps the original reservation and operation alive after its client waiter is interrupted",
+    () =>
+      Effect.gen(function* () {
+        const tracker = yield* WorktreeSetupTracker.make;
+        const entered = yield* Deferred.make<void>();
+        const complete = yield* Deferred.make<void>();
+        let starts = 0;
+        let interrupted = false;
+        const operation = Effect.gen(function* () {
+          starts += 1;
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(complete);
+          return { sequence: 15 };
+        }).pipe(
+          Effect.onInterrupt(() =>
+            Effect.sync(() => {
+              interrupted = true;
+            }),
+          ),
+        );
+        const disconnected = yield* tracker
+          .runBootstrapOnce({ threadId, commandId }, operation)
+          .pipe(Effect.forkChild);
+        yield* Deferred.await(entered);
+        yield* Fiber.interrupt(disconnected);
+        expect(Exit.hasInterrupts(yield* Fiber.await(disconnected))).toBe(true);
+        expect(interrupted).toBe(false);
+        const reconnect = yield* tracker
+          .runBootstrapOnce({ threadId, commandId }, operation)
+          .pipe(Effect.forkChild);
+        yield* Effect.yieldNow;
+        expect(starts).toBe(1);
+        yield* Deferred.succeed(complete, undefined);
+        expect(yield* Fiber.join(reconnect)).toEqual({ sequence: 15 });
+        expect(interrupted).toBe(false);
+        expect(starts).toBe(1);
+      }),
+  );
+
+  it.effect(
+    "shares the original failure and releases its reservation only after the operation settles",
+    () =>
+      Effect.gen(function* () {
+        const tracker = yield* WorktreeSetupTracker.make;
+        const entered = yield* Deferred.make<void>();
+        const complete = yield* Deferred.make<void>();
+        const failure = new OrchestrationDispatchCommandError({ message: "Preparation failed" });
+        let starts = 0;
+        const operation = Effect.gen(function* () {
+          starts += 1;
+          yield* Deferred.succeed(entered, undefined);
+          yield* Deferred.await(complete);
+          return yield* failure;
+        });
+        const first = yield* tracker
+          .runBootstrapOnce({ threadId, commandId }, operation)
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Deferred.await(entered);
+        const joined = yield* tracker
+          .runBootstrapOnce({ threadId, commandId }, operation)
+          .pipe(Effect.result, Effect.forkChild);
+        yield* Effect.yieldNow;
+        yield* Deferred.succeed(complete, undefined);
+        const original = yield* Fiber.join(first);
+        const replayed = yield* Fiber.join(joined);
+        expect(original).toEqual(replayed);
+        expect(original._tag).toBe("Failure");
+        if (original._tag === "Failure") expect(original.failure).toBe(failure);
+        expect(starts).toBe(1);
+        // A later explicit call runs its own durable-state check, not cached work.
+        expect(
+          yield* tracker.runBootstrapOnce(
+            { threadId, commandId },
+            Effect.sync(() => {
+              starts += 1;
+              return { sequence: 23 };
+            }),
+          ),
+        ).toEqual({ sequence: 23 });
+        expect(starts).toBe(2);
+      }),
+  );
+
   it.effect("records stage transitions, checkout progress, and the final phase", () =>
     Effect.gen(function* () {
       const tracker = yield* WorktreeSetupTracker.make;

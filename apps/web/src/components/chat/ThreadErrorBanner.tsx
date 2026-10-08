@@ -1,6 +1,6 @@
 import { memo } from "react";
-import { Alert, AlertAction, AlertDescription } from "../ui/alert";
-import { Button } from "../ui/button";
+import { Alert, AlertAction, AlertDescription, AlertTitle } from "../ui/alert";
+import { Button, InlineButton } from "../ui/button";
 import { CircleAlertIcon, XIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
@@ -35,23 +35,42 @@ export function isThreadErrorBannerDismissedForSession(bannerKey: string | null)
 
 export const ThreadErrorBanner = memo(function ThreadErrorBanner({
   error,
+  showDetails = false,
   onDismiss,
+  onOpenProviderSetup,
 }: {
   error: string | null;
+  showDetails?: boolean;
   onDismiss?: () => void;
+  onOpenProviderSetup?: (() => void) | undefined;
 }) {
   if (!error) return null;
   return (
     <div className="pointer-events-auto mx-auto w-fit max-w-[min(48rem,calc(100%-2rem))] pt-3">
       <Alert variant="error" surface="glass" controlAlignment="first-line">
         <CircleAlertIcon />
+        {showDetails ? <AlertTitle>This request could not be completed</AlertTitle> : null}
         <AlertDescription>
-          <Tooltip>
-            <TooltipTrigger render={<div className="line-clamp-3" />}>{error}</TooltipTrigger>
-            <TooltipPopup side="top" className="whitespace-pre-wrap">
-              {error}
-            </TooltipPopup>
-          </Tooltip>
+          {showDetails ? (
+            <details key={error}>
+              <summary className="cursor-pointer rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
+                Error details
+              </summary>
+              <div className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-xs leading-relaxed [overflow-wrap:anywhere]">
+                {error}
+              </div>
+            </details>
+          ) : (
+            <Tooltip>
+              <TooltipTrigger render={<div className="line-clamp-3" />}>{error}</TooltipTrigger>
+              <TooltipPopup side="top" className="whitespace-pre-wrap">
+                {error}
+              </TooltipPopup>
+            </Tooltip>
+          )}
+          {onOpenProviderSetup ? (
+            <InlineButton onClick={onOpenProviderSetup}>Open provider settings</InlineButton>
+          ) : null}
         </AlertDescription>
         {onDismiss && (
           <AlertAction>

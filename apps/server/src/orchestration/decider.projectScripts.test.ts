@@ -447,6 +447,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
       const result = yield* decideOrchestrationCommand({
         command: {
           type: "thread.turn.start",
+          handlingMode: "queue",
           commandId: CommandId.make("cmd-turn-start"),
           threadId: ThreadId.make("thread-1"),
           message: {
@@ -483,6 +484,7 @@ it.layer(NodeServices.layer)("decider project scripts", (it) => {
           { id: "reasoningEffort", value: "high" },
           { id: "fastMode", value: true },
         ]),
+        handlingMode: "queue",
         runtimeMode: "approval-required",
       });
     }),

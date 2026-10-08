@@ -1,41 +1,36 @@
-import { scopeThreadRef } from "@t3tools/client-runtime/environment";
-import type { EnvironmentId, ScopedThreadRef } from "@t3tools/contracts";
+import { useLayoutEffect } from "react";
+import { useLocation } from "@tanstack/react-router";
+import { useConversationWorkspaceChrome } from "../components/team/ConversationWorkspaceChrome";
+import {
+  useConversationWorkspaceStore,
+  type ProjectWorkspaceTarget,
+} from "../components/team/conversationWorkspaceStore";
 
-import { useProjects } from "~/state/entities";
+export type ActiveProjectTarget = ProjectWorkspaceTarget;
 
-import { useHandleNewThread } from "./useHandleNewThread";
-
-export interface ActiveProjectTarget {
-  readonly environmentId: EnvironmentId;
-  readonly cwd: string;
-  readonly projectName: string;
-  readonly threadRef: ScopedThreadRef;
+function useWorkspaceRouteKey() {
+  return useLocation({
+    select: (location) => JSON.stringify([location.pathname, location.searchStr]),
+  });
 }
 
-/**
- * Resolves the project workspace behind the active thread (or draft) so
- * project-scoped surfaces like the file picker and content search know which
- * workspace to query and which thread's right panel opens their results.
- */
+/** Mounted conversations own their workspace and the destination for search results. */
+export function useRegisterProjectWorkspace(target: ActiveProjectTarget | null, enabled = true) {
+  const chrome = useConversationWorkspaceChrome();
+  const routeKey = useWorkspaceRouteKey();
+  const paneId = chrome?.paneId ?? `route:${routeKey}`;
+  useLayoutEffect(() => {
+    if (!enabled) return;
+    return useConversationWorkspaceStore.getState().registerWorkspace(paneId, { routeKey, target });
+  }, [enabled, paneId, routeKey, target]);
+}
+
+/** Dialog focus does not change the conversation pane that opened it. */
 export function useActiveProjectTarget(): ActiveProjectTarget | null {
-  const { activeDraftThread, activeThread } = useHandleNewThread();
-  const projects = useProjects();
-  const thread = activeThread ?? activeDraftThread;
-  const threadId = activeThread?.id ?? activeDraftThread?.threadId;
-  const project = thread
-    ? projects.find(
-        (candidate) =>
-          candidate.environmentId === thread.environmentId && candidate.id === thread.projectId,
-      )
-    : null;
-  const cwd = thread?.worktreePath ?? project?.workspaceRoot;
-
-  if (!thread || !threadId || !project || !cwd) return null;
-
-  return {
-    environmentId: project.environmentId,
-    cwd,
-    projectName: project.title,
-    threadRef: scopeThreadRef(thread.environmentId, threadId),
-  };
+  const routeKey = useWorkspaceRouteKey();
+  return useConversationWorkspaceStore((state) => {
+    const focused = state.focusedPane ? state.workspaceTargets[state.focusedPane] : undefined;
+    if (focused?.routeKey === routeKey) return focused.target;
+    return state.workspaceTargets[`route:${routeKey}`]?.target ?? null;
+  });
 }

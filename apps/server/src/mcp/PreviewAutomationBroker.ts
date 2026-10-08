@@ -503,7 +503,10 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
             (input.tabId === undefined || tab.tabId === input.tabId),
         );
       const connection =
-        hasLiveAssignment && supportsOperation(assignedConnection, input.operation)
+        hasLiveAssignment &&
+        (input.scope.previewHostConnectionId === undefined ||
+          assignedConnection.connectionId === input.scope.previewHostConnectionId) &&
+        supportsOperation(assignedConnection, input.operation)
           ? assignedConnection
           : hasLiveAssignment
             ? undefined
@@ -511,6 +514,8 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
                 .filter(
                   (host) =>
                     host.environmentId === input.scope.environmentId &&
+                    (input.scope.previewHostConnectionId === undefined ||
+                      host.connectionId === input.scope.previewHostConnectionId) &&
                     supportsOperation(host, input.operation),
                 )
                 .sort(
@@ -622,7 +627,12 @@ export const make = Effect.gen(function* PreviewAutomationBrokerMake() {
         onSome: (value) => Effect.succeed(value as A),
       });
     });
-    const result = yield* awaitResponse().pipe(Effect.ensuring(removePending));
+    const response = yield* awaitResponse().pipe(Effect.ensuring(removePending));
+    const result = (
+      input.operation === "status" && typeof response === "object" && response !== null
+        ? { ...response, hostConnectionId: connection.connectionId }
+        : response
+    ) as A;
     if (input.updateCurrentTab === false) return result;
     const responseTabId = readResultTabId(result);
     const resultTabId = responseTabId === undefined ? input.tabId : responseTabId;

@@ -65,8 +65,14 @@ export function parseGitHubAuthStatus(text: string): GitHubAuthStatus {
 export function findAuthenticatedGitHubAccount(
   accounts: ReadonlyArray<GitHubAuthStatusAccount>,
 ): GitHubAuthStatusAccount | undefined {
+  // An inactive credential cannot recover a failed selected account on its
+  // host. Keep the fallback for hosts that do not identify an active account.
   return (
     accounts.find((account) => account.authenticated && account.active) ??
-    accounts.find((account) => account.authenticated)
+    accounts.find(
+      (account) =>
+        account.authenticated &&
+        !accounts.some((selected) => selected.active && selected.host === account.host),
+    )
   );
 }

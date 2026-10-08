@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./executionModes": {
+      "types": "./src/executionModes.ts",
+      "import": "./src/executionModes.ts"
+    },
     "./legacyCliLauncher": {
       "types": "./src/legacyCliLauncher.ts",
       "import": "./src/legacyCliLauncher.ts"
@@ -346,6 +350,22 @@
     "./gitPatchPath": {
       "types": "./src/gitPatchPath.ts",
       "import": "./src/gitPatchPath.ts"
+    },
+    "./meerkatDistribution": {
+      "types": "./src/meerkatDistribution.ts",
+      "import": "./src/meerkatDistribution.ts"
+    },
+    "./meerkatRuntime": {
+      "types": "./src/meerkatRuntime.ts",
+      "import": "./src/meerkatRuntime.ts"
+    },
+    "./meerkatSkills": {
+      "types": "./src/meerkatSkills.ts",
+      "import": "./src/meerkatSkills.ts"
+    },
+    "./meerkatProfile": {
+      "types": "./src/meerkatProfile.ts",
+      "import": "./src/meerkatProfile.ts"
     }
   },
   "scripts": {

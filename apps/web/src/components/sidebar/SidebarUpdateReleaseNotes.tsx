@@ -1,4 +1,5 @@
 import type { DesktopBridge, DesktopUpdateState } from "@t3tools/contracts";
+import { Link } from "@tanstack/react-router";
 import { ExternalLinkIcon } from "lucide-react";
 
 import {
@@ -52,6 +53,7 @@ export function SidebarUpdateReleaseNotes({
   readonly state: DesktopUpdateState;
   readonly tooltip: string;
 }) {
+  const releaseHistoryUrl = getDesktopUpdateReleaseHistoryUrl();
   if (state.channel !== "nightly" || state.releaseNotes.length === 0) {
     return <>{tooltip}</>;
   }
@@ -109,9 +111,15 @@ export function SidebarUpdateReleaseNotes({
         {state.omittedReleaseCount > 0 ? (
           <div>
             <Separator className="my-3" />
-            <ReleaseLink releaseUrl={getDesktopUpdateReleaseHistoryUrl()} shell={shell}>
-              {`${state.omittedReleaseCount} older ${state.omittedReleaseCount === 1 ? "release" : "releases"} on GitHub`}
-            </ReleaseLink>
+            {releaseHistoryUrl ? (
+              <ReleaseLink releaseUrl={releaseHistoryUrl} shell={shell}>
+                {`${state.omittedReleaseCount} older ${state.omittedReleaseCount === 1 ? "release" : "releases"} on GitHub`}
+              </ReleaseLink>
+            ) : (
+              <Link to="/help" search={{ topic: "updates" }} className="text-xs text-primary underline underline-offset-2">
+                How to update this prototype
+              </Link>
+            )}
           </div>
         ) : null}
       </div>

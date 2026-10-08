@@ -1,6 +1,14 @@
 import { Children, cloneElement, isValidElement, type ReactNode } from "react";
 import type { ServerProviderSkill } from "@t3tools/contracts";
-import { formatProviderSkillDisplayName } from "@t3tools/client-runtime/providerSkills";
+import {
+  formatProviderSkillDisplayName,
+  resolveProviderSkillReference,
+} from "@t3tools/client-runtime/providerSkills";
+import {
+  collectMeerkatSkillSelections,
+  parseMeerkatSkillHref,
+  serializeProviderSkillSelection,
+} from "@t3tools/shared/meerkatSkills";
 
 import { SKILL_CHIP_ICON_SVG } from "../composerInlineChip";
 import { ContextChip, ContextChipLabel } from "../ContextChip";
@@ -8,9 +16,55 @@ import { ContextChip, ContextChipLabel } from "../ContextChip";
 const SKILL_TOKEN_REGEX =
   /(^|\s)\p{Sc}(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:_-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:_-]*)(?=\s|$)/gu;
 
-type InlineSkill = Pick<ServerProviderSkill, "name" | "displayName">;
+type InlineSkill = Pick<ServerProviderSkill, "name" | "displayName"> &
+  Partial<Pick<ServerProviderSkill, "path">>;
+
+export function NativeSkillInlineLink({
+  href,
+  skills,
+}: {
+  href: string;
+  skills: ReadonlyArray<InlineSkill>;
+}) {
+  const key = parseMeerkatSkillHref(href);
+  if (!key) return null;
+  const skill = resolveProviderSkillReference(skills, key.skill_name, href) ?? {
+    name: key.skill_name,
+    displayName: `${key.skill_name} (${key.source_uuid})`,
+  };
+  return (
+    <SkillChip
+      skill={skill}
+      rawText={serializeProviderSkillSelection({ name: key.skill_name, path: href })}
+    />
+  );
+}
 
 export function SkillInlineText(props: { text: string; skills: ReadonlyArray<InlineSkill> }) {
+  const selections = collectMeerkatSkillSelections(props.text);
+  if (selections.length) {
+    const fragments: ReactNode[] = [];
+    let start = 0;
+    for (const selection of selections) {
+      fragments.push(
+        <SkillInlineText
+          key={`text:${selection.start}`}
+          text={props.text.slice(start, selection.start)}
+          skills={props.skills}
+        />,
+        <NativeSkillInlineLink
+          key={`skill:${selection.start}`}
+          href={selection.path}
+          skills={props.skills}
+        />,
+      );
+      start = selection.end;
+    }
+    fragments.push(
+      <SkillInlineText key="tail" text={props.text.slice(start)} skills={props.skills} />,
+    );
+    return <>{fragments}</>;
+  }
   const nodes: ReactNode[] = [];
   let cursor = 0;
 
@@ -19,7 +73,7 @@ export function SkillInlineText(props: { text: string; skills: ReadonlyArray<Inl
     const name = match[2] ?? "";
     const start = (match.index ?? 0) + prefix.length;
     const rawText = `$${name}`;
-    const skill = props.skills.find((candidate) => candidate.name === name);
+    const skill = resolveProviderSkillReference(props.skills, name);
     if (!skill) {
       continue;
     }

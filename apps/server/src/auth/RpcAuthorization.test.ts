@@ -15,6 +15,118 @@ import {
 } from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
+  it("requires operate access for server-composed provider settings", () => {
+    expect(WsRpcGroup.requests.has(WS_METHODS.serverUpdateProviderSettings)).toBe(true);
+    expect(requiredScopeForRpcMethod(WS_METHODS.serverUpdateProviderSettings)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.serverGetSettings)).toBe(
+      AuthOrchestrationReadScope,
+    );
+  });
+
+  it("allows receipt-only reconciliation with read access without granting native send access", () => {
+    expect(WsRpcGroup.requests.has(WS_METHODS.meerkatAgentDeliveryReconcile)).toBe(true);
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatAgentDeliveryReconcile)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatAgentSend)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+  it("allows durable queue and attention subscriptions with read access", () => {
+    for (const method of [
+      WS_METHODS.meerkatAgentQueueSubscribe,
+      WS_METHODS.meerkatAttentionSubscribe,
+    ]) {
+      expect(WsRpcGroup.requests.has(method)).toBe(true);
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
+    }
+  });
+  it("allows snapshot observation with read access and requires operate access to restore files", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatCheckpoints)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatCheckpointPreview)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatCheckpointCapture)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatCheckpointRestore)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+  it("requires operate access for interrupted work cleanup while status remains read-only", () => {
+    expect(WsRpcGroup.requests.has(WS_METHODS.meerkatThreadRecovery)).toBe(true);
+    expect(WsRpcGroup.requests.has(WS_METHODS.meerkatRecoverThread)).toBe(true);
+    expect(WsRpcGroup.requests.has(WS_METHODS.meerkatReconnectThread)).toBe(true);
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatThreadRecovery)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatRecoverThread)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatReconnectThread)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+  it("allows question observation with read scope and requires operate scope to answer", () => {
+    expect(WsRpcGroup.requests.has(WS_METHODS.meerkatQuestions)).toBe(true);
+    expect(WsRpcGroup.requests.has(WS_METHODS.meerkatQuestionAnswer)).toBe(true);
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatQuestions)).toBe(AuthOrchestrationReadScope);
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatQuestionAnswer)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+  it("allows approval observation with read scope and requires operate scope for decisions", () => {
+    expect(WsRpcGroup.requests.has(WS_METHODS.meerkatApprovals)).toBe(true);
+    expect(WsRpcGroup.requests.has(WS_METHODS.meerkatApprovalDecide)).toBe(true);
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatApprovals)).toBe(AuthOrchestrationReadScope);
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatApprovalDecide)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+  });
+  it("uses read scope for native Team and activity observations", () => {
+    expect(WsRpcGroup.requests.has(WS_METHODS.meerkatUsageSnapshot)).toBe(true);
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatUsageSnapshot)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatAttention)).toBe(AuthOrchestrationReadScope);
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatAttentionRead)).toBe(
+      AuthOrchestrationOperateScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatProjectTeam)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.meerkatAgentActivity)).toBe(
+      AuthOrchestrationReadScope,
+    );
+  });
+  it("requires operate scope for native agent lifecycle, delivery and topology mutations", () => {
+    for (const method of [
+      WS_METHODS.meerkatProjectProposalSetup,
+      WS_METHODS.meerkatProjectProposalCreate,
+      WS_METHODS.meerkatProjectAgentPrepare,
+      WS_METHODS.meerkatProjectAgentCreate,
+      WS_METHODS.meerkatProjectAgentUpdate,
+      WS_METHODS.meerkatProjectAgentLifecycle,
+      WS_METHODS.meerkatAgentSend,
+      WS_METHODS.meerkatAgentStop,
+      WS_METHODS.meerkatAgentResume,
+      WS_METHODS.meerkatAgentStopCrew,
+      WS_METHODS.meerkatThreadConnectionsSet,
+      WS_METHODS.meerkatPeerConnectionSet,
+    ])
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
+    for (const method of [
+      WS_METHODS.meerkatProjectAgents,
+      WS_METHODS.meerkatThreadConnections,
+      WS_METHODS.meerkatPeerConnections,
+      WS_METHODS.meerkatProjectProposal,
+    ])
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationReadScope);
+  });
   it("declares exactly one scope for every RPC in the server group", () => {
     expect(new Set(Object.keys(RPC_REQUIRED_SCOPES))).toEqual(new Set(WsRpcGroup.requests.keys()));
   });

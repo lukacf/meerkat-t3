@@ -3,6 +3,8 @@ import {
   MAX_SCRIPT_ID_LENGTH,
   SCRIPT_RUN_COMMAND_PATTERN,
   MessageId,
+  OrchestrationSession,
+  PreparedThreadTurnCommand,
   ThreadLinkedPullRequest,
   UserInputRequestedPayload,
   isImportedAgentSessionMessageId,
@@ -54,6 +56,9 @@ const isScriptRunCommand = Schema.is(SCRIPT_RUN_COMMAND_PATTERN);
 const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 const decodeUserInputRequestedPayload = Schema.decodeUnknownOption(UserInputRequestedPayload);
 const threadPullRequestLinksEqual = Schema.toEquivalence(Schema.NullOr(ThreadLinkedPullRequest));
+const sessionsEqual = Schema.toEquivalence(Schema.NullOr(OrchestrationSession));
+const preparedCommandsEqual = Schema.toEquivalence(PreparedThreadTurnCommand);
+const preparedMessagesEqual = Schema.toEquivalence(PreparedThreadTurnCommand.fields.message);
 
 /**
  * Blocked-on-you work derived from the thread's retained activities: an
@@ -1342,11 +1347,21 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.runtime-mode.set": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
+      if (
+        thread.session?.providerName === "meerkat" &&
+        command.runtimeMode !== thread.session.runtimeMode
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail:
+            "Meerkat access is fixed for this conversation. Start a new conversation to change access.",
+        });
+      }
       const occurredAt = yield* nowIso;
       return {
         ...(yield* withEventBase({
@@ -1383,6 +1398,131 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           interactionMode: command.interactionMode,
           updatedAt: occurredAt,
+        },
+      };
+    }
+
+    case "thread.prepared-turn.set": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const next = command.preparedTurn;
+      const previous = thread.preparedTurn;
+      const message = thread.messages.find((entry) => entry.id === next.command.message.messageId);
+      if (
+        next.phase === "released" ||
+        next.recoveryId !== next.command.commandId ||
+        next.command.threadId !== thread.id ||
+        next.projectId !== thread.projectId ||
+        next.command.modelSelection === undefined ||
+        next.command.handlingMode === "steer" ||
+        thread.latestTurn !== null ||
+        thread.session?.activeTurnId != null ||
+        (previous != null && message === undefined) ||
+        (message === undefined && thread.messages.length !== 0) ||
+        (message !== undefined &&
+          (message.role !== "user" ||
+            message.turnId !== null ||
+            !preparedMessagesEqual(
+              {
+                messageId: message.id,
+                role: "user",
+                text: message.text,
+                attachments: message.attachments ?? [],
+                ...(message.context !== undefined ? { context: message.context } : {}),
+              },
+              next.command.message,
+            )))
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The saved first turn no longer matches this unstarted thread.",
+        });
+      }
+      if (
+        previous &&
+        (previous.phase === "released" ||
+          previous.recoveryId !== next.recoveryId ||
+          previous.projectId !== next.projectId ||
+          previous.projectCwd !== next.projectCwd ||
+          previous.providerIdentity.driverKind !== next.providerIdentity.driverKind ||
+          previous.providerIdentity.continuationKey !== next.providerIdentity.continuationKey ||
+          previous.createdAt !== next.createdAt ||
+          (previous.expectedCwd !== null && previous.expectedCwd !== next.expectedCwd) ||
+          !preparedCommandsEqual(previous.command, next.command))
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "A prepared turn cannot be replaced or rebound. Release it before editing.",
+        });
+      }
+      const preparedEvent: Omit<OrchestrationEvent, "sequence"> = {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.prepared-turn-changed",
+        payload: { threadId: command.threadId, preparedTurn: next },
+      };
+      if (message) return preparedEvent;
+      return [
+        {
+          ...(yield* withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt: next.command.createdAt,
+            commandId: command.commandId,
+          })),
+          type: "thread.message-sent",
+          payload: {
+            threadId: command.threadId,
+            ...next.command.message,
+            turnId: null,
+            streaming: false,
+            createdAt: next.command.createdAt,
+            updatedAt: next.command.createdAt,
+          },
+        },
+        preparedEvent,
+      ];
+    }
+
+    case "thread.prepared-turn.release": {
+      const thread = yield* requireThreadNotArchived({
+        readModel,
+        command,
+        threadId: command.threadId,
+      });
+      const prepared = thread.preparedTurn;
+      if (
+        !prepared ||
+        prepared.recoveryId !== command.recoveryId ||
+        prepared.expectedCwd !== command.expectedCwd ||
+        prepared.phase === "ready" ||
+        (prepared.phase === "preparing" && !prepared.reason) ||
+        thread.latestTurn !== null ||
+        thread.session?.activeTurnId != null
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: "The original prepared turn is no longer available to edit.",
+        });
+      }
+      return {
+        ...(yield* withEventBase({
+          aggregateKind: "thread",
+          aggregateId: command.threadId,
+          occurredAt: command.createdAt,
+          commandId: command.commandId,
+        })),
+        type: "thread.prepared-turn-changed",
+        payload: {
+          threadId: command.threadId,
+          preparedTurn: { ...prepared, phase: "released", updatedAt: command.createdAt },
         },
       };
     }
@@ -1431,6 +1571,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           message.role === "user" &&
           message.turnId === null,
       );
+      // Preparing a checkout can delay admission or require an explicit retry.
+      // Keep the saved command and message time, but start its new lifecycle now.
+      const admittedAt =
+        targetThread.preparedTurn?.recoveryId === command.commandId
+          ? yield* nowIso
+          : command.createdAt;
       const userMessageEvent: Omit<OrchestrationEvent, "sequence"> | null = persistedUserMessage
         ? null
         : {
@@ -1460,7 +1606,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         ...(yield* withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
-          occurredAt: command.createdAt,
+          occurredAt: admittedAt,
           commandId: command.commandId,
         })),
         ...(userMessageEvent ? { causationEventId: userMessageEvent.eventId } : {}),
@@ -1468,6 +1614,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.message.messageId,
+          ...(command.handlingMode !== undefined ? { handlingMode: command.handlingMode } : {}),
+          ...(command.handlingMode === "steer" &&
+          targetThread.session?.providerName === "meerkat" &&
+          targetThread.session.activeTurnId !== null
+            ? { steeringTurnId: targetThread.session.activeTurnId }
+            : {}),
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
             : {}),
@@ -1475,7 +1627,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           runtimeMode: targetThread.runtimeMode,
           interactionMode: targetThread.interactionMode,
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
-          createdAt: command.createdAt,
+          createdAt: admittedAt,
         },
       };
       // Real activity resets ANY override: it wakes an explicitly settled
@@ -1489,14 +1641,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(yield* withEventBase({
             aggregateKind: "thread",
             aggregateId: command.threadId,
-            occurredAt: command.createdAt,
+            occurredAt: admittedAt,
             commandId: command.commandId,
           })),
           type: "thread.unsettled",
           payload: {
             threadId: command.threadId,
             reason: "activity",
-            updatedAt: command.createdAt,
+            updatedAt: admittedAt,
           },
         });
       }
@@ -1505,14 +1657,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           ...(yield* withEventBase({
             aggregateKind: "thread",
             aggregateId: command.threadId,
-            occurredAt: command.createdAt,
+            occurredAt: admittedAt,
             commandId: command.commandId,
           })),
           type: "thread.unsnoozed",
           payload: {
             threadId: command.threadId,
             reason: "activity",
-            updatedAt: command.createdAt,
+            updatedAt: admittedAt,
           },
         });
       }
@@ -1887,6 +2039,31 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         threadId: command.threadId,
       });
+      // Recovery may await native cleanup. Compare in the serialized command
+      // queue so a newer provider, turn, or queued prompt cannot be reset.
+      if (
+        command.expectedCurrent !== undefined &&
+        (!sessionsEqual(thread.session, command.expectedCurrent) ||
+          (command.expectedThreadUpdatedAt !== undefined &&
+            thread.updatedAt !== command.expectedThreadUpdatedAt) ||
+          thread.messages.some(
+            (message) =>
+              message.role === "user" &&
+              !isImportedAgentSessionMessageId(message.id) &&
+              command.expectedCurrent !== null &&
+              command.expectedCurrent !== undefined &&
+              compareDateTimeStrings(message.createdAt, command.expectedCurrent.updatedAt) > 0,
+          ) ||
+          hasQueuedTurnStartForThread(thread, command.createdAt) ||
+          (thread.latestTurn !== null &&
+            thread.latestTurn.turnId !== command.expectedCurrent?.activeTurnId &&
+            thread.latestTurn.state === "running"))
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `thread ${command.threadId} changed while its session was being recovered`,
+        });
+      }
       const sessionSetEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...(yield* withEventBase({
           aggregateKind: "thread",
@@ -1991,7 +2168,14 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           threadId: command.threadId,
           messageId: command.messageId,
           role: command.type === "thread.message.reasoning.complete" ? "reasoning" : "assistant",
-          text: "",
+          text:
+            command.type === "thread.message.assistant.complete"
+              ? (command.authoritativeText ?? "")
+              : "",
+          ...(command.type === "thread.message.assistant.complete" &&
+          command.authoritativeText !== undefined
+            ? { replaceText: true }
+            : {}),
           turnId: command.turnId ?? null,
           streaming: false,
           createdAt: command.createdAt,

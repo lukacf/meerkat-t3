@@ -7,6 +7,7 @@ import { useRef, useState } from "react";
 
 import { cn, randomUUID } from "~/lib/utils";
 
+import { APP_DISPLAY_NAME } from "../../branding";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -285,11 +286,11 @@ function FullDiskAccessStep({
   return (
     <>
       <DialogHeader>
-        <DialogTitle>Let T3 Code read {source.name}&rsquo;s cookies</DialogTitle>
+        <DialogTitle>Let {APP_DISPLAY_NAME} read {source.name}&rsquo;s cookies</DialogTitle>
         <DialogDescription>
-          To import cookies from {source.name}, T3 Code needs Full Disk Access. Turn it on in System
-          Settings, then come back to finish the import — you can revoke it again once the import is
-          done.
+          To import cookies from {source.name}, {APP_DISPLAY_NAME} needs Full Disk Access. Turn it on
+          in System Settings, then come back to finish the import. You can revoke it again once the
+          import is done.
         </DialogDescription>
       </DialogHeader>
       <DialogPanel>
@@ -319,8 +320,8 @@ function FullDiskAccessStep({
         {!permission.isReady(["fullDiskAccess"]) ? (
           <p className="mt-3 text-xs text-muted-foreground">
             {stillRequired
-              ? "Access is still required. Quit and reopen T3 Code if you just allowed it, then retry the import."
-              : "If access doesn't update after you allow it, quit and reopen T3 Code, then retry the import."}
+              ? `Access is still required. Quit and reopen ${APP_DISPLAY_NAME} if you just allowed it, then retry the import.`
+              : `If access doesn't update after you allow it, quit and reopen ${APP_DISPLAY_NAME}, then retry the import.`}
           </p>
         ) : null}
       </DialogPanel>

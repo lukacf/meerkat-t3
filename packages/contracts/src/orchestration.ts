@@ -23,7 +23,7 @@ import {
   TrimmedString,
   TurnId,
 } from "./baseSchemas.ts";
-import { ProviderInstanceId } from "./providerInstance.ts";
+import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import {
   PullRequestActor,
   PullRequestChecksState,
@@ -34,6 +34,7 @@ import {
 
 export const ORCHESTRATION_WS_METHODS = {
   dispatchCommand: "orchestration.dispatchCommand",
+  retryPreparedTurn: "orchestration.retryPreparedTurn",
   getWorkflowScript: "orchestration.getWorkflowScript",
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
@@ -126,6 +127,7 @@ export const ModelSelection = ModelSelectionSource.pipe(
 export type ModelSelection = typeof ModelSelection.Type;
 
 export const RuntimeMode = Schema.Literals([
+  "read-only",
   "approval-required",
   "auto-accept-edits",
   "auto",
@@ -135,6 +137,10 @@ export type RuntimeMode = typeof RuntimeMode.Type;
 export const DEFAULT_RUNTIME_MODE: RuntimeMode = "full-access";
 export const ProviderInteractionMode = Schema.Literals(["default", "plan"]);
 export type ProviderInteractionMode = typeof ProviderInteractionMode.Type;
+
+/** Explicit admission intent. Absent preserves each existing provider's behavior. */
+export const ProviderTurnHandlingMode = Schema.Literals(["queue", "steer"]);
+export type ProviderTurnHandlingMode = typeof ProviderTurnHandlingMode.Type;
 export const DEFAULT_PROVIDER_INTERACTION_MODE: ProviderInteractionMode = "default";
 export const ProviderRequestKind = Schema.Literals([
   "command",
@@ -351,7 +357,7 @@ export const ChatUnknownAttachment = Schema.Struct({
 });
 export type ChatUnknownAttachment = typeof ChatUnknownAttachment.Type;
 
-const UploadChatImageAttachment = Schema.Struct({
+export const UploadChatImageAttachment = Schema.Struct({
   type: Schema.Literal("image"),
   /** Client-side id, so context records can bind to the attachment before it has a server id. */
   id: Schema.optional(ChatAttachmentId),
@@ -605,6 +611,63 @@ const SourceProposedPlanReference = Schema.Struct({
   planId: OrchestrationProposedPlanId,
 });
 
+/** The immutable first turn retained while its checkout is being prepared. */
+export const PreparedThreadTurnCommand = Schema.Struct({
+  type: Schema.Literal("thread.turn.start"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  message: Schema.Struct({
+    messageId: MessageId,
+    role: Schema.Literal("user"),
+    text: Schema.String,
+    attachments: Schema.Array(ChatAttachment),
+    context: Schema.optional(OrchestrationMessageContext),
+  }),
+  modelSelection: Schema.optional(ModelSelection),
+  handlingMode: Schema.optional(ProviderTurnHandlingMode),
+  titleSeed: Schema.optional(TrimmedNonEmptyString),
+  runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
+  interactionMode: ProviderInteractionMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
+  ),
+  sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  createdAt: IsoDateTime,
+});
+export type PreparedThreadTurnCommand = typeof PreparedThreadTurnCommand.Type;
+
+export const ThreadPreparedTurn = Schema.Struct({
+  recoveryId: CommandId,
+  projectId: ProjectId,
+  projectCwd: TrimmedNonEmptyString,
+  expectedCwd: Schema.NullOr(TrimmedNonEmptyString),
+  providerIdentity: Schema.Struct({
+    driverKind: ProviderDriverKind,
+    continuationKey: TrimmedNonEmptyString,
+  }),
+  command: PreparedThreadTurnCommand,
+  phase: Schema.Literals(["preparing", "ready", "blocked", "released"]),
+  setup: Schema.Literals([
+    "not_started",
+    "sync_running",
+    "async_running",
+    "finished",
+    "skipped",
+    "failed",
+  ]),
+  reason: Schema.optional(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+export type ThreadPreparedTurn = typeof ThreadPreparedTurn.Type;
+
+export const OrchestrationRetryPreparedTurnInput = Schema.Struct({
+  threadId: ThreadId,
+  recoveryId: CommandId,
+  expectedCwd: TrimmedNonEmptyString,
+  continueAfterInterruptedSetup: Schema.optional(Schema.Boolean),
+});
+export type OrchestrationRetryPreparedTurnInput = typeof OrchestrationRetryPreparedTurnInput.Type;
+
 export const OrchestrationSessionStatus = Schema.Literals([
   "idle",
   "starting",
@@ -801,6 +864,7 @@ export const OrchestrationThread = Schema.Struct({
   ),
   branch: Schema.NullOr(TrimmedNonEmptyString),
   worktreePath: Schema.NullOr(TrimmedNonEmptyString),
+  preparedTurn: Schema.optional(Schema.NullOr(ThreadPreparedTurn)),
   linkedPullRequest: Schema.optional(Schema.NullOr(ThreadLinkedPullRequest)),
   // Optional so payloads from pre-link servers still decode.
   pullRequests: Schema.Array(ThreadPullRequestLink).pipe(
@@ -1317,24 +1381,16 @@ const ThreadTurnStartBootstrap = Schema.Struct({
 export type ThreadTurnStartBootstrap = typeof ThreadTurnStartBootstrap.Type;
 
 export const ThreadTurnStartCommand = Schema.Struct({
-  type: Schema.Literal("thread.turn.start"),
+  ...PreparedThreadTurnCommand.fields,
+  bootstrap: Schema.optional(ThreadTurnStartBootstrap),
+});
+
+const ThreadPreparedTurnReleaseCommand = Schema.Struct({
+  type: Schema.Literal("thread.prepared-turn.release"),
   commandId: CommandId,
   threadId: ThreadId,
-  message: Schema.Struct({
-    messageId: MessageId,
-    role: Schema.Literal("user"),
-    text: Schema.String,
-    attachments: Schema.Array(ChatAttachment),
-    context: Schema.optional(OrchestrationMessageContext),
-  }),
-  modelSelection: Schema.optional(ModelSelection),
-  titleSeed: Schema.optional(TrimmedNonEmptyString),
-  runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
-  interactionMode: ProviderInteractionMode.pipe(
-    Schema.withDecodingDefault(Effect.succeed(DEFAULT_PROVIDER_INTERACTION_MODE)),
-  ),
-  bootstrap: Schema.optional(ThreadTurnStartBootstrap),
-  sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
+  recoveryId: CommandId,
+  expectedCwd: Schema.NullOr(TrimmedNonEmptyString),
   createdAt: IsoDateTime,
 });
 
@@ -1350,6 +1406,7 @@ const ClientThreadTurnStartCommand = Schema.Struct({
     context: Schema.optional(OrchestrationMessageContext),
   }),
   modelSelection: Schema.optional(ModelSelection),
+  handlingMode: Schema.optional(ProviderTurnHandlingMode),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
@@ -1447,6 +1504,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
   ThreadTurnStartCommand,
+  ThreadPreparedTurnReleaseCommand,
   ThreadTurnInterruptCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
@@ -1481,6 +1539,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadRuntimeModeSetCommand,
   ThreadInteractionModeSetCommand,
   ClientThreadTurnStartCommand,
+  ThreadPreparedTurnReleaseCommand,
   ThreadTurnInterruptCommand,
   ThreadApprovalRespondCommand,
   ThreadUserInputRespondCommand,
@@ -1496,6 +1555,8 @@ const ThreadSessionSetCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   session: OrchestrationSession,
+  expectedCurrent: Schema.optional(Schema.NullOr(OrchestrationSession)),
+  expectedThreadUpdatedAt: Schema.optional(IsoDateTime),
   createdAt: IsoDateTime,
 });
 
@@ -1514,6 +1575,7 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   messageId: MessageId,
+  authoritativeText: Schema.optional(Schema.String),
   turnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
 });
@@ -1659,6 +1721,13 @@ const ThreadPullRequestLinkSyncCommand = Schema.Struct({
 });
 
 const InternalOrchestrationCommand = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literal("thread.prepared-turn.set"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    preparedTurn: ThreadPreparedTurn,
+    createdAt: IsoDateTime,
+  }),
   ThreadAutoSettleCommand,
   ThreadPullRequestSyncCommand,
   ThreadPullRequestLinkSyncCommand,
@@ -1710,6 +1779,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.runtime-mode-set",
   "thread.interaction-mode-set",
   "thread.message-sent",
+  "thread.prepared-turn-changed",
   "thread.turn-start-requested",
   "thread.turn-interrupt-requested",
   "thread.approval-response-requested",
@@ -1914,6 +1984,8 @@ export const ThreadMessageSentPayload = Schema.Struct({
   messageId: MessageId,
   role: OrchestrationMessageRole,
   text: Schema.String,
+  /** The completed text replaces earlier deltas even when empty. */
+  replaceText: Schema.optional(Schema.Boolean),
   attachments: Schema.optional(Schema.Array(ChatAttachment)),
   context: Schema.optional(OrchestrationMessageContext),
   // Events persisted before the field existed carry no key at all.
@@ -1923,10 +1995,18 @@ export const ThreadMessageSentPayload = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 
+export const ThreadPreparedTurnChangedPayload = Schema.Struct({
+  threadId: ThreadId,
+  preparedTurn: ThreadPreparedTurn,
+});
+
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   modelSelection: Schema.optional(ModelSelection),
+  handlingMode: Schema.optional(ProviderTurnHandlingMode),
+  // Same-run steering requests do not reserve a subsequent turn.
+  steeringTurnId: Schema.optional(TurnId),
   titleSeed: Schema.optional(TrimmedNonEmptyString),
   runtimeMode: RuntimeMode.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_RUNTIME_MODE))),
   interactionMode: ProviderInteractionMode.pipe(
@@ -2154,6 +2234,11 @@ export const OrchestrationEvent = Schema.Union([
   }),
   Schema.Struct({
     ...EventBaseFields,
+    type: Schema.Literal("thread.prepared-turn-changed"),
+    payload: ThreadPreparedTurnChangedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
     type: Schema.Literal("thread.turn-start-requested"),
     payload: ThreadTurnStartRequestedPayload,
   }),
@@ -2365,6 +2450,10 @@ export class OrchestrationGetWorkflowScriptError extends Schema.TaggedError<Orch
 }
 
 export const OrchestrationRpcSchemas = {
+  retryPreparedTurn: {
+    input: OrchestrationRetryPreparedTurnInput,
+    output: DispatchResult,
+  },
   dispatchCommand: {
     input: ClientOrchestrationCommand,
     output: DispatchResult,
@@ -2412,7 +2501,9 @@ export class OrchestrationDispatchCommandError extends Schema.TaggedError<Orches
   {
     message: TrimmedNonEmptyString,
     cause: Schema.optional(Schema.Defect()),
-    bootstrapThreadDisposition: Schema.optional(Schema.Literals(["deleted", "not-created"])),
+    bootstrapThreadDisposition: Schema.optional(
+      Schema.Literals(["deleted", "not-created", "retained"]),
+    ),
   },
 ) {}
 

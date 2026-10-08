@@ -1,4 +1,5 @@
 import type { EnvironmentId, ScopedProjectRef } from "@t3tools/contracts";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import { buildProjectGroups, type ProjectGroupingSettings } from "./logicalProject";
 import type { Project } from "./types";
 
@@ -40,6 +41,8 @@ export function projectGroupsSpanEnvironments(
 }
 
 export interface SidebarProjectPickerEntry {
+  key: string;
+  isExplicitCheckout: boolean;
   group: SidebarProjectSnapshot;
   targetProject: SidebarProjectGroupMember;
   isPreferred: boolean;
@@ -136,9 +139,21 @@ export function buildSidebarProjectSnapshots(input: {
 export function buildSidebarProjectPickerEntries(input: {
   groups: ReadonlyArray<SidebarProjectSnapshot>;
   preferredProjectRef: ScopedProjectRef | null;
+  expandCheckouts?: (group: SidebarProjectSnapshot) => boolean;
 }) {
   const preferredProjectRef = input.preferredProjectRef;
   const entries = input.groups.flatMap((group): SidebarProjectPickerEntry[] => {
+    if (input.expandCheckouts?.(group)) {
+      return group.memberProjects.map((targetProject) => ({
+        key: targetProject.physicalProjectKey,
+        isExplicitCheckout: true,
+        group,
+        targetProject,
+        isPreferred:
+          targetProject.environmentId === preferredProjectRef?.environmentId &&
+          targetProject.id === preferredProjectRef?.projectId,
+      }));
+    }
     const isPreferred = preferredProjectRef
       ? group.memberProjectRefs.some(
           (projectRef) =>
@@ -164,7 +179,9 @@ export function buildSidebarProjectPickerEntries(input: {
       group.memberProjects[0];
     if (!targetProject) return [];
 
-    return [{ group, targetProject, isPreferred }];
+    return [
+      { key: group.projectKey, isExplicitCheckout: false, group, targetProject, isPreferred },
+    ];
   });
   const preferredIndex = entries.findIndex((entry) => entry.isPreferred);
   if (preferredIndex <= 0) return entries;
@@ -174,4 +191,22 @@ export function buildSidebarProjectPickerEntries(input: {
     ...entries.slice(0, preferredIndex),
     ...entries.slice(preferredIndex + 1),
   ];
+}
+
+export function resolveSidebarProjectPickerTarget(
+  entry: SidebarProjectPickerEntry,
+  contextualProjectRef: ScopedProjectRef | null,
+): ScopedProjectRef {
+  if (
+    !entry.isExplicitCheckout &&
+    contextualProjectRef !== null &&
+    entry.group.memberProjectRefs.some(
+      (projectRef) =>
+        projectRef.environmentId === contextualProjectRef.environmentId &&
+        projectRef.projectId === contextualProjectRef.projectId,
+    )
+  ) {
+    return contextualProjectRef;
+  }
+  return scopeProjectRef(entry.targetProject.environmentId, entry.targetProject.id);
 }

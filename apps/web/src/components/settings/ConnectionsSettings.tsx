@@ -2598,6 +2598,7 @@ export function ConnectionsSettings() {
     readonly title: string;
     readonly description: string;
     readonly icon?: ReactNode;
+    readonly disabled?: boolean;
   }) => {
     const selected = savedBackendMode === input.mode;
     return (
@@ -2606,9 +2607,11 @@ export function ConnectionsSettings() {
         aria-pressed={selected}
         className={cn(
           "group flex min-h-24 items-start gap-3 rounded-lg border p-4 text-left",
-          selected ? "border-primary/50 bg-primary/5" : "border-border/60 hover:bg-muted/40",
+          selected
+            ? "border-primary/50 bg-primary/5"
+            : "border-border/60 enabled:hover:bg-muted/40",
         )}
-        disabled={isAddingSavedBackend}
+        disabled={isAddingSavedBackend || input.disabled}
         onClick={() => {
           setSavedBackendMode(input.mode);
         }}
@@ -2619,7 +2622,7 @@ export function ConnectionsSettings() {
               "mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md border",
               selected
                 ? "border-primary/30 bg-primary/10 text-primary"
-                : "border-border/70 bg-background text-muted-foreground group-hover:text-foreground",
+                : "border-border/70 bg-background text-muted-foreground group-enabled:group-hover:text-foreground",
             )}
           >
             {input.icon}
@@ -3724,8 +3727,8 @@ export function ConnectionsSettings() {
                         ? renderConnectionModeCard({
                             mode: "ssh",
                             title: "SSH",
-                            description:
-                              "Use local SSH config, agent, and tunnels for the backend.",
+                            description: "Not available in this prototype. Use this Mac.",
+                            disabled: true,
                             icon: <TerminalIcon aria-hidden className="size-4" />,
                           })
                         : null}

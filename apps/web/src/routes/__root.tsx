@@ -81,6 +81,10 @@ import { shouldResumeSnapShotSetupOnStartup } from "../lib/snapShotSetupResume";
 
 export const Route = createRootRoute({
   beforeLoad: async ({ location }) => {
+    // Bundled help remains available before account setup or while the server is offline.
+    if (location.pathname === "/help") {
+      return { authGateState: { status: "local-help" } as const };
+    }
     if (location.pathname === "/pair" && hasHostedPairingRequest(new URL(window.location.href))) {
       return {
         authGateState: {
@@ -134,11 +138,19 @@ function RootRouteNotFoundView() {
 }
 
 function RootRouteView() {
+  const navigate = useNavigate();
+  useEffect(
+    () => window.desktopBridge?.onMenuAction((action) => {
+      if (action === "open-help") void navigate({ to: "/help", search: { topic: "start" } });
+    }),
+    [navigate],
+  );
   useEffect(() => installDesktopPasteAsText(window.desktopBridge, window), []);
   const pathname = useLocation({ select: (location) => location.pathname });
   const { authGateState } = Route.useRouteContext();
   const primaryEnvironmentAuthenticated = authGateState.status === "authenticated";
   const returningFromWelcomeRef = useRef(pathname === "/welcome");
+  const onboardingInProgress = useClientSettings((settings) => settings.onboardingProgress !== null);
 
   useEffect(() => {
     if (pathname === "/welcome") {
@@ -155,7 +167,7 @@ function RootRouteView() {
     };
   }, [pathname]);
 
-  if (pathname === "/pair" || pathname === "/connect") {
+  if (pathname === "/pair" || pathname === "/connect" || pathname === "/help") {
     return (
       <>
         <DocumentTitleSync />
@@ -233,7 +245,7 @@ function RootRouteView() {
           <ProjectCloneToastCoordinator />
           <HostedStaticEnvironmentBootstrap />
           {primaryEnvironmentAuthenticated ? (
-            <EventRouter skipInitialBootstrapNavigation={returningFromWelcomeRef.current} />
+            <EventRouter skipInitialBootstrapNavigation={returningFromWelcomeRef.current || onboardingInProgress} />
           ) : null}
           {primaryEnvironmentAuthenticated ? <PlanAgentSelectionHeal /> : null}
           {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
@@ -387,6 +399,9 @@ function RootRouteErrorView({ error }: ErrorComponentProps) {
           Reload app
         </Button>
         <CopyErrorButton report={report} />
+        <Button size="sm" variant="outline" render={<Link to="/help" search={{ topic: "recovery" }} />}>
+          Recovery guide
+        </Button>
       </div>
 
       <div className="mt-5 overflow-hidden rounded-lg border border-border/70 bg-background/55">

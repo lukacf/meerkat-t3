@@ -12,6 +12,7 @@ import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronMenu from "../electron/ElectronMenu.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
+import * as DesktopDiagnostics from "../diagnostics/DesktopDiagnostics.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 
 export class DesktopApplicationMenuActionError extends Schema.TaggedError<DesktopApplicationMenuActionError>()(
@@ -36,6 +37,7 @@ export class DesktopApplicationMenu extends Context.Service<
 type DesktopApplicationMenuRuntimeServices =
   | DesktopUpdates.DesktopUpdates
   | DesktopWindow.DesktopWindow
+  | DesktopDiagnostics.DesktopDiagnostics
   | ElectronDialog.ElectronDialog;
 
 const { logInfo: logUpdaterInfo } = makeComponentLogger("desktop-updater");
@@ -68,7 +70,7 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
     yield* electronDialog.showMessageBox({
       type: "info",
       title: "You're up to date!",
-      message: `T3 Code ${updateState.currentVersion} is currently the newest version available.`,
+      message: `Meerkat T3 ${updateState.currentVersion} is currently the newest version available.`,
       buttons: ["OK"],
     });
   } else if (updateState.status === "error") {
@@ -105,6 +107,22 @@ const handleCheckForUpdatesMenuClick = Effect.gen(function* () {
   yield* checkForUpdatesFromMenu;
 }).pipe(Effect.withSpan("desktop.menu.handleCheckForUpdatesClick"));
 
+const exportSupportReport = Effect.gen(function* () {
+  const diagnostics = yield* DesktopDiagnostics.DesktopDiagnostics;
+  const dialog = yield* ElectronDialog.ElectronDialog;
+  const result = yield* diagnostics.exportReport;
+  if (result.status === "cancelled") return;
+  yield* dialog.showMessageBox(result.status === "saved" ? {
+    type: "info", title: "Support report saved",
+    message: "Send this file to your prototype distributor.",
+    detail: result.filePath ?? "", buttons: ["OK"],
+  } : {
+    type: "error", title: "Report could not be saved",
+    message: "Try another folder. If this continues, report the app version and what happened to your prototype distributor.",
+    buttons: ["OK"],
+  });
+});
+
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const electronApp = yield* ElectronApp.ElectronApp;
@@ -133,6 +151,9 @@ export const make = Effect.gen(function* () {
   const configure = Effect.gen(function* () {
     const checkForUpdatesClick = () => {
       runMenuEffect("check-for-updates", handleCheckForUpdatesMenuClick);
+    };
+    const helpClick = () => {
+      runMenuEffect("open-help", dispatchMenuAction("open-help"));
     };
     const settingsClick = () => {
       runMenuEffect("open-settings", dispatchMenuAction("open-settings"));
@@ -257,6 +278,9 @@ export const make = Effect.gen(function* () {
       {
         role: "help",
         submenu: [
+          { label: "Meerkat T3 Guide", click: helpClick },
+          { label: "Export support report...", click: () => runMenuEffect("export-support-report", exportSupportReport) },
+          { type: "separator" },
           {
             label: "Check for Updates...",
             click: checkForUpdatesClick,

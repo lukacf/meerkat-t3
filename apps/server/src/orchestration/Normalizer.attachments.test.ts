@@ -10,16 +10,27 @@ import {
   ApprovalRequestId,
   MessageId,
   type OrchestrationMessageContext,
+  type OrchestrationThread,
+  ProjectId,
+  ProviderDriverKind,
+  ProviderInstanceId,
   ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
-import { cleanupFailedUploadedAttachments, normalizeDispatchCommand } from "./Normalizer.ts";
+import {
+  cleanupFailedUploadedAttachments,
+  cleanupFailedUploadedAttachmentsIfUnowned,
+  normalizeDispatchCommand,
+} from "./Normalizer.ts";
+import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
+import { PersistenceSqlError } from "../persistence/Errors.ts";
 
 const testLayer = Layer.mergeAll(
   WorkspacePaths.layer,
@@ -60,6 +71,96 @@ function turnStartCommand(input: {
 }
 
 describe("normalizeDispatchCommand attachments", () => {
+  it.effect.each(["message", "prepared", "released", "query-failed", "unowned"] as const)(
+    "cleans failed uploaded claims only with confirmed absence of an owner: %s",
+    (owner) =>
+      Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        const pendingPath = NodePath.join(config.attachmentsDir, `pending-${attachmentUuid}.png`);
+        NodeFS.writeFileSync(pendingPath, Buffer.from("pixels"));
+        const command = turnStartCommand({
+          attachments: [{ id: `pending-${attachmentUuid}`, sizeBytes: 6 }],
+        });
+        const normalized = yield* normalizeDispatchCommand(command);
+        if (normalized.type !== "thread.turn.start") throw new Error("Expected turn start");
+        const claimedPath = NodePath.join(
+          config.attachmentsDir,
+          `${normalized.message.attachments[0]!.id}.png`,
+        );
+        NodeFS.rmSync(pendingPath);
+        const createdAt = normalized.createdAt;
+        const projectId = ProjectId.make("project-1");
+        const modelSelection = { instanceId: ProviderInstanceId.make("fixture"), model: "fixture" };
+        const thread: OrchestrationThread = {
+          id: normalized.threadId,
+          projectId,
+          title: "Saved first message",
+          modelSelection,
+          runtimeMode: "full-access",
+          interactionMode: "default",
+          branch: "fixture",
+          worktreePath: "/tmp/fixture",
+          pullRequests: [],
+          latestTurn: null,
+          createdAt,
+          updatedAt: createdAt,
+          archivedAt: null,
+          settledOverride: null,
+          settledAt: null,
+          deletedAt: null,
+          session: null,
+          activities: [],
+          proposedPlans: [],
+          checkpoints: [],
+          messages:
+            owner === "message"
+              ? [
+                  {
+                    id: normalized.message.messageId,
+                    role: "user",
+                    text: normalized.message.text,
+                    attachments: normalized.message.attachments,
+                    turnId: null,
+                    streaming: false,
+                    createdAt,
+                    updatedAt: createdAt,
+                  },
+                ]
+              : [],
+          preparedTurn:
+            owner === "prepared" || owner === "released"
+              ? {
+                  recoveryId: normalized.commandId,
+                  projectId,
+                  projectCwd: "/tmp/project",
+                  expectedCwd: "/tmp/fixture",
+                  providerIdentity: {
+                    driverKind: ProviderDriverKind.make("meerkat"),
+                    continuationKey: "fixture",
+                  },
+                  command: { ...normalized, modelSelection },
+                  phase: owner === "released" ? "released" : "blocked",
+                  setup: "finished",
+                  createdAt,
+                  updatedAt: createdAt,
+                }
+              : null,
+        };
+        yield* cleanupFailedUploadedAttachmentsIfUnowned(command, normalized).pipe(
+          Effect.provide(
+            Layer.mock(ProjectionSnapshotQuery)({
+              getThreadDetailById: () =>
+                owner === "query-failed"
+                  ? Effect.fail(
+                      new PersistenceSqlError({ operation: "fixture", detail: "read unavailable" }),
+                    )
+                  : Effect.succeed(Option.some(thread)),
+            }),
+          ),
+        );
+        expect(NodeFS.existsSync(claimedPath)).toBe(owner !== "unowned");
+      }).pipe(Effect.provide(testLayer)),
+  );
   it.effect("accepts 100 inline images and rejects 101 before writing files", () =>
     Effect.gen(function* () {
       const config = yield* ServerConfig.ServerConfig;

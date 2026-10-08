@@ -10,6 +10,7 @@ import { getProjectFileQueryAtom, optimisticFileAtom } from "../files/projectFil
 import { useSettingsProjectGroups } from "./useSettingsProjectGroups";
 import { resolveScopedSettingsTargets, selectScopedSettingsEnvironments } from "./scopedSettings";
 import { resolveSettingsScope, type SettingsScopeSearch } from "./settingsScope";
+import { SettingsWorkspaceReadiness } from "./SettingsWorkspaceReadiness";
 
 /**
  * Each member's decoded t3.json, so file-backed settings show the file as a
@@ -107,7 +108,19 @@ export function SettingsScopeProvider({
     () => ({ ...resolved, search, selectScope: onChange }),
     [onChange, resolved, search],
   );
-  return <SettingsScopeContext value={value}>{children}</SettingsScopeContext>;
+  return (
+    <SettingsScopeContext value={value}>
+      <SettingsWorkspaceReadiness
+        scope={resolved.scope}
+        environments={resolved.connectedEnvironments.map((environment) => ({
+          ...environment,
+          isPrimary: environment.entry.target._tag === "PrimaryConnectionTarget",
+        }))}
+      >
+        {children}
+      </SettingsWorkspaceReadiness>
+    </SettingsScopeContext>
+  );
 }
 
 export function useOptionalSettingsScope() {

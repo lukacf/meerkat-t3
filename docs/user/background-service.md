@@ -1,5 +1,7 @@
 # Running T3 Code in the background
 
+This inherited reference describes the original T3 CLI. It does not install or update the Meerkat prototype. The supported Meerkat pilot runs its bundled server with the [Mac app](install.md); a separate background-service installation is not included.
+
 On Linux and macOS, T3 Code can run as a service for your user so you do not need
 to keep a terminal open.
 

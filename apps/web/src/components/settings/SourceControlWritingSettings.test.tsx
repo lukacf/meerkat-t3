@@ -33,6 +33,9 @@ vi.mock("./SettingsScopeContext", () => ({
 vi.mock("./useScopedModelAvailability", () => ({
   useScopedModelDisabledReason: () => () => null,
 }));
+vi.mock("./useSettingsProviderReadiness", () => ({
+  useSettingsProviderReadiness: () => ({ providers: [], pendingInstanceIds: new Set() }),
+}));
 vi.mock("../ui/toast", () => ({ toastManager: { add: vi.fn() } }));
 vi.mock("../../state/server", () => ({ EMPTY_SERVER_PROVIDERS: [] }));
 vi.mock("../chat/ProviderModelPicker", () => ({ ProviderModelPicker: () => null }));

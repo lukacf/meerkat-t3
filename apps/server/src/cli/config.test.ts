@@ -22,6 +22,7 @@ import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { deriveServerPaths } from "../config.ts";
 import { resolveServerConfig } from "./config.ts";
+import { DesktopParentLifetimeError } from "../desktopParentLifetime.ts";
 
 const deriveExplicitServerPaths = (baseDir: string, devUrl: URL | undefined) =>
   deriveServerPaths(baseDir, devUrl, { baseDirIsExplicit: true });
@@ -397,7 +398,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
           noBrowser: true,
           desktopBootstrapToken: "desktop-token",
           desktopTelemetryFd: 4,
+          desktopAppVersion: "0.0.48",
           desktopTelemetryControlFd: 5,
+          desktopParentLifetimeFd: 6,
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
           otlpTracesUrl: "http://localhost:4318/v1/traces",
@@ -456,7 +459,9 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         startupPresentation: "browser",
         desktopBootstrapToken: "desktop-token",
         desktopTelemetryFd: 4,
+        desktopAppVersion: "0.0.48",
         desktopTelemetryControlFd: 5,
+        desktopParentLifetimeFd: 6,
         resourceMonitorPath: undefined,
         autoBootstrapProjectFromCwd: false,
         logWebSocketEvents: false,
@@ -466,6 +471,56 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       assert.equal(join(baseDir, "userdata"), resolved.stateDir);
       assert.equal(resolved.desktopTelemetryFd, 4);
       assert.equal(resolved.desktopTelemetryControlFd, 5);
+      assert.equal(resolved.desktopParentLifetimeFd, 6);
+    }),
+  );
+
+  it.effect("rejects a lifetime descriptor shared with the one-shot bootstrap input", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const filePath = yield* fs.makeTempFileScoped({ prefix: "t3-bootstrap-collision-" });
+      const fd = yield* Effect.acquireRelease(
+        Effect.sync(() => NodeFS.openSync(filePath, "r")),
+        (fd) =>
+          Effect.sync(() => {
+            try {
+              NodeFS.closeSync(fd);
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code !== "EBADF") throw error;
+            }
+          }),
+      );
+      const encoded = yield* encodeDesktopBootstrap(
+        makeDesktopBootstrap({ desktopParentLifetimeFd: fd }),
+      );
+      yield* fs.writeFileString(filePath, `${encoded}\n`);
+      const error = yield* resolveServerConfig(
+        {
+          mode: Option.none(),
+          port: Option.none(),
+          host: Option.none(),
+          baseDir: Option.none(),
+          cwd: Option.none(),
+          devUrl: Option.none(),
+          noBrowser: Option.none(),
+          bootstrapFd: Option.some(fd),
+          autoBootstrapProjectFromCwd: Option.none(),
+          logWebSocketEvents: Option.none(),
+          tailscaleServeEnabled: Option.none(),
+          tailscaleServePort: Option.none(),
+        },
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+            NetService.layer,
+          ),
+        ),
+        Effect.flip,
+      );
+      assert.instanceOf(error, DesktopParentLifetimeError);
+      assert.equal(error.fd, fd);
     }),
   );
 

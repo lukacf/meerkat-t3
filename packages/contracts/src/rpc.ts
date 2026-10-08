@@ -1,3 +1,76 @@
+import { MeerkatUsageInput, MeerkatUsageSnapshot, MeerkatUsageError } from "./meerkatUsage.ts";
+import {
+  RestoreReviewConsentInput,
+  RestoreReviewError,
+  RestoreReviewSnapshot,
+  RestoreReviewStatus,
+} from "./restoreReview.ts";
+import {
+  MeerkatCheckpointTarget,
+  MeerkatWorkspaceCheckpoint,
+  MeerkatCheckpointList,
+  MeerkatCheckpointPreviewInput,
+  MeerkatCheckpointPreview,
+  MeerkatCheckpointRestoreInput,
+  MeerkatCheckpointRestoreResult,
+  MeerkatCheckpointError,
+} from "./meerkatCheckpoints.ts";
+import {
+  MeerkatThreadRecoveryTarget,
+  MeerkatThreadRecovery,
+  MeerkatRecoverThreadInput,
+  MeerkatThreadRecoveryReceipt,
+  MeerkatThreadRecoveryError,
+  MeerkatReconnectThreadReceipt,
+} from "./meerkatThreadRecovery.ts";
+import {
+  MeerkatCoordinatorTarget,
+  MeerkatCoordinatorWork,
+  MeerkatCoordinatorControl,
+  MeerkatCoordinatorSteer,
+  MeerkatCoordinatorStopReceipt,
+} from "./meerkatCoordinatorWork.ts";
+import {
+  MeerkatAttention,
+  MeerkatAttentionStreamItem,
+  MeerkatAttentionInput,
+  MeerkatAttentionReadInput,
+  MeerkatAttentionError,
+} from "./meerkatAttention.ts";
+import {
+  MeerkatConversationSearchInput,
+  MeerkatConversationSearchResult,
+  MeerkatConversationSearchError,
+} from "./meerkatSearch.ts";
+import {
+  ProjectTerminalTarget,
+  ProjectTerminalAttachInput,
+  ProjectTerminalWriteInput,
+  ProjectTerminalResizeInput,
+  ProjectTerminalEvent,
+  ProjectTerminalError,
+} from "./projectTerminal.ts";
+import {
+  MeerkatMediaTarget,
+  MeerkatBrowserGrantInput,
+  MeerkatBrowserGrant,
+  MeerkatImageUploadInput,
+  MeerkatImageReadInput,
+  MeerkatImageUpload,
+  MeerkatImageRead,
+  MeerkatMediaError,
+} from "./meerkatMedia.ts";
+import {
+  MeerkatAuthScope,
+  MeerkatQuestionTarget,
+  MeerkatQuestions,
+  MeerkatQuestionAnswerInput,
+  MeerkatQuestionAnswerReceipt,
+  MeerkatAuthOverview,
+  MeerkatAuthActionInput,
+  MeerkatAuthFlow,
+  MeerkatControlError,
+} from "./meerkatControls.ts";
 import * as Schema from "effect/Schema";
 import * as Rpc from "effect/unstable/rpc/Rpc";
 import * as RpcGroup from "effect/unstable/rpc/RpcGroup";
@@ -75,6 +148,9 @@ import {
   VcsRemoveWorktreeInput,
   GitResolvePullRequestResult,
   GitRunStackedActionInput,
+  GitIdentityInput,
+  GitIdentityUpdateInput,
+  GitIdentityResult,
   VcsStatusInput,
   VcsStatusResult,
   VcsStatusStreamEvent,
@@ -107,6 +183,45 @@ import {
   ProviderUploadFeedbackResult,
 } from "./provider.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
+import {
+  MeerkatProjectTeamInput,
+  MeerkatProjectProposalInput,
+  MeerkatProjectProposal,
+  MeerkatProjectProposalSetupInput,
+  MeerkatProjectProposalCreateInput,
+  MeerkatProjectProposalCreateResult,
+  MeerkatProjectAgentPrepareInput,
+  MeerkatProjectAgents,
+  MeerkatThreadConnectionsInput,
+  MeerkatThreadConnectionsSetInput,
+  MeerkatThreadConnections,
+  MeerkatPeerConnectionsInput,
+  MeerkatPeerConnectionSetInput,
+  MeerkatPeerConnections,
+  MeerkatProjectAgent,
+  MeerkatProjectAgentCreateInput,
+  MeerkatProjectAgentUpdateInput,
+  MeerkatProjectAgentLifecycleInput,
+  MeerkatAgentSendInput,
+  MeerkatAgentStopInput,
+  MeerkatAgentLifecycleInput,
+  MeerkatAgentControlReceipt,
+  MeerkatAgentDeliveryReconcileResult,
+  MeerkatProjectTeam,
+  MeerkatAgentActivityInput,
+  MeerkatAgentActivity,
+  MeerkatTeamError,
+} from "./meerkatTeam.ts";
+import {
+  MeerkatAgentQueue,
+  MeerkatAgentQueueStreamItem,
+  MeerkatAgentQueueError,
+  MeerkatAgentQueueTarget,
+  MeerkatAgentQueueEnqueueInput,
+  MeerkatAgentQueueEditInput,
+  MeerkatAgentQueueMoveInput,
+  MeerkatAgentQueueMutationInput,
+} from "./meerkatAgentQueue.ts";
 import {
   PullRequestActionInput,
   PullRequestActivity,
@@ -253,7 +368,13 @@ import {
   ProviderConsumeResetCreditResult,
 } from "./providerUsageLimits.ts";
 import { UsagePricing, UsageReadError, UsageSummary, UsageSummaryInput } from "./usage.ts";
-import { ServerSettings, ServerSettingsError, ServerSettingsPatch } from "./settings.ts";
+import {
+  ProviderSettingsIntent,
+  ProviderSettingsConflictError,
+  ServerSettings,
+  ServerSettingsError,
+  ServerSettingsPatch,
+} from "./settings.ts";
 import {
   ProjectCloneActionInput,
   ProjectCloneActionResult,
@@ -275,6 +396,60 @@ import {
 import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
+  meerkatBrowserStatus: "meerkat.browserStatus",
+  meerkatBrowserGrant: "meerkat.browserGrant",
+  meerkatImageUpload: "meerkat.imageUpload",
+  meerkatImageRead: "meerkat.imageRead",
+  meerkatProjectTeam: "meerkat.projectTeam",
+  meerkatUsageSnapshot: "meerkat.usageSnapshot",
+  meerkatAgentActivity: "meerkat.agentActivity",
+  meerkatSearchConversations: "meerkat.searchConversations",
+  meerkatProjectProposal: "meerkat.projectProposal",
+  meerkatProjectProposalSetup: "meerkat.projectProposalSetup",
+  meerkatProjectProposalCreate: "meerkat.projectProposalCreate",
+  meerkatProjectAgentPrepare: "meerkat.projectAgentPrepare",
+  meerkatProjectAgents: "meerkat.projectAgents",
+  meerkatThreadConnections: "meerkat.threadConnections",
+  meerkatThreadConnectionsSet: "meerkat.threadConnectionsSet",
+  meerkatPeerConnections: "meerkat.peerConnections",
+  meerkatPeerConnectionSet: "meerkat.peerConnectionSet",
+
+  meerkatProjectAgentCreate: "meerkat.projectAgentCreate",
+  meerkatProjectAgentUpdate: "meerkat.projectAgentUpdate",
+  meerkatProjectAgentLifecycle: "meerkat.projectAgentLifecycle",
+  meerkatAgentSend: "meerkat.agentSend",
+  meerkatAgentDeliveryReconcile: "meerkat.agentDeliveryReconcile",
+  meerkatAgentQueue: "meerkat.agentQueue",
+  meerkatAgentQueueSubscribe: "meerkat.agentQueueSubscribe",
+  meerkatAgentQueueEnqueue: "meerkat.agentQueueEnqueue",
+  meerkatAgentQueueEdit: "meerkat.agentQueueEdit",
+  meerkatAgentQueueMove: "meerkat.agentQueueMove",
+  meerkatAgentQueueCancel: "meerkat.agentQueueCancel",
+  meerkatAgentQueueRetry: "meerkat.agentQueueRetry",
+
+  meerkatAgentStop: "meerkat.agentStop",
+  meerkatAgentResume: "meerkat.agentResume",
+  meerkatAgentStopCrew: "meerkat.agentStopCrew",
+  meerkatThreadRecovery: "meerkat.threadRecovery",
+  meerkatRecoverThread: "meerkat.recoverThread",
+  meerkatReconnectThread: "meerkat.reconnectThread",
+  meerkatAttention: "meerkat.attention",
+  meerkatAttentionSubscribe: "meerkat.attentionSubscribe",
+  meerkatAttentionRead: "meerkat.attentionRead",
+  meerkatQuestions: "meerkat.questions",
+  meerkatApprovals: "meerkat.approvals",
+  meerkatApprovalDecide: "meerkat.approvalDecide",
+  meerkatCheckpointCapture: "meerkat.checkpointCapture",
+  meerkatCheckpoints: "meerkat.checkpoints",
+  meerkatCheckpointPreview: "meerkat.checkpointPreview",
+  meerkatCheckpointRestore: "meerkat.checkpointRestore",
+  meerkatCoordinatorWork: "meerkat.coordinatorWork",
+  meerkatCoordinatorStop: "meerkat.coordinatorStop",
+  meerkatCoordinatorSteer: "meerkat.coordinatorSteer",
+  meerkatQuestionAnswer: "meerkat.questionAnswer",
+  meerkatAuthStatus: "meerkat.authStatus",
+  meerkatAuthAction: "meerkat.authAction",
+
   // Project registry methods
   projectsList: "projects.list",
   projectsAdd: "projects.add",
@@ -319,6 +494,8 @@ export const WS_METHODS = {
   vcsCreateRef: "vcs.createRef",
   vcsSwitchRef: "vcs.switchRef",
   vcsInit: "vcs.init",
+  gitIdentity: "git.identity",
+  gitIdentityUpdate: "git.identityUpdate",
 
   // Git workflow methods
   gitRunStackedAction: "git.runStackedAction",
@@ -330,6 +507,11 @@ export const WS_METHODS = {
   reviewGetDiffFileContents: "review.getDiffFileContents",
 
   // Terminal methods
+  projectTerminalAttach: "projectTerminal.attach",
+  projectTerminalWrite: "projectTerminal.write",
+  projectTerminalResize: "projectTerminal.resize",
+  projectTerminalClear: "projectTerminal.clear",
+  projectTerminalClose: "projectTerminal.close",
   terminalOpen: "terminal.open",
   terminalAttach: "terminal.attach",
   terminalWrite: "terminal.write",
@@ -363,6 +545,8 @@ export const WS_METHODS = {
   // Server meta
   serverProbe: "server.probe",
   serverGetConfig: "server.getConfig",
+  serverRestoreReviewSnapshot: "server.restoreReviewSnapshot",
+  serverRestoreReviewConsent: "server.restoreReviewConsent",
   serverRefreshProviders: "server.refreshProviders",
   serverUpdateProvider: "server.updateProvider",
   serverUpdateServer: "server.updateServer",
@@ -372,6 +556,7 @@ export const WS_METHODS = {
   serverRemoveKeybinding: "server.removeKeybinding",
   serverGetSettings: "server.getSettings",
   serverUpdateSettings: "server.updateSettings",
+  serverUpdateProviderSettings: "server.updateProviderSettings",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
@@ -469,6 +654,17 @@ const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
   error: Schema.Union([KeybindingsConfigError, ServerSettingsError, EnvironmentAuthorizationError]),
 });
 
+const WsServerRestoreReviewSnapshotRpc = Rpc.make(WS_METHODS.serverRestoreReviewSnapshot, {
+  payload: Schema.Struct({}),
+  success: RestoreReviewSnapshot,
+  error: Schema.Union([RestoreReviewError, EnvironmentAuthorizationError]),
+});
+const WsServerRestoreReviewConsentRpc = Rpc.make(WS_METHODS.serverRestoreReviewConsent, {
+  payload: RestoreReviewConsentInput,
+  success: RestoreReviewStatus,
+  error: Schema.Union([RestoreReviewError, EnvironmentAuthorizationError]),
+});
+
 const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, {
   payload: Schema.Struct({
     /**
@@ -494,6 +690,252 @@ const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvider, {
 });
 
 const ProviderSetupRpcError = Schema.Union([ProviderSetupError, EnvironmentAuthorizationError]);
+
+const WsMeerkatThreadRecoveryRpc = Rpc.make(WS_METHODS.meerkatThreadRecovery, {
+  payload: MeerkatThreadRecoveryTarget,
+  success: MeerkatThreadRecovery,
+  error: Schema.Union([MeerkatThreadRecoveryError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatReconnectThreadRpc = Rpc.make(WS_METHODS.meerkatReconnectThread, {
+  payload: MeerkatRecoverThreadInput,
+  success: MeerkatReconnectThreadReceipt,
+  error: Schema.Union([MeerkatThreadRecoveryError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatRecoverThreadRpc = Rpc.make(WS_METHODS.meerkatRecoverThread, {
+  payload: MeerkatRecoverThreadInput,
+  success: MeerkatThreadRecoveryReceipt,
+  error: Schema.Union([MeerkatThreadRecoveryError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAttentionRpc = Rpc.make(WS_METHODS.meerkatAttention, {
+  payload: MeerkatAttentionInput,
+  success: MeerkatAttention,
+  error: Schema.Union([MeerkatAttentionError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAttentionReadRpc = Rpc.make(WS_METHODS.meerkatAttentionRead, {
+  payload: MeerkatAttentionReadInput,
+  success: MeerkatAttention,
+  error: Schema.Union([MeerkatAttentionError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAttentionSubscribeRpc = Rpc.make(WS_METHODS.meerkatAttentionSubscribe, {
+  payload: MeerkatAttentionInput,
+  success: MeerkatAttentionStreamItem,
+  error: Schema.Union([MeerkatAttentionError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+const WsMeerkatCheckpointCaptureRpc = Rpc.make(WS_METHODS.meerkatCheckpointCapture, {
+  payload: MeerkatCheckpointTarget,
+  success: MeerkatWorkspaceCheckpoint,
+  error: Schema.Union([MeerkatCheckpointError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatCheckpointsRpc = Rpc.make(WS_METHODS.meerkatCheckpoints, {
+  payload: MeerkatCheckpointTarget,
+  success: MeerkatCheckpointList,
+  error: Schema.Union([MeerkatCheckpointError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatCheckpointPreviewRpc = Rpc.make(WS_METHODS.meerkatCheckpointPreview, {
+  payload: MeerkatCheckpointPreviewInput,
+  success: MeerkatCheckpointPreview,
+  error: Schema.Union([MeerkatCheckpointError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatCheckpointRestoreRpc = Rpc.make(WS_METHODS.meerkatCheckpointRestore, {
+  payload: MeerkatCheckpointRestoreInput,
+  success: MeerkatCheckpointRestoreResult,
+  error: Schema.Union([MeerkatCheckpointError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatCoordinatorWorkRpc = Rpc.make(WS_METHODS.meerkatCoordinatorWork, {
+  payload: MeerkatCoordinatorTarget,
+  success: MeerkatCoordinatorWork,
+  error: Schema.Union([MeerkatControlError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatCoordinatorStopRpc = Rpc.make(WS_METHODS.meerkatCoordinatorStop, {
+  payload: MeerkatCoordinatorControl,
+  success: MeerkatCoordinatorStopReceipt,
+  error: Schema.Union([MeerkatControlError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatCoordinatorSteerRpc = Rpc.make(WS_METHODS.meerkatCoordinatorSteer, {
+  payload: MeerkatCoordinatorSteer,
+  success: MeerkatAgentControlReceipt,
+  error: Schema.Union([MeerkatControlError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatQuestionsRpc = Rpc.make(WS_METHODS.meerkatQuestions, {
+  payload: MeerkatQuestionTarget,
+  success: MeerkatQuestions,
+  error: Schema.Union([MeerkatControlError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatApprovalsRpc = Rpc.make(WS_METHODS.meerkatApprovals, {
+  payload: MeerkatQuestionTarget,
+  success: MeerkatApprovals,
+  error: Schema.Union([MeerkatControlError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatApprovalDecideRpc = Rpc.make(WS_METHODS.meerkatApprovalDecide, {
+  payload: MeerkatApprovalDecisionInput,
+  success: MeerkatApproval,
+  error: Schema.Union([MeerkatControlError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatQuestionAnswerRpc = Rpc.make(WS_METHODS.meerkatQuestionAnswer, {
+  payload: MeerkatQuestionAnswerInput,
+  success: MeerkatQuestionAnswerReceipt,
+  error: Schema.Union([MeerkatControlError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAuthStatusRpc = Rpc.make(WS_METHODS.meerkatAuthStatus, {
+  payload: MeerkatAuthScope,
+  success: MeerkatAuthOverview,
+  error: Schema.Union([MeerkatControlError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAuthActionRpc = Rpc.make(WS_METHODS.meerkatAuthAction, {
+  payload: MeerkatAuthActionInput,
+  success: MeerkatAuthFlow,
+  error: Schema.Union([MeerkatControlError, EnvironmentAuthorizationError]),
+});
+
+const WsMeerkatProjectProposalRpc = Rpc.make(WS_METHODS.meerkatProjectProposal, {
+  payload: MeerkatProjectProposalInput,
+  success: MeerkatProjectProposal,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+
+const WsMeerkatProjectProposalSetupRpc = Rpc.make(WS_METHODS.meerkatProjectProposalSetup, {
+  payload: MeerkatProjectProposalSetupInput,
+  success: MeerkatProjectProposalSetupInput,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+
+const WsMeerkatProjectProposalCreateRpc = Rpc.make(WS_METHODS.meerkatProjectProposalCreate, {
+  payload: MeerkatProjectProposalCreateInput,
+  success: MeerkatProjectProposalCreateResult,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+
+const WsMeerkatProjectAgentPrepareRpc = Rpc.make(WS_METHODS.meerkatProjectAgentPrepare, {
+  payload: MeerkatProjectAgentPrepareInput,
+  success: MeerkatProjectAgent,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+
+const WsMeerkatProjectTeamRpc = Rpc.make(WS_METHODS.meerkatProjectTeam, {
+  payload: MeerkatProjectTeamInput,
+  success: MeerkatProjectTeam,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatUsageSnapshotRpc = Rpc.make(WS_METHODS.meerkatUsageSnapshot, {
+  payload: MeerkatUsageInput,
+  success: MeerkatUsageSnapshot,
+  error: Schema.Union([MeerkatUsageError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatConversationSearchRpc = Rpc.make(WS_METHODS.meerkatSearchConversations, {
+  payload: MeerkatConversationSearchInput,
+  success: MeerkatConversationSearchResult,
+  error: Schema.Union([MeerkatConversationSearchError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAgentActivityRpc = Rpc.make(WS_METHODS.meerkatAgentActivity, {
+  payload: MeerkatAgentActivityInput,
+  success: MeerkatAgentActivity,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+
+const WsMeerkatProjectAgentCreateRpc = Rpc.make(WS_METHODS.meerkatProjectAgentCreate, {
+  payload: MeerkatProjectAgentCreateInput,
+  success: MeerkatProjectAgent,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatProjectAgentUpdateRpc = Rpc.make(WS_METHODS.meerkatProjectAgentUpdate, {
+  payload: MeerkatProjectAgentUpdateInput,
+  success: MeerkatProjectAgent,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatProjectAgentLifecycleRpc = Rpc.make(WS_METHODS.meerkatProjectAgentLifecycle, {
+  payload: MeerkatProjectAgentLifecycleInput,
+  success: MeerkatProjectAgent,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAgentQueueRpc = Rpc.make(WS_METHODS.meerkatAgentQueue, {
+  payload: MeerkatAgentQueueTarget,
+  success: MeerkatAgentQueue,
+  error: Schema.Union([MeerkatAgentQueueError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAgentQueueEnqueueRpc = Rpc.make(WS_METHODS.meerkatAgentQueueEnqueue, {
+  payload: MeerkatAgentQueueEnqueueInput,
+  success: MeerkatAgentQueue,
+  error: Schema.Union([MeerkatAgentQueueError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAgentQueueSubscribeRpc = Rpc.make(WS_METHODS.meerkatAgentQueueSubscribe, {
+  payload: MeerkatAgentQueueTarget,
+  success: MeerkatAgentQueueStreamItem,
+  error: Schema.Union([MeerkatAgentQueueError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+const WsMeerkatAgentQueueEditRpc = Rpc.make(WS_METHODS.meerkatAgentQueueEdit, {
+  payload: MeerkatAgentQueueEditInput,
+  success: MeerkatAgentQueue,
+  error: Schema.Union([MeerkatAgentQueueError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAgentQueueMoveRpc = Rpc.make(WS_METHODS.meerkatAgentQueueMove, {
+  payload: MeerkatAgentQueueMoveInput,
+  success: MeerkatAgentQueue,
+  error: Schema.Union([MeerkatAgentQueueError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAgentQueueCancelRpc = Rpc.make(WS_METHODS.meerkatAgentQueueCancel, {
+  payload: MeerkatAgentQueueMutationInput,
+  success: MeerkatAgentQueue,
+  error: Schema.Union([MeerkatAgentQueueError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAgentQueueRetryRpc = Rpc.make(WS_METHODS.meerkatAgentQueueRetry, {
+  payload: MeerkatAgentQueueMutationInput,
+  success: MeerkatAgentQueue,
+  error: Schema.Union([MeerkatAgentQueueError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAgentSendRpc = Rpc.make(WS_METHODS.meerkatAgentSend, {
+  payload: MeerkatAgentSendInput,
+  success: MeerkatAgentControlReceipt,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAgentDeliveryReconcileRpc = Rpc.make(WS_METHODS.meerkatAgentDeliveryReconcile, {
+  // The original payload identifies the receipt. A missing receipt never authorizes a resend.
+  payload: MeerkatAgentSendInput,
+  success: MeerkatAgentDeliveryReconcileResult,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAgentResumeRpc = Rpc.make(WS_METHODS.meerkatAgentResume, {
+  payload: MeerkatAgentLifecycleInput,
+  success: MeerkatProjectTeam,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAgentStopCrewRpc = Rpc.make(WS_METHODS.meerkatAgentStopCrew, {
+  payload: MeerkatAgentLifecycleInput,
+  success: MeerkatProjectTeam,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatAgentStopRpc = Rpc.make(WS_METHODS.meerkatAgentStop, {
+  payload: MeerkatAgentStopInput,
+  success: MeerkatAgentControlReceipt,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+
+const WsMeerkatProjectAgentsRpc = Rpc.make(WS_METHODS.meerkatProjectAgents, {
+  payload: MeerkatProjectTeamInput,
+  success: MeerkatProjectAgents,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatThreadConnectionsRpc = Rpc.make(WS_METHODS.meerkatThreadConnections, {
+  payload: MeerkatThreadConnectionsInput,
+  success: MeerkatThreadConnections,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatThreadConnectionsSetRpc = Rpc.make(WS_METHODS.meerkatThreadConnectionsSet, {
+  payload: MeerkatThreadConnectionsSetInput,
+  success: MeerkatThreadConnections,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatPeerConnectionsRpc = Rpc.make(WS_METHODS.meerkatPeerConnections, {
+  payload: MeerkatPeerConnectionsInput,
+  success: MeerkatPeerConnections,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatPeerConnectionSetRpc = Rpc.make(WS_METHODS.meerkatPeerConnectionSet, {
+  payload: MeerkatPeerConnectionSetInput,
+  success: MeerkatPeerConnections,
+  error: Schema.Union([MeerkatTeamError, EnvironmentAuthorizationError]),
+});
 
 const WsProviderConsumeResetCreditRpc = Rpc.make(WS_METHODS.providerConsumeResetCredit, {
   payload: ProviderConsumeResetCreditInput,
@@ -586,6 +1028,16 @@ const WsServerGetSettingsRpc = Rpc.make(WS_METHODS.serverGetSettings, {
   payload: Schema.Struct({}),
   success: ServerSettings,
   error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
+});
+
+const WsServerUpdateProviderSettingsRpc = Rpc.make(WS_METHODS.serverUpdateProviderSettings, {
+  payload: Schema.Struct({ intent: ProviderSettingsIntent }),
+  success: ServerSettings,
+  error: Schema.Union([
+    ProviderSettingsConflictError,
+    ServerSettingsError,
+    EnvironmentAuthorizationError,
+  ]),
 });
 
 const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
@@ -1086,6 +1538,17 @@ const WsVcsSwitchRefRpc = Rpc.make(WS_METHODS.vcsSwitchRef, {
   error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
 });
 
+const WsGitIdentityRpc = Rpc.make(WS_METHODS.gitIdentity, {
+  payload: GitIdentityInput,
+  success: GitIdentityResult,
+  error: Schema.Union([VcsError, EnvironmentAuthorizationError]),
+});
+const WsGitIdentityUpdateRpc = Rpc.make(WS_METHODS.gitIdentityUpdate, {
+  payload: GitIdentityUpdateInput,
+  success: GitIdentityResult,
+  error: Schema.Union([VcsError, EnvironmentAuthorizationError]),
+});
+
 const WsVcsInitRpc = Rpc.make(WS_METHODS.vcsInit, {
   payload: VcsInitInput,
   error: Schema.Union([VcsError, EnvironmentAuthorizationError]),
@@ -1106,6 +1569,29 @@ const WsReviewGetDiffFileContentsRpc = Rpc.make(WS_METHODS.reviewGetDiffFileCont
   payload: ReviewDiffFileContentsInput,
   success: ReviewDiffFileContentsResult,
   error: Schema.Union([ReviewDiffPreviewError, EnvironmentAuthorizationError]),
+});
+
+const WsProjectTerminalAttachRpc = Rpc.make(WS_METHODS.projectTerminalAttach, {
+  payload: ProjectTerminalAttachInput,
+  success: ProjectTerminalEvent,
+  error: Schema.Union([ProjectTerminalError, EnvironmentAuthorizationError]),
+  stream: true,
+});
+const WsProjectTerminalWriteRpc = Rpc.make(WS_METHODS.projectTerminalWrite, {
+  payload: ProjectTerminalWriteInput,
+  error: Schema.Union([ProjectTerminalError, EnvironmentAuthorizationError]),
+});
+const WsProjectTerminalResizeRpc = Rpc.make(WS_METHODS.projectTerminalResize, {
+  payload: ProjectTerminalResizeInput,
+  error: Schema.Union([ProjectTerminalError, EnvironmentAuthorizationError]),
+});
+const WsProjectTerminalClearRpc = Rpc.make(WS_METHODS.projectTerminalClear, {
+  payload: ProjectTerminalTarget,
+  error: Schema.Union([ProjectTerminalError, EnvironmentAuthorizationError]),
+});
+const WsProjectTerminalCloseRpc = Rpc.make(WS_METHODS.projectTerminalClose, {
+  payload: ProjectTerminalTarget,
+  error: Schema.Union([ProjectTerminalError, EnvironmentAuthorizationError]),
 });
 
 const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
@@ -1278,6 +1764,12 @@ const WsOrchestrationDispatchCommandRpc = Rpc.make(ORCHESTRATION_WS_METHODS.disp
   error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),
 });
 
+const WsOrchestrationRetryPreparedTurnRpc = Rpc.make(ORCHESTRATION_WS_METHODS.retryPreparedTurn, {
+  payload: OrchestrationRpcSchemas.retryPreparedTurn.input,
+  success: OrchestrationRpcSchemas.retryPreparedTurn.output,
+  error: Schema.Union([OrchestrationDispatchCommandError, EnvironmentAuthorizationError]),
+});
+
 const WsOrchestrationGetWorkflowScriptRpc = Rpc.make(ORCHESTRATION_WS_METHODS.getWorkflowScript, {
   payload: OrchestrationRpcSchemas.getWorkflowScript.input,
   success: OrchestrationRpcSchemas.getWorkflowScript.output,
@@ -1391,9 +1883,87 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
   stream: true,
 });
 
+const WsMeerkatBrowserStatusRpc = Rpc.make(WS_METHODS.meerkatBrowserStatus, {
+  payload: MeerkatMediaTarget,
+  success: MeerkatBrowserGrant,
+  error: Schema.Union([MeerkatMediaError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatBrowserGrantRpc = Rpc.make(WS_METHODS.meerkatBrowserGrant, {
+  payload: MeerkatBrowserGrantInput,
+  success: MeerkatBrowserGrant,
+  error: Schema.Union([MeerkatMediaError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatImageUploadRpc = Rpc.make(WS_METHODS.meerkatImageUpload, {
+  payload: MeerkatImageUploadInput,
+  success: MeerkatImageUpload,
+  error: Schema.Union([MeerkatMediaError, EnvironmentAuthorizationError]),
+});
+const WsMeerkatImageReadRpc = Rpc.make(WS_METHODS.meerkatImageRead, {
+  payload: MeerkatImageReadInput,
+  success: MeerkatImageRead,
+  error: Schema.Union([MeerkatMediaError, EnvironmentAuthorizationError]),
+});
+
 export const WsRpcGroup = RpcGroup.make(
+  WsMeerkatBrowserStatusRpc,
+  WsMeerkatBrowserGrantRpc,
+  WsMeerkatImageUploadRpc,
+  WsMeerkatImageReadRpc,
+  WsMeerkatThreadRecoveryRpc,
+  WsMeerkatRecoverThreadRpc,
+  WsMeerkatReconnectThreadRpc,
+  WsMeerkatAttentionRpc,
+  WsMeerkatAttentionSubscribeRpc,
+  WsMeerkatAttentionReadRpc,
+  WsMeerkatCheckpointCaptureRpc,
+  WsMeerkatCheckpointsRpc,
+  WsMeerkatCheckpointPreviewRpc,
+  WsMeerkatCheckpointRestoreRpc,
+  WsMeerkatCoordinatorWorkRpc,
+  WsMeerkatCoordinatorStopRpc,
+  WsMeerkatCoordinatorSteerRpc,
+  WsMeerkatQuestionsRpc,
+  WsMeerkatApprovalsRpc,
+  WsMeerkatApprovalDecideRpc,
+  WsMeerkatQuestionAnswerRpc,
+  WsMeerkatAuthStatusRpc,
+  WsMeerkatAuthActionRpc,
+
+  WsMeerkatProjectProposalRpc,
+  WsMeerkatProjectProposalSetupRpc,
+  WsMeerkatProjectProposalCreateRpc,
+  WsMeerkatProjectAgentPrepareRpc,
+  WsMeerkatProjectTeamRpc,
+  WsMeerkatUsageSnapshotRpc,
+  WsMeerkatAgentActivityRpc,
+  WsMeerkatConversationSearchRpc,
+  WsMeerkatProjectAgentsRpc,
+  WsMeerkatThreadConnectionsRpc,
+  WsMeerkatThreadConnectionsSetRpc,
+  WsMeerkatPeerConnectionsRpc,
+  WsMeerkatPeerConnectionSetRpc,
+
+  WsMeerkatProjectAgentCreateRpc,
+  WsMeerkatProjectAgentUpdateRpc,
+  WsMeerkatProjectAgentLifecycleRpc,
+  WsMeerkatAgentSendRpc,
+  WsMeerkatAgentDeliveryReconcileRpc,
+  WsMeerkatAgentQueueRpc,
+  WsMeerkatAgentQueueSubscribeRpc,
+  WsMeerkatAgentQueueEnqueueRpc,
+  WsMeerkatAgentQueueEditRpc,
+  WsMeerkatAgentQueueMoveRpc,
+  WsMeerkatAgentQueueCancelRpc,
+  WsMeerkatAgentQueueRetryRpc,
+
+  WsMeerkatAgentStopRpc,
+  WsMeerkatAgentResumeRpc,
+  WsMeerkatAgentStopCrewRpc,
+
   WsServerProbeRpc,
   WsServerGetConfigRpc,
+  WsServerRestoreReviewSnapshotRpc,
+  WsServerRestoreReviewConsentRpc,
   WsServerRefreshProvidersRpc,
   WsServerUpdateProviderRpc,
   WsProviderConsumeResetCreditRpc,
@@ -1414,6 +1984,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerRemoveKeybindingRpc,
   WsServerGetSettingsRpc,
   WsServerUpdateSettingsRpc,
+  WsServerUpdateProviderSettingsRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,
@@ -1491,8 +2062,15 @@ export const WsRpcGroup = RpcGroup.make(
   WsVcsCreateRefRpc,
   WsVcsSwitchRefRpc,
   WsVcsInitRpc,
+  WsGitIdentityRpc,
+  WsGitIdentityUpdateRpc,
   WsReviewGetDiffPreviewRpc,
   WsReviewGetDiffFileContentsRpc,
+  WsProjectTerminalAttachRpc,
+  WsProjectTerminalWriteRpc,
+  WsProjectTerminalResizeRpc,
+  WsProjectTerminalClearRpc,
+  WsProjectTerminalCloseRpc,
   WsTerminalOpenRpc,
   WsTerminalAttachRpc,
   WsTerminalWriteRpc,
@@ -1529,6 +2107,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsSubscribeBackgroundPolicyRpc,
   WsSubscribeResourceTelemetryRpc,
   WsOrchestrationDispatchCommandRpc,
+  WsOrchestrationRetryPreparedTurnRpc,
   WsOrchestrationGetWorkflowScriptRpc,
   WsOrchestrationGetTurnDiffRpc,
   WsOrchestrationGetFullThreadDiffRpc,
@@ -1537,3 +2116,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
 );
+import {
+  MeerkatApproval,
+  MeerkatApprovals,
+  MeerkatApprovalDecisionInput,
+} from "./meerkatApprovals.ts";

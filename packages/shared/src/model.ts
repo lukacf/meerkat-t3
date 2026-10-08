@@ -27,6 +27,67 @@ export function createModelCapabilities(input: {
   };
 }
 
+const MEERKAT_REASONING_OPTION_IDS = [
+  "reasoning_effort",
+  "effort",
+  "thinking_level",
+  "thinking",
+  "thinking_budget",
+];
+
+export function isMeerkatReasoningOption(id: string): boolean {
+  return MEERKAT_REASONING_OPTION_IDS.includes(id);
+}
+
+/** Keep cached native catalogs consistent with the model/reasoning controls. */
+export function getProviderModelControlCapabilities(
+  provider: string,
+  capabilities: ModelCapabilities | null | undefined,
+): ModelCapabilities {
+  const caps = capabilities ?? { optionDescriptors: [] };
+  if (provider !== "meerkat") return caps;
+  const descriptors = caps.optionDescriptors ?? [];
+  const reasoning = MEERKAT_REASONING_OPTION_IDS.map((id) =>
+    descriptors.find((descriptor) => descriptor.id === id && descriptor.type === "select"),
+  ).find((descriptor) => descriptor?.type === "select" && descriptor.options.length > 0);
+  return {
+    ...caps,
+    optionDescriptors: reasoning ? [{ ...reasoning, label: "Reasoning level" }] : [],
+  };
+}
+
+/** Preserve explicit native reasoning until the user resolves a stale catalog choice. */
+export function getMeerkatReasoningSelection(
+  capabilities: ModelCapabilities | null | undefined,
+  selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,
+) {
+  const descriptor = getProviderModelControlCapabilities(
+    "meerkat",
+    capabilities,
+  ).optionDescriptors?.find((entry) => entry.type === "select");
+  const explicit = (selections ?? []).filter(
+    (entry) => isMeerkatReasoningOption(entry.id) && entry.value !== "default",
+  );
+  const unavailable = explicit.some(
+    (entry) =>
+      !descriptor ||
+      entry.id !== descriptor.id ||
+      !descriptor.options.some((option) => option.id === entry.value),
+  );
+  const selected = explicit[0];
+  return {
+    descriptor,
+    options: explicit.length > 0 ? explicit : undefined,
+    unavailable,
+    label: unavailable
+      ? `${explicit.map((entry) => String(entry.value)).join(", ")} (unavailable)`
+      : selected
+        ? (descriptor?.options.find((option) => option.id === selected.value)?.label ??
+          String(selected.value))
+        : "Model default",
+  };
+}
+
 function getRawSelectionValueById(
   selections: ReadonlyArray<ProviderOptionSelection> | null | undefined,
   id: string,

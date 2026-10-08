@@ -21,6 +21,7 @@ import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as GitManager from "../git/GitManager.ts";
+import { retryCreatedPullRequestLinks } from "../git/linkCreatedPullRequest.ts";
 import * as PullRequestService from "../pullRequest/PullRequestService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import { forkParked } from "../serverActivation.ts";
@@ -97,6 +98,8 @@ export const make = Effect.gen(function* () {
   const synchronize = Effect.fn("ThreadPullRequestReactor.synchronize")(function* (
     request: RefreshRequest,
   ) {
+    // A returned PR belongs to its original thread even after branch changes or archive.
+    yield* retryCreatedPullRequestLinks;
     const snapshot = yield* snapshots.getShellSnapshot();
     const projects = new Map(snapshot.projects.map((project) => [project.id, project]));
     if (request.backfill) {

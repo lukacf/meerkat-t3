@@ -90,6 +90,8 @@ export const makeAntigravityAcpRuntime = Effect.fn("makeAntigravityAcpRuntime")(
 
 export function antigravityPermissionMode(runtimeMode: RuntimeMode): string {
   switch (runtimeMode) {
+    case "read-only":
+      throw new Error("Read-only access is not supported by Antigravity.");
     case "full-access":
       return "yolo";
     case "auto-accept-edits":

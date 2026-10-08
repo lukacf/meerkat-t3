@@ -1,5 +1,6 @@
 import {
   CheckpointRef,
+  CommandId,
   EventId,
   GitManagerError,
   ProjectId,
@@ -21,6 +22,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
@@ -28,6 +30,10 @@ import * as Stream from "effect/Stream";
 import { TestClock } from "effect/testing";
 
 import { GitManager, type GitBranchPullRequest } from "../git/GitManager.ts";
+import {
+  CreatedPullRequestLinkStore,
+  type CreatedPullRequestLinkIntent,
+} from "../git/CreatedPullRequestLinkStore.ts";
 import { PullRequestService } from "../pullRequest/PullRequestService.ts";
 import { RepositoryIdentityResolver } from "../project/RepositoryIdentityResolver.ts";
 import { ServerActivation } from "../serverActivation.ts";
@@ -40,6 +46,7 @@ const PROJECT_ID = ProjectId.make("project");
 const REPOSITORY = "owner/repository";
 const REPOSITORY_KEY = `github.com/${REPOSITORY}`;
 type SyncCommand = Extract<OrchestrationCommand, { type: "thread.pull-request.sync" }>;
+type LinkCommand = Extract<OrchestrationCommand, { type: "thread.pull-request.link" }>;
 
 function reference(number: number): ThreadLinkedPullRequest {
   return {
@@ -134,6 +141,10 @@ const makeHarness = Effect.fn("makeThreadPullRequestHarness")(function* (options
   readonly existingWorktrees?: ReadonlyArray<string>;
   readonly project?: OrchestrationProjectShell;
   readonly resolveRepositoryIdentity?: RepositoryIdentityResolver["Service"]["resolve"];
+  readonly pendingLinks?: ReadonlyArray<CreatedPullRequestLinkIntent>;
+  readonly linkDispatch?: (
+    command: LinkCommand,
+  ) => ReturnType<OrchestrationEngineService["Service"]["dispatch"]>;
 }) {
   const activation = yield* Deferred.make<void>();
   const snapshots = yield* Ref.make<OrchestrationShellSnapshot>({
@@ -145,6 +156,8 @@ const makeHarness = Effect.fn("makeThreadPullRequestHarness")(function* (options
   const reads = yield* Queue.unbounded<void>();
   const events = yield* PubSub.unbounded<OrchestrationEvent>();
   const commands = yield* Ref.make<ReadonlyArray<SyncCommand>>([]);
+  const linkCommands = yield* Ref.make<ReadonlyArray<LinkCommand>>([]);
+  const pendingLinks = yield* Ref.make(options.pendingLinks ?? []);
   const branchCalls = yield* Ref.make<
     ReadonlyArray<{ readonly cwd: string; readonly branch: string; readonly refresh: boolean }>
   >([]);
@@ -154,7 +167,24 @@ const makeHarness = Effect.fn("makeThreadPullRequestHarness")(function* (options
     Layer.mock(ProjectionSnapshotQuery)({
       getShellSnapshot: () =>
         Ref.get(snapshots).pipe(Effect.tap(() => Queue.offer(reads, undefined))),
+      getThreadShellById: (threadId) =>
+        Ref.get(snapshots).pipe(
+          Effect.map((snapshot) =>
+            Option.fromUndefinedOr(snapshot.threads.find((thread) => thread.id === threadId)),
+          ),
+        ),
     }),
+    Layer.succeed(
+      CreatedPullRequestLinkStore,
+      CreatedPullRequestLinkStore.of({
+        list: Ref.get(pendingLinks),
+        put: (intent) => Ref.update(pendingLinks, (current) => [...current, intent]),
+        remove: (intent) =>
+          Ref.update(pendingLinks, (current) =>
+            current.filter((saved) => saved.commandId !== intent.commandId),
+          ),
+      }),
+    ),
     Layer.mock(GitManager)({
       branchPullRequest: (input, readOptions) =>
         Ref.update(branchCalls, (calls) => [
@@ -182,6 +212,11 @@ const makeHarness = Effect.fn("makeThreadPullRequestHarness")(function* (options
         Effect.map((subscription) => Stream.fromSubscription(subscription)),
       ),
       dispatch: (command) => {
+        if (command.type === "thread.pull-request.link") {
+          return Ref.update(linkCommands, (current) => [...current, command]).pipe(
+            Effect.andThen(options.linkDispatch?.(command) ?? Effect.succeed({ sequence: 1 })),
+          );
+        }
         if (command.type !== "thread.pull-request.sync") {
           return Effect.die(`Unexpected command: ${command.type}`);
         }
@@ -234,6 +269,8 @@ const makeHarness = Effect.fn("makeThreadPullRequestHarness")(function* (options
     reads,
     snapshots,
     commands,
+    linkCommands,
+    pendingLinks,
     branchCalls,
     summaryCalls,
     publish: (event: OrchestrationEvent) => PubSub.publish(events, event),
@@ -242,6 +279,74 @@ const makeHarness = Effect.fn("makeThreadPullRequestHarness")(function* (options
 });
 
 describe("ThreadPullRequestReactor", () => {
+  it.effect("replays saved created links at startup for archived and branchless threads", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const pending: CreatedPullRequestLinkIntent = {
+          threadId: ThreadId.make("archived-origin"),
+          commandId: CommandId.make("server:created-pr:original"),
+          host: "github.com",
+          repository: REPOSITORY,
+          number: 42,
+          url: reference(42).url,
+        };
+        const fixture = yield* makeHarness({
+          threads: [thread("archived-origin", { archivedAt: NOW, branch: null })],
+          pendingLinks: [pending],
+        });
+        yield* Effect.gen(function* () {
+          yield* fixture.start();
+          expect(yield* Ref.get(fixture.linkCommands)).toEqual([
+            { type: "thread.pull-request.link", ...pending, source: "created" },
+          ]);
+          expect(yield* Ref.get(fixture.pendingLinks)).toEqual([]);
+          expect(yield* Ref.get(fixture.branchCalls)).toEqual([]);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect(
+    "retains a failed created link and retries its original identity on the periodic pass",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const available = yield* Ref.make(false);
+          const pending: CreatedPullRequestLinkIntent = {
+            threadId: ThreadId.make("settled-origin"),
+            commandId: CommandId.make("server:created-pr:retry"),
+            host: "github.com",
+            repository: REPOSITORY,
+            number: 43,
+            url: reference(43).url,
+          };
+          const fixture = yield* makeHarness({
+            threads: [thread("settled-origin", { branch: null, settledAt: NOW })],
+            pendingLinks: [pending],
+            linkDispatch: () =>
+              Ref.get(available).pipe(
+                Effect.flatMap((ready) =>
+                  ready ? Effect.succeed({ sequence: 2 }) : Effect.die("engine unavailable"),
+                ),
+              ),
+          });
+          yield* Effect.gen(function* () {
+            const reactor = yield* fixture.start();
+            expect(yield* Ref.get(fixture.pendingLinks)).toEqual([pending]);
+            yield* Ref.set(available, true);
+            yield* TestClock.adjust("1 minute");
+            yield* Queue.take(fixture.reads);
+            yield* reactor.drain;
+            expect(
+              (yield* Ref.get(fixture.linkCommands)).map((command) => command.commandId),
+            ).toEqual([pending.commandId, pending.commandId]);
+            expect(yield* Ref.get(fixture.pendingLinks)).toEqual([]);
+            expect(yield* Ref.get(fixture.branchCalls)).toEqual([]);
+          }).pipe(Effect.provide(fixture.layer));
+        }),
+      ),
+  );
+
   it.effect("discovers saved branch PRs without a client and shares branch lookups", () =>
     Effect.scoped(
       Effect.gen(function* () {

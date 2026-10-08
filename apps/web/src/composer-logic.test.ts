@@ -130,16 +130,48 @@ describe("composerSubmissionIntentForEnter", () => {
     ).toBeNull();
   });
 
-  it("inserts a newline for Shift+Enter", () => {
-    expect(
-      composerSubmissionIntentForEnter({
-        isMobileViewport: false,
-        shiftKey: true,
-        modifierKey: false,
-        isDraftThread: true,
-      }),
-    ).toBeNull();
-  });
+  it.each([
+    ["enter", false, false, false, "foreground"],
+    ["mod-enter", false, false, false, "foreground"],
+    ["mod-enter-multiline", false, false, false, "foreground"],
+    ["enter", true, false, false, "background"],
+    ["enter", false, true, false, "alternate"],
+    ["mod-enter", false, true, false, "foreground"],
+    ["mod-enter", false, true, true, "alternate"],
+    ["mod-enter-multiline", false, true, true, "alternate"],
+    ["enter", false, false, true, null],
+    ["mod-enter", false, false, true, null],
+    ["mod-enter-multiline", false, false, true, null],
+  ] as const)(
+    "keeps modified Enter usable in compact layouts: shortcut=%s draft=%s running=%s shift=%s",
+    (sendShortcut, isDraftThread, isRunning, shiftKey, expected) => {
+      expect(
+        composerSubmissionIntentForEnter({
+          isMobileViewport: true,
+          modifierKey: true,
+          sendShortcut,
+          isDraftThread,
+          isRunning,
+          shiftKey,
+          prompt: "two\nlines",
+        }),
+      ).toBe(expected);
+    },
+  );
+
+  it.each([false, true])(
+    "inserts a newline for Shift+Enter with compact=%s",
+    (isMobileViewport) => {
+      expect(
+        composerSubmissionIntentForEnter({
+          isMobileViewport,
+          shiftKey: true,
+          modifierKey: false,
+          isDraftThread: true,
+        }),
+      ).toBeNull();
+    },
+  );
 
   it("submits a new thread in the background with Mod+Enter", () => {
     expect(

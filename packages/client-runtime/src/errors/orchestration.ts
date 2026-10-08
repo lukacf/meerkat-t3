@@ -14,3 +14,9 @@ export function wasBootstrapThreadNotCreated(error: unknown): boolean {
     isOrchestrationDispatchCommandError(error) && error.bootstrapThreadDisposition === "not-created"
   );
 }
+
+export function wasBootstrapThreadRetained(error: unknown): boolean {
+  return (
+    isOrchestrationDispatchCommandError(error) && error.bootstrapThreadDisposition === "retained"
+  );
+}

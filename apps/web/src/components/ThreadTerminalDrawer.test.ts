@@ -3,6 +3,9 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   shouldClearTerminalSelectionAction,
   shouldHandleTerminalExit,
+  shouldCloseTerminalAfterExit,
+  nativeTerminalScopeChanged,
+  terminalInteractionCwd,
   terminalContextMenuItems,
   terminalSelectionLineRange,
   terminalSelectionMenuItems,
@@ -140,6 +143,51 @@ describe("terminal selection actions", () => {
   it("handles an exit that lands while the terminal surface is still loading", () => {
     expect(shouldHandleTerminalExit("exited", "running", false)).toBe(true);
     expect(shouldHandleTerminalExit("exited", "exited", false)).toBe(false);
-    expect(shouldHandleTerminalExit("closed", "running", true)).toBe(false);
+    expect(shouldHandleTerminalExit("closed", "running", true)).toBe(true);
+  });
+
+  it("retains native natural exits before metadata arrives, including first attachment", () => {
+    for (const previous of ["running", "closed"] as const) {
+      expect(shouldHandleTerminalExit("exited", previous, false)).toBe(true);
+      expect(shouldCloseTerminalAfterExit("exited", true)).toBe(false);
+      expect(shouldCloseTerminalAfterExit("exited", false)).toBe(true);
+    }
+    expect(shouldCloseTerminalAfterExit("closed", true)).toBe(false);
+    expect(shouldCloseTerminalAfterExit("running", true)).toBe(false);
+  });
+
+  it("reconciles a later server close after a preserved exit without requesting deletion", () => {
+    expect(shouldHandleTerminalExit("exited", "running", false)).toBe(true);
+    expect(shouldCloseTerminalAfterExit("exited", true)).toBe(false);
+    expect(shouldHandleTerminalExit("closed", "exited", true)).toBe(true);
+    expect(shouldCloseTerminalAfterExit("closed", true)).toBe(false);
+    expect(shouldCloseTerminalAfterExit("closed", false)).toBe(false);
+    expect(shouldHandleTerminalExit("closed", "closed", true)).toBe(false);
+    expect(shouldHandleTerminalExit("exited", "exited", true)).toBe(false);
+  });
+
+  it("uses each pane's actual scope for native input without restricting donor panes", () => {
+    const current = { cwd: "/project", worktreePath: null };
+    const summary = {
+      ...current,
+      threadId: "thread",
+      terminalId: "old",
+      status: "running" as const,
+      pid: 10,
+      exitCode: null,
+      exitSignal: null,
+      hasRunningSubprocess: false,
+      label: "shell",
+      updatedAt: "2026-09-29T00:00:00Z",
+    };
+    const old = { ...summary, cwd: "/worktree", worktreePath: "/worktree" };
+    expect(nativeTerminalScopeChanged(current, old)).toBe(true);
+    expect(nativeTerminalScopeChanged(current, summary)).toBe(false);
+    expect(nativeTerminalScopeChanged(undefined, old)).toBe(false);
+    expect(nativeTerminalScopeChanged(current, null)).toBe(false);
+    expect(terminalInteractionCwd(current, old, current.cwd)).toBe("/worktree");
+    expect(terminalInteractionCwd(current, summary, current.cwd)).toBe("/project");
+    expect(terminalInteractionCwd(current, null, current.cwd)).toBeNull();
+    expect(terminalInteractionCwd(undefined, old, current.cwd)).toBe("/project");
   });
 });

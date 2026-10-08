@@ -30,6 +30,7 @@ import type {
 import * as Context from "effect/Context";
 import type * as Effect from "effect/Effect";
 import type * as Stream from "effect/Stream";
+import type * as Scope from "effect/Scope";
 
 import type { ProviderServiceError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities } from "./ProviderAdapter.ts";
@@ -39,6 +40,18 @@ import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
  * ProviderServiceShape - Service API for provider session and turn orchestration.
  */
 export interface ProviderServiceShape {
+  /** Acquire the event subscription before starting durable output replay. */
+  readonly subscribeEvents?: Effect.Effect<Stream.Stream<ProviderRuntimeEvent>, never, Scope.Scope>;
+
+  /** Register read-only observers for persisted provider bindings. */
+  readonly observePersistedSessions?: () => Effect.Effect<void>;
+
+  /** Acknowledge an event only after its orchestration commands have persisted. */
+  readonly acknowledgeEvent?: (event: ProviderRuntimeEvent) => Effect.Effect<void>;
+
+  /** Remove passive observation without resuming or stopping the native runtime. */
+  readonly stopObservingSession?: (threadId: ThreadId) => Effect.Effect<void>;
+
   /**
    * Start a provider session.
    */

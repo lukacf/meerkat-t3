@@ -1,8 +1,10 @@
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import type { DesktopSshEnvironmentTarget } from "@t3tools/contracts";
 import * as NetService from "@t3tools/shared/Net";
 import { SshPasswordPromptError } from "@t3tools/ssh/errors";
+import * as SshTunnel from "@t3tools/ssh/tunnel";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -19,6 +21,58 @@ function makeTempHomeDir() {
 }
 
 describe("sshEnvironment", () => {
+  it.effect(
+    "rejects new and saved SSH connections before installing or prompting, but allows cleanup",
+    () => {
+      const target = {
+        alias: "devbox",
+        hostname: "devbox.example.com",
+        username: null,
+        port: null,
+      };
+      const disconnected: DesktopSshEnvironmentTarget[] = [];
+      const services = Layer.effect(
+        DesktopSshEnvironment.DesktopSshEnvironment,
+        DesktopSshEnvironment.make,
+      ).pipe(
+        Layer.provide(
+          Layer.succeed(SshTunnel.SshEnvironmentManager, {
+            ensureEnvironment: () => Effect.die("unsupported SSH installer was invoked"),
+            disconnectEnvironment: (input) =>
+              Effect.sync(() => {
+                disconnected.push(input);
+              }),
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(DesktopSshPasswordPrompts.DesktopSshPasswordPrompts, {
+            request: () => Effect.die("unexpected password prompt request"),
+            resolve: () => Effect.die("unexpected password prompt resolution"),
+          }),
+        ),
+        Layer.provide(NodeServices.layer),
+        Layer.provide(NodeHttpClient.layerUndici),
+        Layer.provide(NetService.layer),
+      );
+
+      return Effect.gen(function* () {
+        const sshEnvironment = yield* DesktopSshEnvironment.DesktopSshEnvironment;
+        for (const issuePairingToken of [true, false]) {
+          const error = yield* sshEnvironment
+            .ensureEnvironment(target, { issuePairingToken })
+            .pipe(Effect.flip);
+          assert.instanceOf(error, DesktopSshEnvironment.DesktopSshUnavailableError);
+          assert.equal(
+            error.message,
+            "SSH connections are not available in this prototype. Use this Mac.",
+          );
+        }
+        yield* sshEnvironment.disconnectEnvironment(target);
+        assert.deepEqual(disconnected, [target]);
+      }).pipe(Effect.provide(services), Effect.scoped);
+    },
+  );
+
   it("keeps prompt presentation diagnostics distinct from the legacy wrapper message", () => {
     const cause = new DesktopSshPasswordPrompts.DesktopSshPromptPresentationError({
       requestId: "prompt-1",

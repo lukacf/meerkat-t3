@@ -44,17 +44,52 @@ const baseInput = {
 
 const captureProcessResult = (
   result: Effect.Effect<ProcessRunner.ProcessRunOutput, ProcessRunner.ProcessRunError>,
+  input: VcsProcess.VcsProcessInput = baseInput,
 ) =>
   VcsProcess.make.pipe(
     Effect.provideService(
       ProcessRunner.ProcessRunner,
       ProcessRunner.ProcessRunner.of({ run: () => result }),
     ),
-    Effect.flatMap((service) => service.run(baseInput)),
+    Effect.flatMap((service) => service.run(input)),
     Effect.flip,
   );
 
 describe("VcsProcess.run", () => {
+  it.effect.each([
+    {
+      stderr: "HTTP 401: Bad credentials (https://api.github.com/graphql)",
+      kind: "authentication",
+    },
+    { stderr: "GraphQL: Bad credentials", kind: "authentication" },
+    { stderr: "HTTP 401: Requires authentication", kind: "authentication" },
+    { stderr: "HTTP 403: Resource not accessible by integration", kind: "command-failed" },
+    { stderr: "HTTP 429: Too Many Requests", kind: "rate-limited" },
+  ])(
+    "classifies expired GitHub credentials without confusing access or quota failures: $stderr",
+    ({ stderr, kind }) =>
+      Effect.gen(function* () {
+        const error = yield* captureProcessResult(
+          Effect.succeed({
+            stdout: "",
+            stderr,
+            code: ChildProcessSpawner.ExitCode(1),
+            timedOut: false,
+            stdoutTruncated: false,
+            stderrTruncated: false,
+            stdoutInvalidUtf8: false,
+            stderrInvalidUtf8: false,
+          }),
+          { ...baseInput, command: "gh", args: ["pr", "create"] },
+        );
+        assert.instanceOf(error, VcsProcessExitError);
+        expect(error.failureKind).toBe(kind);
+        const encoded = yield* encodeExitError(error);
+        expect(encoded).not.toContain(stderr);
+        expect(encoded).not.toContain("api.github.com");
+      }),
+  );
+
   it.effect.each([
     { stderr: "fatal: Unable to create '/private/repo/index.lock': File exists", retryable: true },
     {

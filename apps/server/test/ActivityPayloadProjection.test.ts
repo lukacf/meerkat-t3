@@ -1,12 +1,14 @@
 import {
   EventId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   TurnId,
   type OrchestrationEvent,
   type OrchestrationThread,
   type OrchestrationThreadActivity,
+  type ProviderRuntimeEvent,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -18,6 +20,7 @@ import {
   projectActivityPayload,
   projectThreadDetailSnapshot,
 } from "../src/orchestration/ActivityPayloadProjection.ts";
+import { runtimeEventToActivities } from "../src/orchestration/Layers/ProviderRuntimeIngestion.ts";
 
 function makeActivity(
   id: string,
@@ -66,6 +69,7 @@ function makeThread(activities: ReadonlyArray<OrchestrationThreadActivity>): Orc
     proposedPlans: [],
     activities,
     checkpoints: [],
+    pullRequests: [],
     session: null,
   };
 }
@@ -135,6 +139,104 @@ const fixtures = [
 ] satisfies ReadonlyArray<OrchestrationThreadActivity>;
 
 describe("projectActivityPayload", () => {
+  for (const type of ["skills.resolved", "skills.resolution-failed"] as const) {
+    it(`preserves native ${type} provenance through snapshot and event reads with generic web/mobile details`, () => {
+      const keys = [
+        { source_uuid: "b3fdcd90-cb8c-40c2-aee5-c1aba30a9b64", skill_name: "review" },
+        { source_uuid: "97e07e7d-4641-43c6-b49d-a8827225fa24", skill_name: "review" },
+      ];
+      const nativeEvent = {
+        event_id: "f9422cca-aa96-4f06-b9ba-a6550d1c811c",
+        source: { type: "session", session_id: "native-session" },
+        seq: 17,
+        mob_id: "native-mob",
+        timestamp_ms: 1_790_000_000_123,
+        payload:
+          type === "skills.resolved"
+            ? { type: "skills_resolved", skills: keys, injection_bytes: 321 }
+            : {
+                type: "skill_resolution_failed",
+                skill_key: keys[0],
+                reason: { reason_type: "not_found", key: keys[1] },
+              },
+      };
+      const nativeSourceEventId = `evt-agent-${nativeEvent.event_id}`;
+      const nativeDeliveryId = `meerkat-output:app-run:native-session:${nativeSourceEventId}`;
+      const runtimeEvent = {
+        type,
+        eventId: EventId.make(nativeDeliveryId),
+        provider: ProviderDriverKind.make("meerkat"),
+        threadId: ThreadId.make("thread-projection"),
+        turnId: TurnId.make("app-run"),
+        createdAt: new Date(nativeEvent.timestamp_ms).toISOString(),
+        payload: {
+          nativeEvent,
+          nativeSourceEventId,
+          nativeSessionId: "native-session",
+          nativeDeliveryId,
+        },
+      } satisfies ProviderRuntimeEvent;
+      const activity = runtimeEventToActivities(runtimeEvent)[0]!;
+      const thread = makeThread([activity]);
+      const projectedSnapshot = projectThreadDetailSnapshot({ snapshotSequence: 7, thread });
+      const event = {
+        sequence: 8,
+        eventId: EventId.make("event-native-skill-activity"),
+        aggregateKind: "thread",
+        aggregateId: thread.id,
+        occurredAt: runtimeEvent.createdAt,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        type: "thread.activity-appended",
+        payload: { threadId: thread.id, activity },
+      } satisfies Extract<OrchestrationEvent, { type: "thread.activity-appended" }>;
+      const projectedEvent = projectActivityEvent(event);
+      expect(projectedEvent.type).toBe("thread.activity-appended");
+      if (projectedEvent.type !== "thread.activity-appended")
+        throw new Error("expected activity event");
+      const detail =
+        type === "skills.resolved"
+          ? `${keys[0]!.source_uuid}/review\n${keys[1]!.source_uuid}/review\nInjected bytes: 321`
+          : `${keys[0]!.source_uuid}/review\nReason:\n${JSON.stringify(nativeEvent.payload.reason, null, 2)}`;
+      for (const projected of [
+        projectedSnapshot.thread.activities[0]!,
+        projectedEvent.payload.activity,
+      ]) {
+        expect(projected).toEqual(activity);
+        expect(projected.payload).toEqual({ ...runtimeEvent.payload, detail });
+        expect(projected.payload).not.toHaveProperty("data");
+        const [webEntry] = deriveWorkLogEntries([projected]);
+        expect(webEntry).toMatchObject({
+          label:
+            type === "skills.resolved"
+              ? "Skills resolved: review, review"
+              : "Skill resolution failed",
+          detail,
+          tone: type === "skills.resolved" ? "info" : "error",
+          sourceActivityKind: type,
+        });
+        expect(webEntry).not.toHaveProperty("itemType");
+        expect(webEntry).not.toHaveProperty("toolCallId");
+        const [mobileGroup] = buildThreadFeed(makeThread([projected]));
+        expect(mobileGroup?.type).toBe("activity-group");
+        if (mobileGroup?.type !== "activity-group")
+          throw new Error("expected generic activity group");
+        const [mobileRow] = mobileGroup.activities;
+        expect(mobileRow).toMatchObject({
+          toolLike: false,
+          canExpand: true,
+          icon: type === "skills.resolved" ? "check" : "alert",
+          detail,
+        });
+        expect(mobileRow?.getFullDetail()).toBeNull();
+        expect(mobileRow?.getCopyText()).toContain(detail);
+      }
+      expect(runtimeEvent.payload.nativeEvent).toEqual(nativeEvent);
+    });
+  }
+
   function comparableActivity(activity: ThreadFeedActivity) {
     return {
       ...activity,

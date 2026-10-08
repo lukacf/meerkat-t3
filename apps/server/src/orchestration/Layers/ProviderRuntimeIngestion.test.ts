@@ -20,6 +20,7 @@ import {
   type OrchestrationCommand,
   ProjectId,
   ProviderItemId,
+  RuntimeItemId,
   RuntimeRequestId,
   type ServerSettings,
   ThreadId,
@@ -38,7 +39,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import * as Tracer from "effect/Tracer";
 import { it as effectIt } from "@effect/vitest";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -120,9 +121,19 @@ function createProviderServiceHarness() {
     }>(),
   );
   const runtimeSessions: ProviderSession[] = [];
+  const acknowledgedEvents: ProviderRuntimeEvent[] = [];
+  const stoppedObservations: ThreadId[] = [];
 
   const unsupported = () => Effect.die(new Error("Unsupported provider call in test")) as never;
   const service: ProviderServiceShape = {
+    acknowledgeEvent: (event) =>
+      Effect.sync(() => {
+        acknowledgedEvents.push(event);
+      }),
+    stopObservingSession: (threadId) =>
+      Effect.sync(() => {
+        stoppedObservations.push(threadId);
+      }),
     startSession: () => unsupported(),
     sendTurn: () => unsupported(),
     compactThread: () => unsupported(),
@@ -206,6 +217,8 @@ function createProviderServiceHarness() {
     emit,
     emitAndWaitForEnqueue,
     setSession,
+    acknowledgedEvents,
+    stoppedObservations,
   };
 }
 
@@ -415,6 +428,9 @@ describe("ProviderRuntimeIngestion", () => {
 
     return {
       engine,
+      acknowledgedEvents: provider.acknowledgedEvents,
+      stoppedObservations: provider.stoppedObservations,
+      readEvents: () => testRuntime.runPromise(Stream.runCollect(engine.readEvents(0))),
       dispatch,
       readModel: () => testRuntime.runPromise(snapshotQuery.getSnapshot()),
       readTurn: (turnId: TurnId) =>
@@ -481,6 +497,427 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.status).toBe("error");
     expect(thread.session?.lastError).toBe("turn failed");
   });
+
+  it.each(["cancelled", "interrupted"] as const)(
+    "keeps MobKit cancellation pending until the native %s terminal",
+    async (state) => {
+      const harness = await createHarness();
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("mobkit-cancellation");
+      const base = { provider: ProviderDriverKind.make("meerkat"), threadId, turnId };
+      await harness.emitAndDrain([
+        {
+          ...base,
+          type: "turn.started",
+          eventId: asEventId("mobkit-started"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+        },
+      ]);
+      await harness.dispatch({
+        type: "thread.turn.interrupt",
+        commandId: CommandId.make("mobkit-request-cancel"),
+        threadId,
+        turnId,
+        createdAt: "2026-01-01T00:00:02.000Z",
+      });
+      const pending = (await harness.readModel()).threads[0]!;
+      expect(pending.session).toMatchObject({ status: "running", activeTurnId: turnId });
+      expect(pending.latestTurn).toMatchObject({ state: "running", completedAt: null });
+      expect(await harness.readTurn(turnId)).toMatchObject({ state: "running", completedAt: null });
+
+      await harness.emitAndDrain([
+        {
+          ...base,
+          type: "turn.completed",
+          eventId: asEventId("mobkit-cancelled"),
+          createdAt: "2026-01-01T00:00:03.000Z",
+          payload: { state },
+        },
+      ]);
+      const completed = (await harness.readModel()).threads[0]!;
+      expect(completed.session).toMatchObject({ status: "interrupted", activeTurnId: null });
+      expect(completed.latestTurn).toMatchObject({
+        state: "interrupted",
+        completedAt: "2026-01-01T00:00:03.000Z",
+      });
+      expect(await harness.readTurn(turnId)).toMatchObject({
+        state: "interrupted",
+        completedAt: "2026-01-01T00:00:03.000Z",
+      });
+    },
+  );
+
+  it.each([false, true])(
+    "retains an unexpected gateway exit after native cancellation: %s",
+    async (cancelledBeforeExit) => {
+      const harness = await createHarness();
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("gateway-exit-turn");
+      const base = { provider: ProviderDriverKind.make("meerkat"), threadId };
+      await harness.emitAndDrain([
+        {
+          ...base,
+          turnId,
+          type: "turn.started",
+          eventId: asEventId("gateway-exit-started"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+        },
+      ]);
+      if (cancelledBeforeExit) {
+        await harness.emitAndDrain([
+          {
+            ...base,
+            turnId,
+            type: "turn.completed",
+            eventId: asEventId("gateway-exit-cancelled"),
+            createdAt: "2026-01-01T00:00:02.000Z",
+            payload: { state: "cancelled", errorMessage: "Run cancelled." },
+          },
+        ]);
+      }
+      await harness.emitAndDrain([
+        {
+          ...base,
+          type: "session.exited",
+          eventId: asEventId("gateway-exit-failed"),
+          createdAt: "2026-01-01T00:00:03.000Z",
+          payload: {
+            exitKind: "error",
+            reason: "Meerkat gateway exited (1).",
+            recoverable: cancelledBeforeExit,
+          },
+        },
+      ]);
+
+      const thread = (await harness.readModel()).threads[0]!;
+      expect(thread.session).toMatchObject({
+        status: "error",
+        activeTurnId: null,
+        lastError: "Meerkat gateway exited (1).",
+      });
+      // A known native terminal remains authoritative; a crash without one
+      // must settle the running turn as an error instead of a user stop.
+      expect(thread.latestTurn).toMatchObject({
+        turnId,
+        state: cancelledBeforeExit ? "interrupted" : "error",
+        completedAt: cancelledBeforeExit ? "2026-01-01T00:00:02.000Z" : "2026-01-01T00:00:03.000Z",
+      });
+      expect(await harness.readTurn(turnId)).toMatchObject({
+        state: cancelledBeforeExit ? "interrupted" : "error",
+      });
+    },
+  );
+
+  it("keeps a graceful provider exit stopped without turning its reason into an error", async () => {
+    const harness = await createHarness();
+    await harness.emitAndDrain([
+      {
+        provider: ProviderDriverKind.make("meerkat"),
+        threadId: asThreadId("thread-1"),
+        type: "session.exited",
+        eventId: asEventId("gateway-exit-graceful"),
+        createdAt: "2026-01-01T00:00:03.000Z",
+        payload: { exitKind: "graceful", reason: "Session closed." },
+      },
+    ]);
+    expect((await harness.readModel()).threads[0]?.session).toMatchObject({
+      status: "stopped",
+      activeTurnId: null,
+      lastError: null,
+    });
+  });
+
+  it("preserves gateway recovery errors while replaying old native output and cancellation", async () => {
+    const harness = await createHarness();
+    const threadId = asThreadId("thread-1");
+    const turnId = asTurnId("gateway-replay-turn");
+    const base = { provider: ProviderDriverKind.make("meerkat"), threadId };
+    const cancellation = {
+      ...base,
+      turnId,
+      type: "turn.completed",
+      eventId: asEventId("gateway-replay-cancelled"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: { state: "cancelled", errorMessage: "Run cancelled." },
+    };
+    await harness.emitAndDrain([
+      {
+        ...base,
+        turnId,
+        type: "turn.started",
+        eventId: asEventId("gateway-replay-started"),
+        createdAt: "2026-01-01T00:00:01.000Z",
+      },
+      cancellation,
+      {
+        ...base,
+        type: "session.exited",
+        eventId: asEventId("gateway-replay-exited"),
+        createdAt: "2026-01-01T00:00:03.000Z",
+        payload: {
+          exitKind: "error",
+          reason: "Meerkat gateway exited (1).",
+          recoverable: true,
+        },
+      },
+    ]);
+
+    // Reading the native outbox after restart can recover output before it
+    // repeats the same immutable terminal receipt with its original time.
+    await harness.emitAndDrain([
+      {
+        ...base,
+        turnId,
+        type: "item.completed",
+        itemId: asItemId("gateway-replay-answer"),
+        eventId: asEventId("gateway-replay-output"),
+        createdAt: "2026-01-01T00:00:02.000Z",
+        payload: {
+          itemType: "assistant_message",
+          status: "completed",
+          authoritativeText: "Saved work before the connection closed.",
+        },
+      },
+      cancellation,
+    ]);
+    const thread = (await harness.readModel()).threads[0]!;
+    expect(thread.session).toMatchObject({
+      status: "error",
+      activeTurnId: null,
+      lastError: "Meerkat gateway exited (1).",
+      updatedAt: "2026-01-01T00:00:03.000Z",
+    });
+    expect(thread.latestTurn).toMatchObject({
+      turnId,
+      state: "interrupted",
+      completedAt: cancellation.createdAt,
+    });
+    expect(thread.messages).toContainEqual(
+      expect.objectContaining({
+        turnId,
+        text: "Saved work before the connection closed.",
+        streaming: false,
+      }),
+    );
+    expect(harness.acknowledgedEvents.at(-1)?.eventId).toBe(cancellation.eventId);
+
+    // A fresh active turn still settles normally after recovery.
+    const nextTurnId = asTurnId("gateway-replay-next-turn");
+    await harness.emitAndDrain([
+      {
+        ...base,
+        turnId: nextTurnId,
+        type: "turn.started",
+        eventId: asEventId("gateway-replay-next-started"),
+        createdAt: "2026-01-01T00:00:04.000Z",
+      },
+      {
+        ...base,
+        turnId: nextTurnId,
+        type: "turn.completed",
+        eventId: asEventId("gateway-replay-next-completed"),
+        createdAt: "2026-01-01T00:00:05.000Z",
+        payload: { state: "completed" },
+      },
+    ]);
+    expect((await harness.readModel()).threads[0]?.session).toMatchObject({
+      status: "ready",
+      activeTurnId: null,
+      lastError: null,
+    });
+  });
+
+  it.each([
+    { state: "failed" as const, turnState: "error" as const },
+    { state: "cancelled" as const, turnState: "interrupted" as const },
+  ])(
+    "keeps a reconnected session ready when an unseen old $state receipt arrives",
+    async ({ state, turnState }) => {
+      const harness = await createHarness();
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("reconnected-old-turn");
+      const base = { provider: ProviderDriverKind.make("meerkat"), threadId };
+      const terminalAt = "2026-01-01T00:00:02.000Z";
+      const reconnectedAt = "2026-01-01T00:00:03.000Z";
+      await harness.emitAndDrain([
+        {
+          ...base,
+          turnId,
+          type: "turn.started",
+          eventId: asEventId("reconnected-old-started"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+        },
+      ]);
+      // Recovery has confirmed the native receipt and settled its turn before
+      // reattaching. The outbox event itself has not yet reached ingestion.
+      for (const [status, updatedAt] of [
+        [turnState, terminalAt],
+        ["ready", reconnectedAt],
+      ] as const) {
+        await harness.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(`reconnected-${status}`),
+          threadId,
+          session: {
+            threadId,
+            providerName: "meerkat",
+            runtimeMode: "approval-required",
+            status,
+            activeTurnId: null,
+            lastError: null,
+            updatedAt,
+          },
+          createdAt: updatedAt,
+        });
+      }
+      const oldReceipt = {
+        ...base,
+        turnId,
+        type: "turn.completed",
+        eventId: asEventId("reconnected-old-terminal"),
+        createdAt: terminalAt,
+        payload: { state, errorMessage: "Original turn ended." },
+      };
+      expect(harness.acknowledgedEvents.some((event) => event.eventId === oldReceipt.eventId)).toBe(
+        false,
+      );
+      await harness.emitAndDrain([
+        {
+          ...base,
+          turnId,
+          type: "item.completed",
+          itemId: asItemId("reconnected-old-answer"),
+          eventId: asEventId("reconnected-old-output"),
+          createdAt: terminalAt,
+          payload: {
+            itemType: "assistant_message",
+            status: "completed",
+            authoritativeText: "Saved output from the original turn.",
+          },
+        },
+        oldReceipt,
+      ]);
+      const thread = (await harness.readModel()).threads[0]!;
+      expect(thread.session).toMatchObject({
+        status: "ready",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: reconnectedAt,
+      });
+      expect(await harness.readTurn(turnId)).toMatchObject({
+        state: turnState,
+        completedAt: terminalAt,
+      });
+      expect(thread.messages).toContainEqual(
+        expect.objectContaining({
+          turnId,
+          text: "Saved output from the original turn.",
+          streaming: false,
+        }),
+      );
+      expect(harness.acknowledgedEvents.at(-1)?.eventId).toBe(oldReceipt.eventId);
+
+      const newTurnId = asTurnId("reconnected-new-turn");
+      const newMessageId = asMessageId("reconnected-new-message");
+      await harness.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("reconnected-new-request"),
+        threadId,
+        message: { messageId: newMessageId, role: "user", text: "New work", attachments: [] },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: "2026-01-01T00:00:04.000Z",
+      });
+      await harness.emitAndDrain([
+        {
+          ...base,
+          type: "session.state.changed",
+          eventId: asEventId("reconnected-new-starting"),
+          createdAt: "2026-01-01T00:00:04.000Z",
+          payload: { state: "starting" },
+        },
+        { ...oldReceipt, eventId: asEventId("reconnected-old-terminal-while-starting") },
+      ]);
+      expect((await harness.readModel()).threads[0]?.session).toMatchObject({
+        status: "starting",
+        activeTurnId: null,
+      });
+      await harness.emitAndDrain([
+        {
+          ...base,
+          turnId: newTurnId,
+          type: "turn.started",
+          eventId: asEventId("reconnected-new-started"),
+          createdAt: "2026-01-01T00:00:04.000Z",
+        },
+        { ...oldReceipt, eventId: asEventId("reconnected-old-terminal-again") },
+      ]);
+      expect((await harness.readModel()).threads[0]?.session).toMatchObject({
+        status: "running",
+        activeTurnId: newTurnId,
+      });
+      await harness.emitAndDrain([
+        {
+          ...base,
+          turnId: newTurnId,
+          type: "turn.completed",
+          eventId: asEventId("reconnected-new-completed"),
+          createdAt: "2026-01-01T00:00:05.000Z",
+          payload: { state: "completed" },
+        },
+      ]);
+      expect((await harness.readModel()).threads[0]?.session).toMatchObject({
+        status: "ready",
+        activeTurnId: null,
+        lastError: null,
+        updatedAt: "2026-01-01T00:00:05.000Z",
+      });
+      expect(await harness.readTurn(newTurnId)).toMatchObject({
+        state: "completed",
+        pendingMessageId: newMessageId,
+      });
+
+      // A legitimate completion after new input still works if its turn.started
+      // notification was lost; the pending-input guard only rejects older work.
+      await harness.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("reconnected-lost-start-request"),
+        threadId,
+        message: {
+          messageId: asMessageId("reconnected-lost-start-message"),
+          role: "user",
+          text: "Another task",
+          attachments: [],
+        },
+        runtimeMode: "approval-required",
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        createdAt: "2026-01-01T00:00:06.000Z",
+      });
+      await harness.emitAndDrain([
+        {
+          ...base,
+          type: "session.state.changed",
+          eventId: asEventId("reconnected-lost-start-starting"),
+          createdAt: "2026-01-01T00:00:06.000Z",
+          payload: { state: "starting" },
+        },
+        {
+          ...base,
+          turnId: asTurnId("reconnected-lost-start-turn"),
+          type: "turn.completed",
+          eventId: asEventId("reconnected-lost-start-terminal"),
+          createdAt: "2026-01-01T00:00:07.000Z",
+          payload: { state: "failed", errorMessage: "New task failed." },
+        },
+      ]);
+      expect((await harness.readModel()).threads[0]?.session).toMatchObject({
+        status: "error",
+        activeTurnId: null,
+        lastError: "New task failed.",
+        updatedAt: "2026-01-01T00:00:07.000Z",
+      });
+    },
+  );
 
   it.each([
     { delivery: "buffered", responseStreamingMode: "paragraph" as const },
@@ -1437,6 +1874,449 @@ describe("ProviderRuntimeIngestion", () => {
     );
     expect(message?.text).toBe("hello world");
     expect(message?.streaming).toBe(false);
+  });
+
+  it("retries skill receipts after failed persistence, deduplicates them and leaves lifecycle to terminal events", async () => {
+    const harness = await createHarness();
+    const base = {
+      provider: ProviderDriverKind.make("meerkat"),
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("native-turn"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+    };
+    const key = { source_uuid: "b3fdcd90-cb8c-40c2-aee5-c1aba30a9b64", skill_name: "review" };
+    const receipts = (["skills.resolved", "skills.resolution-failed"] as const).map(
+      (type, index): ProviderRuntimeEvent => {
+        const uuid =
+          index === 0
+            ? "f9422cca-aa96-4f06-b9ba-a6550d1c811c"
+            : "97e07e7d-4641-43c6-b49d-a8827225fa24";
+        const nativeSourceEventId = `evt-agent-${uuid}`;
+        const nativeDeliveryId = `meerkat-output:native-turn:native-session:${nativeSourceEventId}`;
+        return {
+          ...base,
+          type,
+          eventId: asEventId(nativeDeliveryId),
+          payload: {
+            nativeSourceEventId,
+            nativeDeliveryId,
+            nativeSessionId: "native-session",
+            nativeEvent: {
+              event_id: uuid,
+              source: { type: "session", session_id: "native-session" },
+              seq: index + 1,
+              timestamp_ms: Date.parse(base.createdAt),
+              payload:
+                type === "skills.resolved"
+                  ? { type: "skills_resolved", skills: [key], injection_bytes: 456 }
+                  : {
+                      type: "skill_resolution_failed",
+                      skill_key: null,
+                      reason: { reason_type: "not_found", key },
+                    },
+            },
+          },
+        };
+      },
+    );
+    await harness.emitAndDrain([
+      { ...base, type: "turn.started", eventId: asEventId("skills-turn-started"), payload: {} },
+    ]);
+    const running = (await harness.readModel()).threads[0]!.session;
+    const acknowledgementsBefore = harness.acknowledgedEvents.length;
+    const dispatch = vi.spyOn(harness.engine, "dispatch");
+    dispatch.mockImplementationOnce(() =>
+      Effect.die("injected skill activity persistence failure"),
+    );
+    await harness.emitAndDrain([receipts[0]!]);
+    expect(harness.acknowledgedEvents).toHaveLength(acknowledgementsBefore);
+    expect(
+      (await harness.readModel()).threads[0]!.activities.filter((activity) =>
+        activity.kind.startsWith("skills."),
+      ),
+    ).toEqual([]);
+    dispatch.mockRestore();
+
+    await harness.emitAndDrain(receipts);
+    const saved = (await harness.readModel()).threads[0]!;
+    expect(saved.session).toEqual(running);
+    expect(saved.session).toMatchObject({ status: "running", activeTurnId: "native-turn" });
+    expect(saved.messages).toEqual([]);
+    const skillActivities = saved.activities.filter((activity) =>
+      activity.kind.startsWith("skills."),
+    );
+    expect(skillActivities).toHaveLength(receipts.length);
+    receipts.forEach((receipt, index) => {
+      expect(skillActivities.find((activity) => activity.id === receipt.eventId)).toMatchObject({
+        id: receipt.eventId,
+        tone: index === 0 ? "info" : "error",
+        payload: expect.objectContaining(receipt.payload),
+      });
+    });
+    expect(
+      harness.acknowledgedEvents.slice(acknowledgementsBefore).map((event) => event.eventId),
+    ).toEqual(receipts.map((event) => event.eventId));
+    const persisted = await harness.readEvents();
+    await harness.emitAndDrain([...receipts, ...receipts]);
+    expect(await harness.readEvents()).toEqual(persisted);
+    expect((await harness.readModel()).threads[0]!.session).toEqual(running);
+
+    await harness.emitAndDrain([
+      {
+        ...base,
+        type: "turn.completed",
+        eventId: asEventId("skills-turn-completed"),
+        payload: { state: "completed" },
+      },
+    ]);
+    expect((await harness.readModel()).threads[0]!.session).toMatchObject({
+      status: "ready",
+      activeTurnId: null,
+    });
+    await harness.emitAndDrain([
+      {
+        ...base,
+        type: "turn.started",
+        turnId: asTurnId("newer-turn"),
+        eventId: asEventId("skills-newer-turn-started"),
+        createdAt: "2026-01-01T00:02:00.000Z",
+        payload: {},
+      },
+    ]);
+    const newer = (await harness.readModel()).threads[0]!;
+    const newerEvents = await harness.readEvents();
+    await harness.emitAndDrain(receipts);
+    const replayed = (await harness.readModel()).threads[0]!;
+    expect(replayed.session).toEqual(newer.session);
+    expect(replayed.updatedAt).toBe(newer.updatedAt);
+    expect(await harness.readEvents()).toEqual(newerEvents);
+    expect(replayed.session).toMatchObject({ status: "running", activeTurnId: "newer-turn" });
+    expect(replayed.messages).toEqual([]);
+    expect(
+      replayed.activities.filter((activity) => activity.kind.startsWith("skills.")),
+    ).toHaveLength(2);
+  });
+
+  it("continues persisting mutable Meerkat activity updates that share an event ID", async () => {
+    const harness = await createHarness();
+    const first = {
+      provider: ProviderDriverKind.make("meerkat"),
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("native-turn"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      type: "item.updated",
+      eventId: asEventId("mutable-native-tool"),
+      payload: { itemType: "command_execution", status: "inProgress", detail: "First output" },
+    } satisfies ProviderRuntimeEvent;
+    await harness.emitAndDrain([first]);
+    const before = await harness.readEvents();
+    await harness.emitAndDrain([
+      { ...first, payload: { ...first.payload, detail: "Second output" } },
+    ]);
+    const activities = (await harness.readModel()).threads[0]!.activities;
+    expect(activities.find((activity) => activity.id === first.eventId)?.payload).toMatchObject({
+      detail: "Second output",
+    });
+    expect((await harness.readEvents()).length).toBeGreaterThan(before.length);
+  });
+
+  const peerFollowupEvent = (identity = "native-peer-result"): ProviderRuntimeEvent => ({
+    eventId: asEventId(`meerkat-followup:${identity}`),
+    itemId: RuntimeItemId.make(`meerkat-followup:${identity}`),
+    provider: ProviderDriverKind.make("meerkat"),
+    providerInstanceId: ProviderInstanceId.make("meerkat"),
+    threadId: asThreadId("thread-1"),
+    createdAt: "2026-01-01T00:01:00.000Z",
+    type: "item.completed",
+    payload: {
+      itemType: "assistant_message",
+      status: "completed",
+      authoritativeText: "All six peer reviews have arrived.",
+    },
+  });
+
+  it("persists a peer follow-up after the requesting turn has completed", async () => {
+    const harness = await createHarness();
+    await harness.emitAndDrain([
+      {
+        type: "turn.completed",
+        eventId: asEventId("requesting-turn-completed"),
+        provider: ProviderDriverKind.make("meerkat"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("requesting-turn"),
+        createdAt: "2026-01-01T00:00:30.000Z",
+        payload: { state: "completed" },
+      },
+    ]);
+    const followup = peerFollowupEvent();
+    await harness.emitAndDrain([followup]);
+
+    const thread = (await harness.readModel()).threads[0]!;
+    expect(thread.messages).toHaveLength(1);
+    expect(thread.messages[0]).toMatchObject({
+      id: "assistant:meerkat-followup:native-peer-result",
+      text: "All six peer reviews have arrived.",
+      createdAt: followup.createdAt,
+      turnId: null,
+      streaming: false,
+    });
+    expect(thread.session).toMatchObject({ status: "ready", activeTurnId: null });
+    expect(harness.acknowledgedEvents.at(-1)?.eventId).toBe(followup.eventId);
+  });
+
+  it("deduplicates replayed peer output by native identity, not its text", async () => {
+    const harness = await createHarness();
+    const first = peerFollowupEvent("first");
+    await harness.emitAndDrain([first]);
+    const firstEvents = await harness.readEvents();
+    await harness.emitAndDrain([first, first]);
+    expect(await harness.readEvents()).toEqual(firstEvents);
+    await harness.emitAndDrain([peerFollowupEvent("second")]);
+
+    const thread = (await harness.readModel()).threads[0]!;
+    expect(thread.messages.map((message) => message.id)).toEqual([
+      "assistant:meerkat-followup:first",
+      "assistant:meerkat-followup:second",
+    ]);
+    expect(thread.messages.map((message) => message.text)).toEqual([
+      "All six peer reviews have arrived.",
+      "All six peer reviews have arrived.",
+    ]);
+    expect(harness.acknowledgedEvents).toHaveLength(4);
+  });
+
+  it("does not let a recovered peer follow-up settle a newer user turn", async () => {
+    const harness = await createHarness();
+    await harness.emitAndDrain([
+      {
+        type: "turn.started",
+        eventId: asEventId("new-user-turn-started"),
+        provider: ProviderDriverKind.make("meerkat"),
+        threadId: asThreadId("thread-1"),
+        turnId: asTurnId("new-user-turn"),
+        createdAt: "2026-01-01T00:02:00.000Z",
+        payload: {},
+      },
+    ]);
+    const session = (await harness.readModel()).threads[0]!.session;
+    await harness.emitAndDrain([peerFollowupEvent()]);
+    const thread = (await harness.readModel()).threads[0]!;
+    expect(thread.session).toEqual(session);
+    expect(thread.session).toMatchObject({ status: "running", activeTurnId: "new-user-turn" });
+    expect(thread.messages[0]?.turnId).toBeNull();
+  });
+
+  it("acknowledges peer output only after persistence succeeds and retries failed delivery", async () => {
+    const harness = await createHarness();
+    const followup = peerFollowupEvent();
+    const dispatch = vi.spyOn(harness.engine, "dispatch");
+    dispatch.mockImplementationOnce(() => Effect.die("injected persistence failure"));
+    await harness.emitAndDrain([followup]);
+    expect(harness.acknowledgedEvents).toHaveLength(0);
+    expect((await harness.readModel()).threads[0]?.messages).toHaveLength(0);
+    dispatch.mockRestore();
+
+    await harness.emitAndDrain([followup]);
+    expect(harness.acknowledgedEvents.map((event) => event.eventId)).toEqual([followup.eventId]);
+    const events = await harness.readEvents();
+    expect(
+      events.some(
+        (event) =>
+          event.type === "thread.message-sent" &&
+          event.payload.messageId === "assistant:meerkat-followup:native-peer-result",
+      ),
+    ).toBe(true);
+    expect((await harness.readModel()).threads[0]?.messages).toHaveLength(1);
+  });
+
+  it("does not acknowledge peer output whose owning thread is missing", async () => {
+    const harness = await createHarness();
+    await harness.emitAndDrain([{ ...peerFollowupEvent(), threadId: asThreadId("missing") }]);
+    expect(harness.acknowledgedEvents).toHaveLength(0);
+    expect(harness.stoppedObservations).toEqual([asThreadId("missing")]);
+  });
+
+  it("keeps archived-thread observation so its response can replay after unarchiving", async () => {
+    const harness = await createHarness();
+    await harness.dispatch({
+      type: "thread.archive",
+      commandId: CommandId.make("archive-peer-thread"),
+      threadId: asThreadId("thread-1"),
+    });
+    const event = peerFollowupEvent();
+    await harness.emitAndDrain([event]);
+    expect(harness.acknowledgedEvents).toHaveLength(0);
+    expect(harness.stoppedObservations).toHaveLength(0);
+    await harness.dispatch({
+      type: "thread.unarchive",
+      commandId: CommandId.make("unarchive-peer-thread"),
+      threadId: asThreadId("thread-1"),
+    });
+    await harness.emitAndDrain([event]);
+    expect(harness.acknowledgedEvents.map((entry) => entry.eventId)).toEqual([event.eventId]);
+    expect((await harness.readModel()).threads[0]?.messages).toHaveLength(1);
+  });
+
+  it.each(["complete runtime answer", "", "hello with missing suffix"])(
+    "replaces provisional assistant text with authoritative completion %j",
+    async (authoritativeText) => {
+      const harness = await createHarness();
+      const createdAt = "2026-01-01T00:00:00.000Z";
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("authoritative-turn");
+      const itemId = asItemId("authoritative-item");
+      const messageId = asMessageId("assistant:authoritative-item");
+      // A previously flushed delta is already visible to connected clients.
+      await harness.dispatch({
+        type: "thread.message.assistant.delta",
+        commandId: CommandId.make("seed-provisional"),
+        threadId,
+        messageId,
+        turnId,
+        delta: "hello provisional",
+        createdAt,
+      });
+      await harness.emitAndDrain([
+        {
+          type: "content.delta",
+          eventId: asEventId("remaining-provisional"),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt,
+          threadId,
+          turnId,
+          itemId,
+          payload: { streamKind: "assistant_text", delta: " buffered suffix" },
+        },
+        {
+          type: "item.completed",
+          eventId: asEventId("authoritative-final"),
+          provider: ProviderDriverKind.make("codex"),
+          createdAt,
+          threadId,
+          turnId,
+          itemId,
+          payload: { itemType: "assistant_message", status: "completed", authoritativeText },
+        },
+      ]);
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      const message = thread?.messages.find((entry) => entry.id === messageId);
+      expect(message?.text).toBe(authoritativeText);
+      expect(message?.streaming).toBe(false);
+    },
+  );
+
+  it("retains an authoritative completion after an earlier assistant segment has closed", async () => {
+    const harness = await createHarness();
+    const base = {
+      provider: ProviderDriverKind.make("meerkat"),
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("closed-segment-turn"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+    };
+    await harness.emitAndDrain([
+      {
+        ...base,
+        type: "content.delta",
+        eventId: asEventId("early-segment-text"),
+        itemId: asItemId("early-segment"),
+        payload: { streamKind: "assistant_text", delta: "First segment." },
+      },
+      {
+        ...base,
+        type: "item.completed",
+        eventId: asEventId("early-segment-completed"),
+        itemId: asItemId("early-segment"),
+        payload: { itemType: "assistant_message", status: "completed" },
+      },
+      {
+        ...base,
+        type: "item.completed",
+        eventId: asEventId("final-without-deltas"),
+        itemId: asItemId("final-segment"),
+        payload: {
+          itemType: "assistant_message",
+          status: "completed",
+          authoritativeText: "The final runtime answer.",
+        },
+      },
+    ]);
+    expect((await harness.readModel()).threads[0]?.messages.map((message) => message.text)).toEqual(
+      ["First segment.", "The final runtime answer."],
+    );
+  });
+
+  it("retries ordinary output after failed persistence and preserves its exact segment during replay", async () => {
+    const harness = await createHarness();
+    const base = {
+      provider: ProviderDriverKind.make("meerkat"),
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("native-turn"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+    };
+    const first: ProviderRuntimeEvent = {
+      ...base,
+      type: "item.completed",
+      eventId: asEventId("native-first-final"),
+      itemId: RuntimeItemId.make("first-segment"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+        authoritativeText: "First answer",
+      },
+    };
+    const dispatch = vi.spyOn(harness.engine, "dispatch");
+    dispatch.mockImplementationOnce(() => Effect.die("injected output persistence failure"));
+    await harness.emitAndDrain([first]);
+    expect(harness.acknowledgedEvents).toHaveLength(0);
+    expect((await harness.readModel()).threads[0]?.messages).toHaveLength(0);
+    dispatch.mockRestore();
+    await harness.emitAndDrain([first]);
+    expect(harness.acknowledgedEvents.at(-1)?.eventId).toBe(first.eventId);
+    await harness.emitAndDrain([
+      {
+        ...base,
+        type: "content.delta",
+        eventId: asEventId("second-segment-delta"),
+        itemId: asItemId("second-segment"),
+        payload: { streamKind: "assistant_text", delta: "Second provisional" },
+      },
+    ]);
+    await harness.emitAndDrain([first, first]);
+    await harness.emitAndDrain([
+      {
+        ...base,
+        type: "item.completed",
+        eventId: asEventId("native-second-final"),
+        itemId: asItemId("second-segment"),
+        payload: {
+          itemType: "assistant_message",
+          status: "completed",
+          authoritativeText: "Second answer",
+        },
+      },
+    ]);
+    const messages = (await harness.readModel()).threads[0]!.messages;
+    expect(
+      messages.map((message) => ({
+        id: message.id,
+        text: message.text,
+        turnId: message.turnId,
+        streaming: message.streaming,
+      })),
+    ).toEqual([
+      {
+        id: "assistant:first-segment",
+        text: "First answer",
+        turnId: "native-turn",
+        streaming: false,
+      },
+      {
+        id: "assistant:second-segment",
+        text: "Second answer",
+        turnId: "native-turn",
+        streaming: false,
+      },
+    ]);
   });
 
   it("streams reasoning deltas into a finalized reasoning message", async () => {

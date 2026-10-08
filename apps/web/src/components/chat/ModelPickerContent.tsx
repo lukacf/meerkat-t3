@@ -3,6 +3,7 @@ import {
   type ProviderInstanceId,
   type ProviderDriverKind,
   type ResolvedKeybindingsConfig,
+  type ServerProviderModel,
 } from "@t3tools/contracts";
 import { resolveSelectableModel } from "@t3tools/shared/model";
 import { useAtomValue } from "@effect/atom-react";
@@ -46,8 +47,10 @@ import {
   type ProviderInstanceEntry,
 } from "../../providerInstances";
 import { providerModelKey, sortProviderModelItems } from "../../modelOrdering";
+import { modelCredentialRequirement, modelsWithCredentialsFirst } from "../../modelCredentials";
 
 type ModelPickerItem = {
+  credentialState?: ServerProviderModel["credentialState"];
   slug: string;
   name: string;
   shortName?: string;
@@ -109,6 +112,7 @@ export function shouldOfferModelPickerSetup(
     (!isProviderInstancePickerReady(entry) ||
       !entry.installed ||
       entry.snapshot.auth.status === "unauthenticated" ||
+      options.some((option) => modelCredentialRequirement(option) !== null) ||
       !options.some((option) => !option.isUnavailable))
   );
 }
@@ -380,6 +384,7 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
           name: model.name,
           ...(model.shortName ? { shortName: model.shortName } : {}),
           ...(model.subProvider ? { subProvider: model.subProvider } : {}),
+          ...(model.credentialState ? { credentialState: model.credentialState } : {}),
           ...(model.badge ? { badge: model.badge } : {}),
           ...(model.isLegacy ? { isLegacy: true } : {}),
           ...(model.isUnavailable ? { isUnavailable: true } : {}),
@@ -523,11 +528,13 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       result = result.filter((m) => m.instanceId === selectedInstanceId);
     }
 
-    return sortProviderModelItems(result, {
-      favoriteModelKeys: favoritesSet,
-      groupFavorites: selectedInstanceId !== "favorites",
-      instanceOrder: selectedInstanceId === "favorites" ? instanceOrder : [],
-    });
+    return modelsWithCredentialsFirst(
+      sortProviderModelItems(result, {
+        favoriteModelKeys: favoritesSet,
+        groupFavorites: selectedInstanceId !== "favorites",
+        instanceOrder: selectedInstanceId === "favorites" ? instanceOrder : [],
+      }),
+    );
   }, [
     favoritesSet,
     flatModels,
@@ -567,20 +574,20 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
 
   const selectedEntry =
     selectedInstanceId === "favorites" ? undefined : entryByInstanceId.get(selectedInstanceId);
-  const providerSetupEntries =
-    !isSearching && props.onOpenProviderSetup
-      ? instanceEntries.filter(
-          (entry) =>
-            matchesLockedProvider(entry) &&
-            shouldOfferModelPickerSetup(
-              entry,
-              modelOptionsByInstance.get(entry.instanceId) ?? [],
-            ) &&
-            (selectedEntry
-              ? entry.instanceId === selectedEntry.instanceId
-              : filteredModels.length === 0),
-        )
-      : [];
+  const providerSetupEntries = props.onOpenProviderSetup
+    ? instanceEntries.filter(
+        (entry) =>
+          matchesLockedProvider(entry) &&
+          shouldOfferModelPickerSetup(entry, modelOptionsByInstance.get(entry.instanceId) ?? []) &&
+          (filteredModels.some(
+            (model) => model.instanceId === entry.instanceId && modelCredentialRequirement(model),
+          ) ||
+            (!isSearching &&
+              (selectedEntry
+                ? entry.instanceId === selectedEntry.instanceId
+                : filteredModels.length === 0))),
+      )
+    : [];
 
   const toggleLegacySection = useCallback((instanceId: ProviderInstanceId) => {
     setExpandedLegacyInstances((expanded) => {
@@ -611,6 +618,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
       // (slug casing etc.). Custom instances share their driver's
       // normalization rules, so pass the driver kind here.
       const resolvedModel = resolveSelectableModel(entry.driverKind, modelSlug, options);
+      if (modelCredentialRequirement(options.find((option) => option.slug === resolvedModel))) {
+        return;
+      }
       if (resolvedModel) {
         if (additive && onToggleModel) {
           onToggleModel(instanceId, resolvedModel);
@@ -649,7 +659,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
     >();
     let selectableModelIndex = 0;
     for (const model of visibleModels) {
-      if (getModelDisabledReason?.(model.instanceId, model.slug)) {
+      if (
+        modelCredentialRequirement(model) ||
+        getModelDisabledReason?.(model.instanceId, model.slug)
+      ) {
         continue;
       }
       const jumpCommand = modelPickerJumpCommandForIndex(selectableModelIndex);
@@ -977,7 +990,8 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                       return null;
                     }
                     const disabledReason =
-                      getModelDisabledReason?.(model.instanceId, model.slug) ?? null;
+                      getModelDisabledReason?.(model.instanceId, model.slug) ??
+                      modelCredentialRequirement(model);
                     return (
                       <ModelListRow
                         key={modelKey}
@@ -1029,7 +1043,10 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                 {providerSetupEntries.map((entry) => (
                   <div key={entry.instanceId} className="px-1 py-1.5 text-xs leading-snug">
                     <p className="line-clamp-3 text-muted-foreground">
-                      {getProviderStatusMessage(entry.snapshot)}
+                      {entry.driverKind === "meerkat" &&
+                      entry.models.some((model) => modelCredentialRequirement(model))
+                        ? "Some models need another account. Connect it in Providers before choosing them."
+                        : getProviderStatusMessage(entry.snapshot)}
                     </p>
                     <InlineButton
                       className="mt-1"
@@ -1040,7 +1057,9 @@ export const ModelPickerContent = memo(function ModelPickerContent(props: {
                     >
                       {providerSetupEntries.length > 1
                         ? `Set up ${entry.displayName}`
-                        : "Open provider setup"}
+                        : entry.driverKind === "meerkat"
+                          ? "Connect model account"
+                          : "Open provider setup"}
                     </InlineButton>
                   </div>
                 ))}

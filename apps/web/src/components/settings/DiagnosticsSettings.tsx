@@ -39,6 +39,7 @@ import { ResourceTelemetryDiagnostics } from "./ResourceTelemetryDiagnostics";
 import { SettingsPageContainer, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useSettingsScope } from "./SettingsScopeContext";
+import { SupportReportExport } from "./SupportReportExport";
 
 const NUMBER_FORMAT = new Intl.NumberFormat();
 
@@ -909,6 +910,7 @@ export function DiagnosticsSettingsPanel() {
 
   return (
     <SettingsPageContainer width="expanded" className="gap-10">
+      <SupportReportExport />
       <ResourceTelemetryDiagnostics environmentId={environmentId} />
 
       <SettingsSection

@@ -2,13 +2,17 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  OrchestrationDispatchCommandError,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/unstable/httpapi/HttpApiBuilder";
 
 import { projectThreadDetailSnapshot } from "./ActivityPayloadProjection.ts";
-import { cleanupFailedUploadedAttachments, normalizeDispatchCommand } from "./Normalizer.ts";
+import {
+  cleanupFailedUploadedAttachmentsIfUnowned,
+  normalizeDispatchCommand,
+} from "./Normalizer.ts";
 import {
   annotateEnvironmentRequest,
   failEnvironmentInternal,
@@ -19,6 +23,7 @@ import {
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./Services/ProjectionSnapshotQuery.ts";
+import { commandStartsRestoredWork, requireRestoreReviewReleased } from "../restoreReview.ts";
 
 export const orchestrationHttpApiLayer = HttpApiBuilder.group(
   EnvironmentHttpApi,
@@ -98,9 +103,24 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.dispatch")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           yield* requireEnvironmentScope(AuthOrchestrationOperateScope);
+          if (commandStartsRestoredWork(args.payload))
+            yield* requireRestoreReviewReleased.pipe(
+              Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
+            );
           yield* ProjectCloneTracker.rejectCommandsDuringClone(
             projectCloneTracker,
             args.payload,
+            (threadId) =>
+              projectionSnapshotQuery.getThreadShellById(threadId).pipe(
+                Effect.map((thread) => (Option.isSome(thread) ? thread.value.projectId : null)),
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationDispatchCommandError({
+                      message: "Could not verify the repository's clone state. Try again.",
+                      cause,
+                    }),
+                ),
+              ),
           ).pipe(
             Effect.catch((cause) =>
               failEnvironmentInternal("orchestration_dispatch_failed", cause),
@@ -109,19 +129,25 @@ export const orchestrationHttpApiLayer = HttpApiBuilder.group(
           const normalizedCommand = yield* normalizeDispatchCommand(args.payload).pipe(
             Effect.catch(() => failEnvironmentInvalidRequest("invalid_command")),
           );
-          const result = yield* orchestrationEngine.dispatch(normalizedCommand).pipe(
+          const dispatch = orchestrationEngine.dispatch(normalizedCommand).pipe(
             Effect.tapError(() =>
-              cleanupFailedUploadedAttachments(args.payload, normalizedCommand),
+              cleanupFailedUploadedAttachmentsIfUnowned(args.payload, normalizedCommand),
+            ),
+            Effect.tap(() =>
+              ProjectCloneTracker.discardCloneForDeletedProject(
+                projectCloneTracker,
+                normalizedCommand,
+              ),
             ),
             Effect.catch((cause) =>
               failEnvironmentInternal("orchestration_dispatch_failed", cause),
             ),
           );
-          yield* ProjectCloneTracker.discardCloneForDeletedProject(
-            projectCloneTracker,
-            normalizedCommand,
-          );
-          return result;
+          // A committed deletion must finish releasing clone ownership even
+          // if the HTTP request is cancelled while its response is pending.
+          return yield* normalizedCommand.type === "project.delete"
+            ? Effect.uninterruptible(dispatch)
+            : dispatch;
         }),
       );
   }),

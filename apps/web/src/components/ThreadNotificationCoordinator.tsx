@@ -20,15 +20,13 @@ import {
   setNotificationBadge,
   unlockNotificationAudio,
 } from "../threadNotifications";
+import { MeerkatAgentNotifications } from "./team/MeerkatAgentNotifications";
 import { resolveSidebarThreadStatus } from "./Sidebar.logic";
 import { toastManager } from "./ui/toast";
 
 export function ThreadNotificationCoordinator() {
   const { environments } = useEnvironments();
   const mode = useClientSettings((settings) => settings.notificationMode);
-  const inAppNotificationsEnabled = useClientSettings(
-    (settings) => settings.inAppNotificationsEnabled,
-  );
   const pending = useRef(
     new Map<string, { environmentId: EnvironmentId; notification: Notification }>(),
   );
@@ -76,13 +74,15 @@ export function ThreadNotificationCoordinator() {
     };
   }, [mode]);
 
-  if (mode === "off" && !inAppNotificationsEnabled) return null;
-
   return environments.map((environment) => (
     <EnvironmentNotifications
       key={environment.environmentId}
       environmentId={environment.environmentId}
       onNotification={onNotification}
+      meerkatEnabled={
+        environment.serverConfig?.providers.some((provider) => provider.driver === "meerkat") ??
+        false
+      }
     />
   ));
 }
@@ -90,9 +90,11 @@ export function ThreadNotificationCoordinator() {
 function EnvironmentNotifications({
   environmentId,
   onNotification,
+  meerkatEnabled,
 }: {
   environmentId: EnvironmentId;
   onNotification: (environmentId: EnvironmentId, notification: Notification) => void;
+  meerkatEnabled: boolean;
 }) {
   const shell = useAtomValue(environmentShell.stateValueAtom(environmentId));
   const mode = useClientSettings((settings) => settings.notificationMode);
@@ -224,5 +226,14 @@ function EnvironmentNotifications({
     shell,
   ]);
 
-  return null;
+  return meerkatEnabled && shell.status === "live" && Option.isSome(shell.snapshot)
+    ? shell.snapshot.value.projects.map((project) => (
+        <MeerkatAgentNotifications
+          key={project.id}
+          environmentId={environmentId}
+          projectId={project.id}
+          onNotification={onNotification}
+        />
+      ))
+    : null;
 }

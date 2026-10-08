@@ -1,11 +1,18 @@
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ProjectReadFileResult } from "@t3tools/contracts";
 import { createRef, useEffect, useMemo } from "react";
+import * as Cause from "effect/Cause";
+import { AsyncResult } from "effect/unstable/reactivity";
 
 import { projectEnvironment } from "~/state/projects";
 import { useAtomCommand } from "~/state/use-atom-command";
+import { isWorkspaceFileRestoring, setWorkspaceFileEditPending } from "~/state/workspaceMutations";
 
 import { FileSaveCoordinator } from "./fileSaveCoordinator";
-import { confirmProjectFileQueryData } from "./projectFilesQueryState";
+import {
+  confirmProjectFileQueryData,
+  getOptimisticProjectFileQueryData,
+  markProjectFileSaveFailed,
+} from "./projectFilesQueryState";
 
 const FILE_SAVE_DEBOUNCE_MS = 500;
 
@@ -21,23 +28,61 @@ export function useFileSaveCoordinator({
   cwd,
   relativePath,
   onPendingChange,
-}: FileSaveOptions): Pick<FileSaveCoordinator, "change"> {
+}: FileSaveOptions): { readonly change: (contents: string) => boolean } {
   const writeFile = useAtomCommand(projectEnvironment.writeFile);
   const session = useMemo(() => {
     const coordinatorRef = createRef<FileSaveCoordinator>();
     return {
-      change: (contents: string) => coordinatorRef.current?.change(contents),
+      change: (contents: string) => {
+        if (
+          !coordinatorRef.current ||
+          isWorkspaceFileRestoring({ environmentId, cwd }, relativePath)
+        ) {
+          return false;
+        }
+        coordinatorRef.current.change(contents);
+        return true;
+      },
       setup: () => {
+        const editor = Symbol("file-editor");
+        let savingFile: ProjectReadFileResult | null = null;
+        const isCurrentSave = () =>
+          savingFile !== null &&
+          getOptimisticProjectFileQueryData(environmentId, cwd, relativePath) === savingFile;
         const coordinator = new FileSaveCoordinator({
           debounceMs: FILE_SAVE_DEBOUNCE_MS,
-          onPendingChange: (pending) => onPendingChange(relativePath, pending),
-          persist: (nextContents) =>
-            writeFile({
+          onPendingChange: (pending) => {
+            setWorkspaceFileEditPending({ environmentId, cwd }, relativePath, editor, pending);
+            onPendingChange(relativePath, pending);
+          },
+          onSaveSettled: () => {
+            setWorkspaceFileEditPending({ environmentId, cwd }, relativePath, editor, false);
+          },
+          persist: (nextContents) => {
+            // This coordinator has one write in flight. A new edit, even one
+            // with identical text in another pane, must keep its own recovery state.
+            savingFile = getOptimisticProjectFileQueryData(environmentId, cwd, relativePath);
+            if (isWorkspaceFileRestoring({ environmentId, cwd }, relativePath)) {
+              return Promise.resolve(
+                AsyncResult.failure(
+                  Cause.fail(new Error("The file is being restored. The unsaved edit was kept.")),
+                ),
+              );
+            }
+            // A failed save can retry while the editor unmounts.
+            setWorkspaceFileEditPending({ environmentId, cwd }, relativePath, editor, true);
+            return writeFile({
               environmentId,
               input: { cwd, relativePath, contents: nextContents },
-            }),
+            });
+          },
           onConfirmed: (confirmedContents) => {
+            if (!isCurrentSave()) return;
             confirmProjectFileQueryData(environmentId, cwd, relativePath, confirmedContents);
+          },
+          onSaveFailed: (failedContents) => {
+            if (!isCurrentSave()) return;
+            markProjectFileSaveFailed(environmentId, cwd, relativePath, failedContents);
           },
         });
         coordinatorRef.current = coordinator;

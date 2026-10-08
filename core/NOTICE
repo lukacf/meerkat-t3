@@ -1,0 +1,7 @@
+Native Meerkat desktop workspace
+
+The meerkat-desktop-contracts, meerkat-desktop-gateway and meerkat-desktop-stdio package manifests inherit the MIT declaration from core/Cargo.toml. Those source declarations are preserved unchanged.
+
+The accompanying canonical MIT terms in LICENSE-MIT are reproduced verbatim from the Open Source Initiative, as retained in the accepted Meerkat native notice material. Its generic YEAR and COPYRIGHT HOLDER placeholders are preserved exactly. They are not an attribution to any person or company.
+
+No copyright holder or year has been inferred or added. The root LICENSE preserves the donor T3 Code attribution and is not an assignment of that attribution to these native packages. Third-party dependency notices accompany packaged releases separately.

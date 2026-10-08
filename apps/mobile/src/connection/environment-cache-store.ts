@@ -26,7 +26,9 @@ const SHELL_SNAPSHOT_CACHE_SCHEMA_VERSION = 1;
 // partial thread as complete (rollback safety).
 // v4 reloads pre-thinking caches whose system-role fallback would otherwise
 // survive afterSequence resume and hide settled reasoning messages.
-const THREAD_SNAPSHOT_CACHE_SCHEMA_VERSION = 4;
+// v5 reloads caches missing prepared-request events, even when a later
+// activity cursor was persisted with no recovery record.
+const THREAD_SNAPSHOT_CACHE_SCHEMA_VERSION = 5;
 const SERVER_CONFIG_CACHE_SCHEMA_VERSION = 1;
 const VCS_REFS_CACHE_SCHEMA_VERSION = 1;
 

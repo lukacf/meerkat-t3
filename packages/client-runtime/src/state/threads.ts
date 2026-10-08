@@ -799,7 +799,11 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           );
           current = yield* SubscriptionRef.get(state);
         }
-        if (Option.isNone(current.data) && current.status !== "deleted") {
+        // A saved prepared request controls admission, so reconcile it with the
+        // server before resuming a cached cursor. Older clients omitted recovery
+        // events but could persist a later activity cursor with stale state.
+        let requiresSnapshot = Option.getOrNull(current.data)?.preparedTurn != null;
+        if ((Option.isNone(current.data) || requiresSnapshot) && current.status !== "deleted") {
           const prepared = yield* SubscriptionRef.get(supervisor.prepared).pipe(
             Effect.flatMap(
               Option.match({
@@ -823,11 +827,14 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           if (Option.isSome(httpSnapshot)) {
             yield* applyItem({ kind: "snapshot", snapshot: httpSnapshot.value });
             current = yield* SubscriptionRef.get(state);
+            requiresSnapshot = false;
           }
         }
 
         const sequence = yield* SubscriptionRef.get(lastSequence);
-        const canResume = Option.isSome(current.data);
+        // If HTTP failed, retain the visible draft but request a fresh socket
+        // snapshot instead of treating its old cursor as authoritative.
+        const canResume = Option.isSome(current.data) && !requiresSnapshot;
         if (!supportsCompletionMarker && canResume) {
           yield* SubscriptionRef.update(state, (value) => ({
             ...value,

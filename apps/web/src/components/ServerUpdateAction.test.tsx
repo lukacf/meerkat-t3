@@ -12,9 +12,6 @@ const testState = vi.hoisted(() => ({
   continueThreadsAfterServerUpdate: false,
 }));
 
-vi.mock("~/hooks/useCopyToClipboard", () => ({
-  useCopyToClipboard: () => ({ copyToClipboard: vi.fn() }),
-}));
 vi.mock("~/hooks/useSettings", () => ({
   useEnvironmentSettings: (
     _environmentId: EnvironmentId,

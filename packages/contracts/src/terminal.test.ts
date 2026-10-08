@@ -14,6 +14,7 @@ import {
   TerminalSessionSnapshot,
   TerminalThreadInput,
   TerminalWriteInput,
+  TerminalWorkspaceChangedError,
 } from "./terminal.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
@@ -150,6 +151,33 @@ describe("TerminalOpenInput", () => {
         }),
       ).toBe(false);
     }
+  });
+});
+
+describe("terminal workspace authority", () => {
+  it("round-trips the changed-checkout explanation through the terminal error contract", () => {
+    const error = new TerminalWorkspaceChangedError({
+      threadId: "thread-a",
+      terminalId: "term-1",
+      terminalCwd: "/worktrees/a",
+      currentCwd: "/project",
+    });
+    const decoded = decodeTerminalError(encodeTerminalError(error));
+    expect(decoded._tag).toBe("TerminalWorkspaceChangedError");
+    expect(decoded.message).toContain("still open in /worktrees/a");
+    expect(decoded.message).toContain("thread now uses /project");
+  });
+
+  it("does not accept a client-supplied execution scope on launch or write", () => {
+    const input = {
+      threadId: "thread-a",
+      terminalId: "term-1",
+      cwd: "/project",
+      data: "pwd\r",
+      executionScope: { cwd: "/worktrees/a", worktreePath: "/worktrees/a" },
+    };
+    expect(decodeSync(TerminalOpenInput, input)).not.toHaveProperty("executionScope");
+    expect(decodeSync(TerminalWriteInput, input)).not.toHaveProperty("executionScope");
   });
 });
 

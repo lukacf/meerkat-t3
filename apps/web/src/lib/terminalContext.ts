@@ -12,7 +12,7 @@ export interface TerminalContextSelection {
 
 export interface TerminalContextDraft extends TerminalContextSelection {
   id: string;
-  threadId: ThreadId;
+  threadId?: ThreadId | undefined;
   createdAt: string;
 }
 

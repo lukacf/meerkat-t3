@@ -5,11 +5,14 @@ import {
   type ChatFileAttachment,
   type EnvironmentId,
   isProviderDriverKind,
+  MEERKAT_MAX_IMAGE_BYTES,
+  MEERKAT_MAX_IMAGES,
   ProjectId,
   type MessageId,
   type ModelSelection,
   type PreviewAnnotationPayload,
   type ProviderInteractionMode,
+  type RuntimeMode,
   ProviderDriverKind,
   type ProviderInstanceId,
   type ServerProvider,
@@ -527,6 +530,29 @@ export function shouldWriteThreadErrorToCurrentServerThread(input: {
   );
 }
 
+export type LocalThreadErrorEntry = {
+  readonly message: string | null;
+  readonly at: number;
+};
+
+/** An accepted recovery clears only the error captured before that request. */
+export function clearRetriedThreadError(input: {
+  errors: Record<string, LocalThreadErrorEntry>;
+  threadKey: string;
+  currentThreadKey: string | null;
+  capturedError: LocalThreadErrorEntry | undefined;
+}): Record<string, LocalThreadErrorEntry> {
+  if (
+    input.currentThreadKey !== input.threadKey ||
+    input.capturedError === undefined ||
+    input.errors[input.threadKey] !== input.capturedError
+  )
+    return input.errors;
+  const next = { ...input.errors };
+  delete next[input.threadKey];
+  return next;
+}
+
 export function buildThreadTurnInterruptInput(thread: Pick<Thread, "id" | "session">): {
   threadId: ThreadId;
   turnId?: TurnId;
@@ -557,9 +583,9 @@ export function resolveComposerProviderSelection(input: {
     ? (input.entries.find((entry) => entry.instanceId === input.lockedInstanceId)
         ?.continuationGroupKey ?? null)
     : null;
-  // Missing metadata must not move Antigravity history into another Google profile.
+  // Missing metadata must not move saved history into another native state root or Google profile.
   const requiresExactInstance =
-    input.lockedProvider === "antigravity" &&
+    (input.lockedProvider === "antigravity" || input.lockedProvider === "meerkat") &&
     input.lockedInstanceId != null &&
     lockedContinuationGroupKey === null;
   const compatibleEntries = input.entries.filter(
@@ -594,6 +620,17 @@ export function resolveComposerProviderSelection(input: {
   };
 }
 
+/** A native session's saved policy outranks stale composer choices and thread projections. */
+export function resolveComposerRuntimeMode(input: {
+  session: Pick<NonNullable<Thread["session"]>, "providerName" | "runtimeMode"> | null | undefined;
+  composerRuntimeMode: RuntimeMode | null | undefined;
+  threadRuntimeMode: RuntimeMode | undefined;
+  defaultRuntimeMode: RuntimeMode;
+}): RuntimeMode {
+  if (input.session?.providerName === "meerkat") return input.session.runtimeMode;
+  return input.composerRuntimeMode ?? input.threadRuntimeMode ?? input.defaultRuntimeMode;
+}
+
 /** Keep restored drafts and every plan control on the selected instance's supported mode. */
 export function resolveComposerInteractionMode(input: {
   planModeEnabled: boolean;
@@ -608,6 +645,40 @@ export function resolveComposerInteractionMode(input: {
     enabled,
     interactionMode: enabled ? input.interactionMode : "default",
   };
+}
+
+/** Keep the prototype's unsupported actions out of composer and direct-send paths. */
+export function getMeerkatSendBlockReason(input: {
+  provider: ProviderDriverKind | undefined;
+  runtimeMode: RuntimeMode;
+  images: ReadonlyArray<Pick<ComposerImageAttachment, "mimeType" | "sizeBytes">>;
+  fileAttachmentCount: number;
+}): string | null {
+  if (input.provider !== "meerkat") return null;
+  if (
+    input.runtimeMode !== "full-access" &&
+    input.runtimeMode !== "read-only" &&
+    input.runtimeMode !== "approval-required"
+  ) {
+    return "Meerkat supports Read-only, Supervised and Full access. Choose one in the access menu to continue.";
+  }
+  if (input.fileAttachmentCount > 0) {
+    return "Meerkat supports image attachments only. Remove the files or choose another provider.";
+  }
+  if (input.images.length > MEERKAT_MAX_IMAGES) {
+    return `Meerkat supports up to ${MEERKAT_MAX_IMAGES} images per message. Remove some images to continue.`;
+  }
+  if (
+    input.images.some(
+      (image) => !["image/png", "image/jpeg", "image/webp", "image/gif"].includes(image.mimeType),
+    )
+  ) {
+    return "Meerkat supports PNG, JPEG, GIF and WebP attachments. Remove unsupported images to continue.";
+  }
+  if (input.images.some((image) => image.sizeBytes > MEERKAT_MAX_IMAGE_BYTES)) {
+    return "Meerkat images must be 10 MiB or smaller. Attach the large image again to resize it.";
+  }
+  return null;
 }
 
 export function getAntigravitySendBlockReason(

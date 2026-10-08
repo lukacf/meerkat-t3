@@ -31,6 +31,54 @@ const baseProviderSnapshot = {
 };
 
 describe("ServerProvider", () => {
+  it("preserves exact workspace readiness without treating old snapshots as scoped", () => {
+    const legacy = decodeServerProvider(baseProviderSnapshot);
+    expect(legacy.supportsWorkspaceReadiness).toBeUndefined();
+    expect(legacy.supportsThreadAuthScope).toBeUndefined();
+    expect(legacy.workspaceSnapshots).toBeUndefined();
+    const readiness = {
+      status: "warning",
+      auth: { status: "unauthenticated" },
+      models: [
+        {
+          slug: "openai:project-model",
+          name: "Project model",
+          isCustom: false,
+          credentialState: "needs_auth",
+          capabilities: null,
+        },
+      ],
+      message: "Connect this project's account.",
+    };
+    const parsed = decodeServerProvider({
+      ...baseProviderSnapshot,
+      instanceId: "meerkat",
+      driver: "meerkat",
+      supportsWorkspaceReadiness: true,
+      supportsThreadAuthScope: true,
+      workspaceSnapshots: [
+        {
+          cwd: "/project",
+          checkedAt: baseProviderSnapshot.checkedAt,
+          skills: [],
+          slashCommands: [],
+          readiness,
+        },
+      ],
+    });
+    expect(parsed.auth.status).toBe("authenticated");
+    expect(parsed.supportsThreadAuthScope).toBe(true);
+    expect(parsed.workspaceSnapshots?.[0]?.readiness).toEqual(readiness);
+    expect(() =>
+      decodeServerProvider({
+        ...parsed,
+        workspaceSnapshots: [
+          { ...parsed.workspaceSnapshots?.[0], readiness: { auth: readiness.auth } },
+        ],
+      }),
+    ).toThrow();
+  });
+
   it("defaults capability arrays when decoding provider snapshots", () => {
     const parsed = decodeServerProvider({
       instanceId: "codex",

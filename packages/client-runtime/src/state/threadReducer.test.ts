@@ -8,10 +8,11 @@ import {
   MessageId,
   ProjectId,
   ProviderInstanceId,
+  ProviderDriverKind,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
-import type { OrchestrationThread } from "@t3tools/contracts";
+import type { OrchestrationThread, ThreadPreparedTurn } from "@t3tools/contracts";
 
 import { applyThreadDetailEvent } from "./threadReducer.ts";
 
@@ -48,6 +49,87 @@ const baseThread: OrchestrationThread = {
 };
 
 describe("applyThreadDetailEvent", () => {
+  it("keeps a released draft recoverable while withdrawing only its pending message", () => {
+    const prepared: ThreadPreparedTurn = {
+      recoveryId: CommandId.make("original-prepared-request"),
+      projectId: baseThread.projectId,
+      projectCwd: "/repo",
+      expectedCwd: "/repo-checkout",
+      providerIdentity: {
+        driverKind: ProviderDriverKind.make("meerkat"),
+        continuationKey: "native-continuity",
+      },
+      phase: "released",
+      setup: "finished",
+      createdAt: baseThread.createdAt,
+      updatedAt: baseThread.updatedAt,
+      command: {
+        type: "thread.turn.start",
+        commandId: CommandId.make("original-prepared-request"),
+        threadId: baseThread.id,
+        message: {
+          messageId: MessageId.make("prepared-message"),
+          role: "user",
+          text: "Original text",
+          attachments: [
+            {
+              type: "image",
+              id: "saved-image",
+              name: "design.png",
+              mimeType: "image/png",
+              sizeBytes: 20,
+            },
+          ],
+        },
+        modelSelection: baseThread.modelSelection,
+        runtimeMode: baseThread.runtimeMode,
+        interactionMode: baseThread.interactionMode,
+        createdAt: baseThread.createdAt,
+      },
+    };
+    const thread: OrchestrationThread = {
+      ...baseThread,
+      messages: ["other-message", "prepared-message"].map((id) => ({
+        id: MessageId.make(id),
+        role: "user",
+        text: id,
+        turnId: null,
+        streaming: false,
+        createdAt: baseThread.createdAt,
+        updatedAt: baseThread.updatedAt,
+      })),
+    };
+    const released = applyThreadDetailEvent(thread, {
+      ...baseEventFields,
+      sequence: 1,
+      occurredAt: baseThread.updatedAt,
+      aggregateKind: "thread",
+      aggregateId: baseThread.id,
+      type: "thread.prepared-turn-changed",
+      payload: { threadId: baseThread.id, preparedTurn: prepared },
+    });
+    expect(released.kind).toBe("updated");
+    if (released.kind !== "updated") return;
+    expect(released.thread.messages.map((message) => message.id)).toEqual(["other-message"]);
+    expect(released.thread.preparedTurn?.command.message).toEqual(prepared.command.message);
+    const next = applyThreadDetailEvent(released.thread, {
+      ...baseEventFields,
+      sequence: 2,
+      occurredAt: baseThread.updatedAt,
+      aggregateKind: "thread",
+      aggregateId: baseThread.id,
+      type: "thread.turn-start-requested",
+      payload: {
+        threadId: baseThread.id,
+        messageId: MessageId.make("edited-message"),
+        runtimeMode: baseThread.runtimeMode,
+        interactionMode: baseThread.interactionMode,
+        createdAt: baseThread.createdAt,
+      },
+    });
+    expect(next.kind === "updated" ? next.thread.preparedTurn : "unchanged").toBeNull();
+  });
+
   describe("project events", () => {
     it("returns unchanged for project.created", () => {
       const result = applyThreadDetailEvent(baseThread, {
@@ -567,6 +649,44 @@ describe("applyThreadDetailEvent", () => {
   });
 
   describe("thread.message-sent", () => {
+    it.each(["runtime answer", ""])("reconciles authoritative final text %j", (text) => {
+      const message = {
+        id: MessageId.make("provisional"),
+        role: "assistant" as const,
+        text: "provisional answer",
+        turnId: null,
+        streaming: true,
+        createdAt: baseThread.createdAt,
+        updatedAt: baseThread.updatedAt,
+      };
+      const result = applyThreadDetailEvent(
+        { ...baseThread, messages: [message] },
+        {
+          ...baseEventFields,
+          sequence: 6,
+          occurredAt: baseThread.updatedAt,
+          aggregateKind: "thread",
+          aggregateId: baseThread.id,
+          type: "thread.message-sent",
+          payload: {
+            threadId: baseThread.id,
+            messageId: message.id,
+            role: "assistant",
+            text,
+            replaceText: true,
+            turnId: null,
+            streaming: false,
+            createdAt: baseThread.createdAt,
+            updatedAt: baseThread.updatedAt,
+          },
+        },
+      );
+      expect(result.kind).toBe("updated");
+      if (result.kind !== "updated") return;
+      expect(result.thread.messages[0]?.text).toBe(text);
+      expect(result.thread.messages[0]?.streaming).toBe(false);
+    });
+
     it.each([
       ["first", ["first+", "middle", "last"]],
       ["middle", ["first", "middle+", "last"]],
@@ -1039,6 +1159,70 @@ describe("applyThreadDetailEvent", () => {
         expect(result.thread.session?.status).toBe("running");
         expect(result.thread.latestTurn?.turnId).toBe("turn-1");
         expect(result.thread.latestTurn?.state).toBe("running");
+      }
+    });
+  });
+
+  describe("MobKit cooperative cancellation", () => {
+    it("keeps the turn running on request and interrupts only on a terminal session event", () => {
+      const startedAt = "2026-04-01T08:00:00.000Z";
+      const requestedAt = "2026-04-01T08:00:01.000Z";
+      const completedAt = "2026-04-01T08:00:02.000Z";
+      const thread: OrchestrationThread = {
+        ...baseThread,
+        session: {
+          threadId: baseThread.id,
+          providerName: "meerkat",
+          runtimeMode: "full-access",
+          status: "running",
+          activeTurnId: TurnId.make("turn-mobkit"),
+          lastError: null,
+          updatedAt: startedAt,
+        },
+        latestTurn: {
+          turnId: TurnId.make("turn-mobkit"),
+          state: "running",
+          requestedAt: startedAt,
+          startedAt,
+          completedAt: null,
+          assistantMessageId: null,
+        },
+      };
+      const pending = applyThreadDetailEvent(thread, {
+        ...baseEventFields,
+        sequence: 10,
+        aggregateKind: "thread",
+        aggregateId: thread.id,
+        occurredAt: requestedAt,
+        type: "thread.turn-interrupt-requested",
+        payload: {
+          threadId: thread.id,
+          turnId: TurnId.make("turn-mobkit"),
+          createdAt: requestedAt,
+        },
+      });
+      expect(pending.kind).toBe("unchanged");
+      const terminal = applyThreadDetailEvent(thread, {
+        ...baseEventFields,
+        sequence: 11,
+        aggregateKind: "thread",
+        aggregateId: thread.id,
+        occurredAt: completedAt,
+        type: "thread.session-set",
+        payload: {
+          threadId: thread.id,
+          session: {
+            ...thread.session!,
+            status: "interrupted",
+            activeTurnId: null,
+            updatedAt: completedAt,
+          },
+        },
+      });
+      expect(terminal.kind).toBe("updated");
+      if (terminal.kind === "updated") {
+        expect(terminal.thread.latestTurn).toMatchObject({ state: "interrupted", completedAt });
+        expect(terminal.thread.session?.activeTurnId).toBeNull();
       }
     });
   });

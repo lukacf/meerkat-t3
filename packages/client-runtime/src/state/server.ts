@@ -1,5 +1,6 @@
 import {
   type EnvironmentId,
+  type ProviderSettingsIntent,
   type ServerConfig,
   type ServerConfigStreamEvent,
   type ServerLifecycleWelcomePayload,
@@ -25,6 +26,7 @@ import { AsyncResult, Atom } from "effect/unstable/reactivity";
 
 import {
   createAtomCommandScheduler,
+  createEnvironmentCommand,
   createEnvironmentRpcCommand,
   createEnvironmentQueryAtomFamily,
   createEnvironmentRpcQueryAtomFamily,
@@ -37,8 +39,10 @@ import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import { EnvironmentCacheStore } from "../platform/persistence.ts";
 import {
+  EnvironmentRpcUnavailableError,
   isRpcClientError,
   request,
+  requestWithSession,
   runStream,
   subscribe,
   subscribeDynamicWithSession,
@@ -54,6 +58,17 @@ import {
 
 // Exported server state includes this type in its inferred public return type.
 export type { ServerConfigProjection } from "./serverConfigProjection.ts";
+
+export { ProviderSettingsConflictError, type ProviderSettingsIntent } from "@t3tools/contracts";
+
+export class ProviderSettingsUnsupportedError extends Schema.TaggedError<ProviderSettingsUnsupportedError>()(
+  "ProviderSettingsUnsupportedError",
+  {},
+) {
+  override get message(): string {
+    return "Update the app or server on this device to change provider settings.";
+  }
+}
 
 export type ServerUpdateStage = "downloading" | "installing" | "resuming";
 
@@ -968,8 +983,27 @@ export function createServerEnvironmentAtoms<R, E>(
     readonly input: EnvironmentRpcInput<typeof WS_METHODS.subscribeServerLifecycle>;
   }) => welcomeFamily(target.environmentId);
 
+  const restoreReviewSnapshot = createEnvironmentRpcQueryAtomFamily(runtime, {
+    label: "environment-data:server:restore-review",
+    tag: WS_METHODS.serverRestoreReviewSnapshot,
+    staleTimeMs: 0,
+    idleTtlMs: 0,
+  });
+
   return {
     configValueAtom,
+    restoreReviewSnapshot,
+    consentRestoreReview: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:restore-review-consent",
+      tag: WS_METHODS.serverRestoreReviewConsent,
+      onSuccess: (target, registry) =>
+        Effect.sync(() => {
+          registry.refresh(configProjection({ environmentId: target.environmentId, input: {} }));
+          registry.refresh(
+            restoreReviewSnapshot({ environmentId: target.environmentId, input: {} }),
+          );
+        }),
+    }),
     updateStateAtom,
     settingsValueAtom,
     providersValueAtom,
@@ -1109,6 +1143,31 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.serverUpdateSettings,
       scheduler: configScheduler,
       concurrency: configConcurrency,
+    }),
+    updateProviderSettings: createEnvironmentCommand(runtime, {
+      label: "environment-data:server:update-provider-settings",
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+      execute: (intent: ProviderSettingsIntent) =>
+        Effect.gen(function* () {
+          const supervisor = yield* EnvironmentSupervisor;
+          const session = yield* SubscriptionRef.get(supervisor.session);
+          if (Option.isNone(session)) {
+            return yield* new EnvironmentRpcUnavailableError({
+              environmentId: supervisor.target.environmentId,
+              message: `${supervisor.target.label} is not connected.`,
+            });
+          }
+          const config = yield* session.value.initialConfig;
+          if (config.environment.capabilities.providerSettingsIntents !== true) {
+            return yield* new ProviderSettingsUnsupportedError({});
+          }
+          // The server composes intent and persists inside its settings lock.
+          // Never fall back to replacing a client-side copy of the whole map.
+          return yield* requestWithSession(session.value, WS_METHODS.serverUpdateProviderSettings, {
+            intent,
+          });
+        }),
     }),
     signalProcess: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:signal-process",

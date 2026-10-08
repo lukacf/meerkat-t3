@@ -5,6 +5,7 @@ import type {
 } from "@t3tools/contracts";
 import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
+  getProviderModelControlCapabilities,
   getProviderOptionDescriptors,
 } from "@t3tools/shared/model";
 
@@ -165,6 +166,10 @@ export function buildModelOptions(
 
     const providerLabel = providerDisplayLabel(provider);
     for (const model of provider.models) {
+      const capabilities =
+        provider.driver === "meerkat"
+          ? getProviderModelControlCapabilities(provider.driver, model.capabilities)
+          : model.capabilities;
       const key = `${provider.instanceId}:${model.slug}`;
       options.set(key, {
         key,
@@ -175,13 +180,13 @@ export function buildModelOptions(
         providerDriver: provider.driver,
         isDefault: model.isDefault === true,
         isLegacy: model.isLegacy === true,
-        capabilities: model.capabilities,
+        capabilities,
         selection: normalizeSelectionOptions(
           {
             instanceId: provider.instanceId,
             model: model.slug,
           },
-          model.capabilities,
+          capabilities,
         ),
       });
     }
@@ -193,8 +198,10 @@ export function buildModelOptions(
     if (existing) {
       options.set(key, {
         ...existing,
+        // Existing native selections also identify active turns and saved
+        // deliveries. Filter controls without rewriting those options.
         selection:
-          existing.providerDriver === "antigravity"
+          existing.providerDriver === "antigravity" || existing.providerDriver === "meerkat"
             ? fallbackModelSelection
             : normalizeSelectionOptions(fallbackModelSelection, existing.capabilities),
       });
@@ -225,7 +232,10 @@ export function buildModelOptions(
         ...(isModelSelectionUnavailable(config, fallbackModelSelection)
           ? { isUnavailable: true }
           : {}),
-        capabilities: model?.capabilities ?? null,
+        capabilities:
+          providerDriver === "meerkat"
+            ? getProviderModelControlCapabilities(providerDriver, model?.capabilities)
+            : (model?.capabilities ?? null),
         selection: fallbackModelSelection,
       });
     }

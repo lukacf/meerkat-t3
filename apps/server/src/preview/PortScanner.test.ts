@@ -23,6 +23,8 @@ import { FetchHttpClient } from "effect/unstable/http";
 
 import * as ProcessRunner from "../processRunner.ts";
 import * as PortScanner from "./PortScanner.ts";
+import { projectTerminalOwnerKey } from "../terminal/terminalOwner.ts";
+import { ProjectId } from "@t3tools/contracts";
 const processProbeFailure: ProcessRunner.ProcessRunner["Service"]["run"] = (input) =>
   Effect.fail(
     new ProcessRunner.ProcessSpawnError({
@@ -120,6 +122,34 @@ const makeLsofScannerLayer = (input: {
       ),
     ),
   );
+
+effectIt.effect("discovers project shell servers without inventing a thread owner", () => {
+  const layer = makeLsofScannerLayer({
+    pid: () => 1234,
+    fetch: (() =>
+      Promise.resolve(
+        new Response("hello", { headers: { "content-type": "text/html" } }),
+      )) as typeof globalThis.fetch,
+  });
+  return Effect.gen(function* () {
+    const scanner = yield* PortScanner.PortDiscovery;
+    yield* scanner.registerTerminalProcesses({
+      threadId: projectTerminalOwnerKey(ProjectId.make("project-a")),
+      terminalId: "shell-a",
+      processIds: [1234],
+    });
+    expect((yield* scanner.scan())[0]?.terminal).toBeNull();
+    yield* scanner.registerTerminalProcesses({
+      threadId: "ordinary-thread",
+      terminalId: "shell-b",
+      processIds: [1234],
+    });
+    expect((yield* scanner.scan())[0]?.terminal).toEqual({
+      threadId: "ordinary-thread",
+      terminalId: "shell-b",
+    });
+  }).pipe(Effect.provide(layer));
+});
 
 const openServer = (
   port: number,

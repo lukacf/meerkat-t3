@@ -7,6 +7,7 @@ import {
   ChevronRightIcon,
   FolderPlusIcon,
   Globe2Icon,
+  LinkIcon,
   SearchIcon,
   SquarePenIcon,
   TerminalIcon,
@@ -66,7 +67,7 @@ import {
   settlePromise,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { useNavigate, useParams, useRouter } from "@tanstack/react-router";
+import { useLocation, useNavigate, useParams, useRouter } from "@tanstack/react-router";
 import {
   MAX_SIDEBAR_THREAD_PREVIEW_COUNT,
   MIN_SIDEBAR_THREAD_PREVIEW_COUNT,
@@ -83,12 +84,19 @@ import { releaseProjectDraftUploads } from "../lib/composerDraftUploads";
 import { isTerminalFocused } from "../lib/terminalFocus";
 import { isMacPlatform } from "../lib/utils";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
+import {
+  useMeerkatPeerConnections,
+  useMeerkatPeerDrag,
+  type PeerItem,
+} from "./team/MeerkatPeerConnections";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
 import {
   readThreadShell,
   useProjects,
+  useProject,
   useThreadShells,
   useThreadShellsForProjectRefs,
+  useServerConfigs,
 } from "../state/entities";
 import { selectThreadTerminalUiState, useTerminalUiStateStore } from "../terminalUiStateStore";
 import { useThreadRunningTerminalIds } from "../state/terminalSessions";
@@ -196,6 +204,8 @@ import {
 } from "./Sidebar.logic";
 import { sortThreads } from "../lib/threadSort";
 import { SidebarChromeFooter, SidebarChromeHeader } from "./sidebar/SidebarChrome";
+import { MeerkatProjectAgents } from "./sidebar/MeerkatProjectAgents";
+import { projectAgentRouteScope } from "./sidebar/meerkatAgentNavigation";
 import { useCopyToClipboard } from "~/hooks/useCopyToClipboard";
 import { useIsMobile } from "~/hooks/useMediaQuery";
 import { CommandDialogTrigger } from "./ui/command";
@@ -418,6 +428,26 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
     reportFailure: false,
   });
   const environment = useEnvironment(thread.environmentId);
+  const owningProject = useProject(scopeProjectRef(thread.environmentId, thread.projectId));
+  const modelInstanceId = thread.session?.providerInstanceId ?? thread.modelSelection.instanceId;
+  const peerItem: PeerItem | null = environment?.serverConfig?.providers.some(
+    (provider) => provider.instanceId === modelInstanceId && provider.driver === "meerkat",
+  )
+    ? {
+        environmentId: thread.environmentId,
+        endpoint: {
+          kind: "thread",
+          projectId: thread.projectId,
+          instanceId: modelInstanceId,
+          threadId: thread.id,
+        },
+        label: thread.title,
+        projectTitle: owningProject?.title ?? "Project",
+      }
+    : null;
+  const { dragProps: peerDragProps, isDropTarget: isPeerDropTarget } = useMeerkatPeerDrag(peerItem);
+  const peerConnections = useMeerkatPeerConnections();
+
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   // No primary (the hosted app) means every thread is remote, and the machine
   // glyph is what tells the environments apart.
@@ -704,6 +734,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
       className="w-full"
       data-thread-item
       {...fileDropHandlers}
+      {...peerDragProps}
       onMouseLeave={handleMouseLeave}
       onBlurCapture={handleBlurCapture}
     >
@@ -724,7 +755,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
             : isSelected
               ? "bg-sidebar-row-selected text-sidebar-foreground hover:bg-sidebar-row-active"
               : "text-sidebar-muted-foreground/80 hover:bg-sidebar-row-hover hover:text-sidebar-foreground",
-          isFileDragOver && "ring-1 ring-inset ring-primary/70",
+          (isFileDragOver || isPeerDropTarget) && "ring-1 ring-inset ring-primary/70",
         )}
         onClick={handleRowClick}
         onDoubleClick={handleRowDoubleClick}
@@ -800,6 +831,19 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
           )}
         </div>
         <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          {peerItem && peerConnections ? (
+            <Button
+              size="icon-xs"
+              variant="ghost-muted"
+              aria-label={`Connect ${thread.title} to another agent or thread`}
+              onClick={(event) => {
+                event.stopPropagation();
+                peerConnections.choosePeer(peerItem);
+              }}
+            >
+              <LinkIcon />
+            </Button>
+          ) : null}
           {discoveredPorts.length > 0 && (
             <Tooltip>
               <TooltipTrigger
@@ -1200,6 +1244,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     (settings) => settings.sidebarThreadPreviewCount,
   );
   const router = useRouter();
+  const serverConfigs = useServerConfigs();
   const queuePendingFileDrop = useSidebarPendingFileDropStore((s) => s.queuePendingFileDrop);
   const clearPendingFileDrop = useSidebarPendingFileDropStore((s) => s.clearPendingFileDrop);
   const { isMobile, setOpenMobile } = useSidebar();
@@ -1269,9 +1314,20 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
   sidebarThreadByKeyRef.current = sidebarThreadByKey;
   const projectThreads = sidebarThreads;
   const projectPreferenceKeys = useMemo(() => projectExpansionPreferenceKeys(project), [project]);
-  const projectExpanded = useUiStateStore((state) =>
+  const savedProjectExpanded = useUiStateStore((state) =>
     resolveProjectExpanded(state.projectExpandedById, projectPreferenceKeys),
   );
+  const projectAgentScope = useLocation({
+    select: (location) => projectAgentRouteScope(location.pathname, location.searchStr),
+  });
+  const projectExpanded =
+    savedProjectExpanded ||
+    (projectAgentScope !== null &&
+      project.memberProjectRefs.some(
+        (ref) =>
+          ref.environmentId === projectAgentScope.environmentId &&
+          ref.projectId === projectAgentScope.projectId,
+      ));
   const threadLastVisitedAts = useUiStateStore(
     useShallow((state) =>
       projectThreads.map(
@@ -1431,6 +1487,31 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
     visibleProjectThreads,
   ]);
 
+  const meerkatProjectOwner = project.memberProjects.find((member) =>
+    serverConfigs
+      .get(member.environmentId)
+      ?.providers.some((provider) => provider.driver === "meerkat" && provider.enabled),
+  );
+  const openProjectHome = useCallback(() => {
+    if (!meerkatProjectOwner) return;
+    if (isMobile) setOpenMobile(false);
+    setProjectExpanded(projectPreferenceKeys, true);
+    void router.navigate({
+      to: "/$environmentId/projects/$projectId/start",
+      params: {
+        environmentId: meerkatProjectOwner.environmentId,
+        projectId: meerkatProjectOwner.id,
+      },
+    });
+  }, [
+    isMobile,
+    meerkatProjectOwner,
+    projectPreferenceKeys,
+    router,
+    setOpenMobile,
+    setProjectExpanded,
+  ]);
+
   const handleProjectButtonClick = useCallback(
     (event: React.MouseEvent<HTMLButtonElement>) => {
       if (suppressProjectClickForContextMenuRef.current) {
@@ -1453,10 +1534,19 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (useThreadSelectionStore.getState().hasSelection()) {
         clearSelection();
       }
+      if (
+        meerkatProjectOwner &&
+        !(event.target as HTMLElement).closest("[data-project-disclosure]")
+      ) {
+        openProjectHome();
+        return;
+      }
       setProjectExpanded(projectPreferenceKeys, !projectExpanded);
     },
     [
       clearSelection,
+      meerkatProjectOwner,
+      openProjectHome,
       dragInProgressRef,
       projectExpanded,
       projectPreferenceKeys,
@@ -1473,9 +1563,20 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       if (dragInProgressRef.current) {
         return;
       }
+      if (meerkatProjectOwner && event.key === "Enter") {
+        openProjectHome();
+        return;
+      }
       setProjectExpanded(projectPreferenceKeys, !projectExpanded);
     },
-    [dragInProgressRef, projectExpanded, projectPreferenceKeys, setProjectExpanded],
+    [
+      dragInProgressRef,
+      meerkatProjectOwner,
+      openProjectHome,
+      projectExpanded,
+      projectPreferenceKeys,
+      setProjectExpanded,
+    ],
   );
 
   const handleProjectButtonPointerDownCapture = useCallback(
@@ -1686,7 +1787,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
         const actionHandlers = new Map<string, () => Promise<void> | void>();
         const makeLeaf = (
-          action: "rename" | "grouping" | "copy-path" | "delete",
+          action: "rename" | "grouping" | "copy-path" | "delete" | "add-agent" | "propose-agents",
           member: SidebarProjectGroupMember,
           options?: {
             destructive?: boolean;
@@ -1696,6 +1797,20 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           const id = `${action}:${member.physicalProjectKey}`;
           actionHandlers.set(id, () => {
             switch (action) {
+              case "propose-agents":
+                if (isMobile) setOpenMobile(false);
+                void router.navigate({
+                  to: "/$environmentId/projects/$projectId/agents/propose",
+                  params: { environmentId: member.environmentId, projectId: member.id },
+                });
+                return;
+              case "add-agent":
+                if (isMobile) setOpenMobile(false);
+                void router.navigate({
+                  to: "/$environmentId/projects/$projectId/agents/new",
+                  params: { environmentId: member.environmentId, projectId: member.id },
+                });
+                return;
               case "rename":
                 openProjectRenameDialog(member);
                 return;
@@ -1719,7 +1834,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         };
 
         const buildTargetedItem = (
-          action: "rename" | "grouping" | "copy-path" | "delete",
+          action: "rename" | "grouping" | "copy-path" | "delete" | "add-agent" | "propose-agents",
           label: string,
           options?: {
             destructive?: boolean;
@@ -1761,6 +1876,26 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
 
         const clicked = await api.contextMenu.show(
           [
+            ...(project.memberProjects.some((member) =>
+              serverConfigs
+                .get(member.environmentId)
+                ?.providers.some((provider) => provider.driver === "meerkat"),
+            )
+              ? [
+                  buildTargetedItem("propose-agents", "Propose agents from repository", {
+                    isDisabled: (member) =>
+                      !serverConfigs
+                        .get(member.environmentId)
+                        ?.providers.some((provider) => provider.driver === "meerkat"),
+                  }),
+                  buildTargetedItem("add-agent", "Add agent", {
+                    isDisabled: (member) =>
+                      !serverConfigs
+                        .get(member.environmentId)
+                        ?.providers.some((provider) => provider.driver === "meerkat"),
+                  }),
+                ]
+              : []),
             buildTargetedItem("rename", "Rename"),
             buildTargetedItem("grouping", "Group into..."),
             buildTargetedItem("copy-path", "Copy Path"),
@@ -1792,6 +1927,7 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
       project.memberProjects,
       project.projectKey,
       router,
+      serverConfigs,
       setOpenMobile,
       suppressProjectClickForContextMenuRef,
     ],
@@ -2372,38 +2508,45 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
           {...(isManualProjectSorting && dragHandleProps ? dragHandleProps.attributes : {})}
           {...(isManualProjectSorting && dragHandleProps ? dragHandleProps.listeners : {})}
           onPointerDownCapture={handleProjectButtonPointerDownCapture}
+          aria-label={
+            meerkatProjectOwner
+              ? `Open ${project.displayName} project. Space toggles its list.`
+              : undefined
+          }
           onClick={handleProjectButtonClick}
           onKeyDown={handleProjectButtonKeyDown}
           onContextMenu={handleProjectButtonContextMenu}
         >
-          {!projectExpanded && projectStatus ? (
-            <Tooltip>
-              <TooltipTrigger
-                render={
-                  <span
-                    aria-label={projectStatus.label}
-                    className={`-ml-0.5 relative inline-flex size-3.5 shrink-0 items-center justify-center ${projectStatus.colorClass}`}
-                  />
-                }
-              >
-                <span className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/project-header:opacity-0">
-                  <span
-                    className={`size-[9px] rounded-full ${projectStatus.dotClass} ${
-                      projectStatus.pulse ? "animate-status-pulse" : ""
-                    }`}
-                  />
-                </span>
-                <ChevronRightIcon className="absolute inset-0 m-auto size-3.5 text-icon-muted opacity-0 transition-opacity duration-150 group-hover/project-header:opacity-100" />
-              </TooltipTrigger>
-              <TooltipPopup side="top">{projectStatus.label}</TooltipPopup>
-            </Tooltip>
-          ) : (
-            <ChevronRightIcon
-              className={`-ml-0.5 size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-150 ${
-                projectExpanded ? "rotate-90" : ""
-              }`}
-            />
-          )}
+          <span data-project-disclosure className="contents">
+            {!projectExpanded && projectStatus ? (
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <span
+                      aria-label={projectStatus.label}
+                      className={`-ml-0.5 relative inline-flex size-3.5 shrink-0 items-center justify-center ${projectStatus.colorClass}`}
+                    />
+                  }
+                >
+                  <span className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 group-hover/project-header:opacity-0">
+                    <span
+                      className={`size-[9px] rounded-full ${projectStatus.dotClass} ${
+                        projectStatus.pulse ? "animate-status-pulse" : ""
+                      }`}
+                    />
+                  </span>
+                  <ChevronRightIcon className="absolute inset-0 m-auto size-3.5 text-icon-muted opacity-0 transition-opacity duration-150 group-hover/project-header:opacity-100" />
+                </TooltipTrigger>
+                <TooltipPopup side="top">{projectStatus.label}</TooltipPopup>
+              </Tooltip>
+            ) : (
+              <ChevronRightIcon
+                className={`-ml-0.5 size-3.5 shrink-0 text-muted-foreground/70 transition-transform duration-150 ${
+                  projectExpanded ? "rotate-90" : ""
+                }`}
+              />
+            )}
+          </span>
           <span className="flex shrink-0">
             <ProjectFavicon project={project} />
           </span>
@@ -2469,6 +2612,12 @@ const SidebarProjectItem = memo(function SidebarProjectItem(props: SidebarProjec
         </Tooltip>
       </div>
 
+      {projectExpanded ? (
+        <>
+          <MeerkatProjectAgents projectRefs={project.memberProjectRefs} />
+          <p className="pl-6 pt-2 text-2xs font-medium text-muted-foreground">Threads</p>
+        </>
+      ) : null}
       <SidebarProjectThreadList
         projectKey={project.projectKey}
         projectExpanded={projectExpanded}

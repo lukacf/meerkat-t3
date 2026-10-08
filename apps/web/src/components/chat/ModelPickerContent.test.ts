@@ -157,6 +157,20 @@ describe("resolveModelPickerSelectedModel", () => {
 describe("shouldOfferModelPickerSetup", () => {
   const availableModel = { slug: "gemini-3.1-pro", name: "Gemini 3.1 Pro" };
 
+  it("offers another account when a ready Meerkat instance includes an unauthenticated model", () => {
+    expect(
+      shouldOfferModelPickerSetup(entry("ready", "meerkat"), [
+        { slug: "openai:example", name: "OpenAI", credentialState: "connected" },
+        { slug: "anthropic:example", name: "Anthropic", credentialState: "needs_auth" },
+      ]),
+    ).toBe(true);
+    expect(
+      shouldOfferModelPickerSetup(entry("ready", "meerkat"), [
+        { slug: "openai:example", name: "OpenAI", credentialState: "connected" },
+      ]),
+    ).toBe(false);
+  });
+
   it("offers setup before an Antigravity account has models", () => {
     expect(shouldOfferModelPickerSetup(entry("error", "antigravity"), [])).toBe(true);
   });

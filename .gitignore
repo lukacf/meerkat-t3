@@ -44,3 +44,9 @@ node_modules/
 
 # pnpm content-addressable store; never belongs in the repo.
 .pnpm-store/
+# Isolated Meerkat fork prototype state.
+.meerkat-prototype/
+
+# Provisioned native Meerkat runtime (rebuilt from the consumer lock).
+apps/server/resources/meerkat-runtime/
+apps/server/resources/native-notices/

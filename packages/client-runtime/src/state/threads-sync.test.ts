@@ -1,14 +1,18 @@
 import {
+  CommandId,
   EnvironmentId,
   EventId,
+  MessageId,
   ORCHESTRATION_WS_METHODS,
   ProjectId,
   ProviderInstanceId,
+  ProviderDriverKind,
   ThreadId,
   TurnId,
   type OrchestrationThread,
   type OrchestrationThreadDetailSnapshot,
   type OrchestrationThreadStreamItem,
+  type ThreadPreparedTurn,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
@@ -101,6 +105,35 @@ const ACTIVE_THREAD: OrchestrationThread = {
     activeTurnId: TurnId.make("turn-1"),
     lastError: null,
     updatedAt: "2026-04-01T00:01:00.000Z",
+  },
+};
+const PREPARED_TURN: ThreadPreparedTurn = {
+  recoveryId: CommandId.make("original-prepared-command"),
+  projectId: BASE_THREAD.projectId,
+  projectCwd: "/repo",
+  expectedCwd: "/repo-checkout",
+  providerIdentity: {
+    driverKind: ProviderDriverKind.make("meerkat"),
+    continuationKey: "native-continuity",
+  },
+  phase: "preparing",
+  setup: "not_started",
+  createdAt: BASE_THREAD.createdAt,
+  updatedAt: BASE_THREAD.updatedAt,
+  command: {
+    type: "thread.turn.start",
+    commandId: CommandId.make("original-prepared-command"),
+    threadId: THREAD_ID,
+    message: {
+      messageId: MessageId.make("original-prepared-message"),
+      role: "user",
+      text: "Keep this original message",
+      attachments: [],
+    },
+    modelSelection: { instanceId: ProviderInstanceId.make("meerkat"), model: "fixture-b" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    createdAt: BASE_THREAD.createdAt,
   },
 };
 
@@ -373,6 +406,93 @@ const deleted = (): OrchestrationThreadStreamItem => ({
 });
 
 describe("EnvironmentThreads", () => {
+  for (const source of ["disk", "retained"] as const) {
+    for (const phase of ["blocked", "admitted"] as const) {
+      it.effect(
+        `refreshes ${source} prepared recovery before cursor resume when the request is ${phase}`,
+        () =>
+          Effect.gen(function* () {
+            const cached = { ...BASE_THREAD, preparedTurn: PREPARED_TURN };
+            const preparedTurn =
+              phase === "blocked"
+                ? {
+                    ...PREPARED_TURN,
+                    phase: "blocked" as const,
+                    setup: "finished" as const,
+                    reason: "The native model is unavailable in this checkout.",
+                  }
+                : null;
+            const current = { ...BASE_THREAD, preparedTurn };
+            const h = yield* makeHarness({
+              ...(source === "disk"
+                ? { cached }
+                : {
+                    resumeCache: {
+                      owner: undefined,
+                      snapshot: {
+                        state: {
+                          data: Option.some(cached),
+                          status: "live" as const,
+                          error: Option.none(),
+                          page: Option.none(),
+                        },
+                        // The old cursor can already be beyond the omitted change.
+                        sequence: 9,
+                        persisted: true,
+                      },
+                    },
+                  }),
+              httpSnapshot: Option.some({ snapshotSequence: 9, thread: current }),
+              completionMarker: true,
+            });
+            yield* Queue.offer(h.inputs, synchronized());
+            const state = yield* awaitThreadState(
+              h.observed,
+              (value) =>
+                value.status === "live" &&
+                Option.getOrNull(value.data)?.preparedTurn === preparedTurn,
+            );
+            expect(yield* Ref.get(h.loaderCalls)).toBe(1);
+            expect(yield* Ref.get(h.lastSubscribeAfterSequence)).toBe(9);
+            expect(Option.getOrThrow(state.data).preparedTurn).toEqual(preparedTurn);
+            if (preparedTurn) {
+              expect(preparedTurn.command.modelSelection?.model).toBe("fixture-b");
+              expect(preparedTurn.command.message.text).toBe("Keep this original message");
+            }
+          }),
+      );
+    }
+  }
+
+  it.effect("requests a fresh socket snapshot if prepared recovery cannot refresh over HTTP", () =>
+    Effect.gen(function* () {
+      const cached = { ...BASE_THREAD, preparedTurn: PREPARED_TURN };
+      const h = yield* makeHarness({ cached, completionMarker: true });
+      const cachedState = yield* awaitThreadState(h.observed, (value) => Option.isSome(value.data));
+      expect(Option.getOrThrow(cachedState.data).preparedTurn?.command).toEqual(
+        PREPARED_TURN.command,
+      );
+      yield* Queue.offerAll(h.inputs, [
+        {
+          kind: "snapshot",
+          snapshot: {
+            snapshotSequence: 9,
+            thread: {
+              ...cached,
+              preparedTurn: { ...PREPARED_TURN, phase: "blocked", setup: "finished" },
+            },
+          },
+        },
+        synchronized(),
+      ]);
+      const state = yield* awaitThreadState(h.observed, (value) => value.status === "live");
+      expect(yield* Ref.get(h.loaderCalls)).toBe(1);
+      expect(yield* Ref.get(h.lastSubscribeAfterSequence)).toBeUndefined();
+      expect(Option.getOrThrow(state.data).preparedTurn?.phase).toBe("blocked");
+      expect(yield* Ref.get(h.removedThreads)).toEqual([]);
+    }),
+  );
+
   for (const source of ["disk", "HTTP"] as const) {
     it.effect(`does not rewrite an unchanged ${source} snapshot on navigation or warm return`, () =>
       Effect.gen(function* () {

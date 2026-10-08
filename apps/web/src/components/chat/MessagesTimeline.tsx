@@ -1,4 +1,5 @@
-import { ArrowUpIcon, ClockIcon } from "lucide-react";
+import { APP_BASE_NAME } from "../../branding";
+import { ArrowUpIcon, ClockIcon, RefreshCwIcon } from "lucide-react";
 import { ReadOnlySourcePreview } from "../files/AttachmentFilePreview";
 import { useRightPanelStore } from "~/rightPanelStore";
 import {
@@ -1761,17 +1762,27 @@ function QueuedMessageTimelineRow({
 }) {
   const ctx = use(TimelineRowCtx);
   const { queuedMessage } = row;
-  const attachmentCount = queuedMessage.images.length + queuedMessage.files.length;
+  const attachmentCount =
+    queuedMessage.nativeSteeringRequest?.message.attachments.length ??
+    queuedMessage.images.length + queuedMessage.files.length;
   const contextCount =
+    queuedMessage.nativeSteeringRequest?.message.context?.records.length ??
     queuedMessage.terminalContexts.length +
-    queuedMessage.previewAnnotations.length +
-    queuedMessage.reviewComments.length;
+      queuedMessage.previewAnnotations.length +
+      queuedMessage.reviewComments.length;
   const text = queuedMessage.prompt.trim();
-  const statusLabel = queuedMessage.holdUntilUserAction
-    ? "Waits for Send now"
-    : row.isNext
-      ? "Sends after the next tool call or when the turn ends"
-      : "Sends after the messages above it";
+  const uncertainNative = queuedMessage.nativeSteeringRequest !== undefined;
+  const sendLabel = uncertainNative ? "Check delivery" : "Send now";
+  const removeLabel = uncertainNative
+    ? "Dismiss delivery notice"
+    : "Cancel and return to the composer";
+  const statusLabel = uncertainNative
+    ? "Delivery is unconfirmed. Check the original receipt without sending again."
+    : queuedMessage.holdUntilUserAction
+      ? "Waits for Send now"
+      : row.isNext
+        ? "Sends after the next tool call or when the turn ends"
+        : "Sends after the messages above it";
   return (
     <div className="flex flex-col items-end" data-queued-message-id={queuedMessage.id}>
       <div className="max-w-[80%] rounded-2xl border border-dashed border-border p-3 text-message-foreground/80">
@@ -1799,10 +1810,10 @@ function QueuedMessageTimelineRow({
           <Tooltip>
             <TooltipTrigger
               render={<span className="inline-flex h-6 items-center gap-1" />}
-              aria-label={`Queued. ${statusLabel}.`}
+              aria-label={`${uncertainNative ? "Delivery unconfirmed" : "Queued"}. ${statusLabel}.`}
             >
               <ClockIcon className="size-3.5" aria-hidden />
-              Queued
+              {uncertainNative ? "Delivery unconfirmed" : "Queued"}
             </TooltipTrigger>
             <TooltipPopup side="bottom">{statusLabel}</TooltipPopup>
           </Tooltip>
@@ -1816,14 +1827,18 @@ function QueuedMessageTimelineRow({
                     variant="ghost-muted"
                     onPointerDown={(event) => event.preventDefault()}
                     onClick={() => ctx.onSteerQueuedMessage(queuedMessage.id)}
-                    aria-label="Send now"
+                    aria-label={sendLabel}
                   />
                 }
               >
-                <ArrowUpIcon className="size-3.5" aria-hidden />
+                {uncertainNative ? (
+                  <RefreshCwIcon className="size-3.5" aria-hidden />
+                ) : (
+                  <ArrowUpIcon className="size-3.5" aria-hidden />
+                )}
               </TooltipTrigger>
               <TooltipPopup side="bottom">
-                Send now
+                {sendLabel}
                 {row.isNext && ctx.steerQueuedMessageShortcutLabel
                   ? ` (${ctx.steerQueuedMessageShortcutLabel})`
                   : null}
@@ -1838,13 +1853,13 @@ function QueuedMessageTimelineRow({
                     variant="ghost-muted"
                     onPointerDown={(event) => event.preventDefault()}
                     onClick={() => ctx.onRemoveQueuedMessage(queuedMessage.id)}
-                    aria-label="Cancel and return to the composer"
+                    aria-label={removeLabel}
                   />
                 }
               >
                 <XIcon className="size-3.5" aria-hidden />
               </TooltipTrigger>
-              <TooltipPopup side="bottom">Cancel and return to the composer</TooltipPopup>
+              <TooltipPopup side="bottom">{removeLabel}</TooltipPopup>
             </Tooltip>
           </div>
         </div>
@@ -2360,7 +2375,7 @@ function AssistantTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "mess
   return (
     <>
       <div className="relative min-w-0 px-1 py-0.5">
-        <MessageAuthorHeading>T3 Code</MessageAuthorHeading>
+        <MessageAuthorHeading>{APP_BASE_NAME}</MessageAuthorHeading>
         <AssistantCitationSource
           messageId={row.message.id}
           {...(ctx.threadRef ? { threadRef: ctx.threadRef } : {})}
@@ -4799,6 +4814,7 @@ const PlainWorkEntryRow = memo(function PlainWorkEntryRow(props: {
         "aria-expanded": expanded,
         onClick: toggleExpanded,
         onKeyDown: (e: KeyboardEvent<HTMLDivElement>) => {
+          if (e.target !== e.currentTarget) return;
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
             toggleExpanded();

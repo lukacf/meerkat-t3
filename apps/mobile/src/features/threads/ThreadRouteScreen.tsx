@@ -916,6 +916,7 @@ function ThreadRouteContent(
       );
   }, [localResendMessageId, navigation, selectedThreadCreation]);
   const creationState = ((): ThreadDetailScreenProps["creationState"] => {
+    if (selectedThreadDetail?.preparedTurn) return null;
     if (selectedThreadCreation === null) {
       return awaitingBootstrapTurn ? { kind: "preparing", preparingWorktree: true } : null;
     }
@@ -969,6 +970,7 @@ function ThreadRouteContent(
           activeWorkStartedAt={composer.activeWorkStartedAt}
           isCompacting={composer.isCompacting}
           creationState={creationState}
+          preparedTurn={selectedThreadDetail?.preparedTurn ?? null}
           setupWorkingStartedAt={
             composer.activeWorkStartedAt !== null &&
             selectedThreadDetail?.activities.some(

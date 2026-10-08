@@ -13,6 +13,7 @@ import * as DesktopApplicationMenu from "./DesktopApplicationMenu.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
+import * as DesktopDiagnostics from "../diagnostics/DesktopDiagnostics.ts";
 import * as DesktopWindow from "./DesktopWindow.ts";
 
 const environmentInput = {
@@ -113,6 +114,11 @@ const configureMenu = (
         Layer.provideMerge(makeElectronMenuLayer(applicationMenuTemplate)),
         Layer.provideMerge(makeDesktopWindowLayer(selectedAction)),
         Layer.provideMerge(desktopUpdatesLayer),
+        Layer.provideMerge(Layer.succeed(DesktopDiagnostics.DesktopDiagnostics, {
+          exportReport: Deferred.succeed(selectedAction, "native-export").pipe(Effect.as({ status: "cancelled", filePath: null, errorCategory: null } as const)),
+          recordStartupFailure: () => Effect.void,
+          offerStartupReport: Effect.void,
+        })),
         Layer.provideMerge(electronDialogLayer),
         Layer.provideMerge(electronAppLayer),
         Layer.provideMerge(
@@ -125,6 +131,20 @@ const configureMenu = (
   );
 
 describe("DesktopApplicationMenu", () => {
+  it.effect("exports support reports directly without dispatching into the renderer", () =>
+    Effect.gen(function* () {
+      const selectedAction = yield* Deferred.make<string>();
+      const applicationMenuTemplate = yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+      yield* configureMenu(selectedAction, applicationMenuTemplate);
+      const template = yield* Deferred.await(applicationMenuTemplate);
+      const helpMenu = template.find((item) => item.role === "help");
+      if (!Array.isArray(helpMenu?.submenu)) throw new Error("Expected Help submenu.");
+      const item = helpMenu.submenu.find((entry) => entry.label === "Export support report...");
+      if (typeof item?.click !== "function") throw new Error("Expected export action.");
+      item.click({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
+      assert.equal(yield* Deferred.await(selectedAction), "native-export");
+    }),
+  );
   it.effect("installs the native menu and routes Settings through DesktopWindow", () =>
     Effect.gen(function* () {
       const selectedAction = yield* Deferred.make<string>();
@@ -148,6 +168,21 @@ describe("DesktopApplicationMenu", () => {
 
       settingsClick({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
       assert.equal(yield* Deferred.await(selectedAction), "open-settings");
+    }),
+  );
+
+  it.effect("opens the bundled guide without calling the updater", () =>
+    Effect.gen(function* () {
+      const selectedAction = yield* Deferred.make<string>();
+      const applicationMenuTemplate = yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+      yield* configureMenu(selectedAction, applicationMenuTemplate);
+      const template = yield* Deferred.await(applicationMenuTemplate);
+      const helpMenu = template.find((item) => item.role === "help");
+      if (!Array.isArray(helpMenu?.submenu)) throw new Error("Expected Help submenu.");
+      const guide = helpMenu.submenu.find((item) => item.label === "Meerkat T3 Guide");
+      if (typeof guide?.click !== "function") throw new Error("Expected guide action.");
+      guide.click({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
+      assert.equal(yield* Deferred.await(selectedAction), "open-help");
     }),
   );
 

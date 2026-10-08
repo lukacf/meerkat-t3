@@ -523,6 +523,9 @@ export const make = Effect.gen(function* () {
       webPreferences.nodeIntegration = false;
       webPreferences.nodeIntegrationInSubFrames = false;
       webPreferences.contextIsolation = false;
+      // Paint Chromium's own page canvas, including its light or dark color
+      // scheme, so previews and every capture path share an opaque background.
+      webPreferences.transparent = false;
     });
 
     const contextMenuContents = new WeakSet<Electron.WebContents>();

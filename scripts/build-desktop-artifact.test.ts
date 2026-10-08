@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
 import * as NodeCrypto from "node:crypto";
+import * as NodeModule from "node:module";
 import * as NodePath from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -17,6 +18,8 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import {
   BundleNotSelfContainedError,
   BuildCommandFailedError,
+  buildDesktopArtifact,
+  buildDesktopSources,
   parseWslRuntimeArchiveMembers,
   DesktopDmgBackgroundSourceMissingError,
   createStageWorkspaceConfig,
@@ -25,6 +28,10 @@ import {
   DESKTOP_ELECTRON_LANGUAGES,
   DESKTOP_FILE_EXCLUSIONS,
   DESKTOP_EXTRA_RESOURCES,
+  MAC_ELECTRON_NOTICES_EXTRA_RESOURCES,
+  MAC_INSTALL_GUIDE_NAME,
+  renderMacInstallGuide,
+  stageMacInstallGuide,
   LINUX_CAPTURE_EXTRA_RESOURCES,
   LINUX_BROWSER_SECRET_EXTRA_RESOURCES,
   LINUX_FILE_EXCLUSIONS,
@@ -37,27 +44,33 @@ import {
   LinuxIconResizeError,
   LinuxDesktopBuildPrerequisitesMissingError,
   MacDesktopBuildPrerequisitesMissingError,
+  SignedMacBuildHostError,
+  UnsignedMacUpdateFeedError,
+  MeerkatLinuxDistributionRepositoryError,
   MacPasskeySigningConfigurationResolutionError,
   MissingMacPasskeyProvisioningProfileError,
   packWindowsServerAsar,
   preflightLinuxDesktopBuild,
   preflightMacDesktopBuild,
   preflightWindowsDesktopBuild,
-  renderMacPasskeyEntitlements,
+  renderMacEntitlements,
   resolveClerkPasskeyNativeArtifacts,
   resolveMacPasskeySigningConfiguration,
+  resolveOptionalMacPasskeySigningConfiguration,
   resolveDesktopRuntimeDependencies,
   resolveMergedStageDependencies,
   resolveFffNativeDependencies,
   resolveBuildOptions,
   resolveDesktopBuildIconAssets,
   resolveDesktopProductName,
+  resolveDesktopPackageIdentity,
   resolveDesktopUpdateChannel,
   resolveDesktopWebAssetBrand,
   resolveResourceMonitorRustTargets,
   resolveWindowsServerAsarIgnoreGlobs,
   resourceMonitorExecutableName,
   resolveGitHubPublishConfig,
+  validateDesktopDistributionConfig,
   resolveMockUpdateServerPort,
   resolveMockUpdateServerUrl,
   resolvePackageManagerUserAgent,
@@ -248,14 +261,69 @@ const makeWindowsPayloadFixture = Effect.fn("test.makeWindowsPayloadFixture")(fu
 });
 
 it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
+  it.effect(
+    "passes each artifact version to the source build without replacing its toolchain environment",
+    () =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const commands: ChildProcess.StandardCommand[] = [];
+          const spawner = Layer.succeed(
+            ChildProcessSpawner.ChildProcessSpawner,
+            ChildProcessSpawner.make((command) => {
+              if (command._tag !== "StandardCommand")
+                return Effect.die("Expected one source build command");
+              commands.push(command);
+              return Effect.succeed(mockProcess(0));
+            }),
+          );
+          for (const appVersion of ["0.0.56", "0.0.57"]) {
+            yield* buildDesktopSources({
+              repoRoot: "/build/repo",
+              appVersion,
+              verbose: false,
+            }).pipe(Effect.provide(spawner), Effect.provideService(HostProcessPlatform, "darwin"));
+          }
+          assert.deepStrictEqual(
+            commands.map((command) => ({
+              command: command.command,
+              args: command.args,
+              cwd: command.options.cwd,
+              env: command.options.env,
+              extendEnv: command.options.extendEnv,
+            })),
+            ["0.0.56", "0.0.57"].map((appVersion) => ({
+              command: "vp",
+              args: ["run", "build:desktop"],
+              cwd: "/build/repo",
+              env: { APP_VERSION: appVersion },
+              extendEnv: true,
+            })),
+          );
+        }),
+      ),
+  );
+
   it("resolves the dedicated nightly updater channel from nightly versions", () => {
     assert.equal(resolveDesktopUpdateChannel("0.0.17-nightly.20260413.42"), "nightly");
     assert.equal(resolveDesktopUpdateChannel("0.0.17"), "latest");
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
-    assert.equal(resolveDesktopProductName("0.0.17"), "T3 Code (Alpha)");
-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "T3 Code (Nightly)");
+    assert.equal(resolveDesktopProductName("0.0.17"), "Meerkat T3 (Prototype)");
+    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "Meerkat T3 (Nightly)");
+  });
+
+  it("stages Meerkat package identity without inventing a homepage or inheriting the donor", () => {
+    assert.deepStrictEqual(resolveDesktopPackageIdentity(), {
+      name: "meerkat-t3",
+      description: "Meerkat T3 desktop development environment",
+      author: "Meerkat T3 contributors",
+    });
+    assert.notProperty(resolveDesktopPackageIdentity("pingdotgg/t3code"), "homepage");
+    assert.equal(
+      resolveDesktopPackageIdentity("example/meerkat-desktop").homepage,
+      "https://github.com/example/meerkat-desktop",
+    );
   });
 
   it("switches desktop packaging icons to the nightly artwork for nightly versions", () => {
@@ -284,7 +352,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
               env: {
-                T3CODE_DESKTOP_UPDATE_REPOSITORY: "pingdotgg/t3code",
+                MEERKAT_DESKTOP_UPDATE_REPOSITORY: "example/meerkat-desktop",
               },
             }),
           ),
@@ -295,7 +363,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           ConfigProvider.layer(
             ConfigProvider.fromEnv({
               env: {
-                GITHUB_REPOSITORY: "pingdotgg/t3code",
+                MEERKAT_DESKTOP_UPDATE_REPOSITORY: "example/meerkat-desktop",
               },
             }),
           ),
@@ -304,18 +372,215 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
       assert.deepStrictEqual(latestConfig, {
         provider: "github",
-        owner: "pingdotgg",
-        repo: "t3code",
+        owner: "example",
+        repo: "meerkat-desktop",
         releaseType: "release",
       });
       assert.deepStrictEqual(nightlyConfig, {
         provider: "github",
-        owner: "pingdotgg",
-        repo: "t3code",
+        owner: "example",
+        repo: "meerkat-desktop",
         releaseType: "prerelease",
         channel: "nightly",
       });
     }),
+  );
+
+  it.effect("does not infer a fork feed from donor or CI environment variables", () =>
+    Effect.gen(function* () {
+      for (const repository of ["pingdotgg/t3code", "example/another-project"]) {
+        const config = yield* createBuildConfig(
+          "mac",
+          "zip",
+          "0.0.42",
+          false,
+          false,
+          undefined,
+          undefined,
+        ).pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({
+                env: {
+                  GITHUB_REPOSITORY: repository,
+                  T3CODE_DESKTOP_UPDATE_REPOSITORY: repository,
+                },
+              }),
+            ),
+          ),
+        );
+        assert.isNull(config.publish);
+        assert.equal(config.artifactName, "Meerkat-T3-${version}-${arch}.${ext}");
+        assert.equal(config.appId, "ai.rkat.meerkat-t3");
+      }
+    }),
+  );
+
+  it.effect("rejects donor and malformed explicit fork destinations", () =>
+    Effect.gen(function* () {
+      for (const repository of [
+        "pingdotgg/t3code",
+        "PingDotGG/T3Code",
+        "pingdotgg/t3code.git",
+        "https://github.com/example/meerkat",
+        "example/project/extra",
+      ]) {
+        const result = yield* resolveGitHubPublishConfig("latest").pipe(
+          Effect.provide(
+            ConfigProvider.layer(
+              ConfigProvider.fromEnv({ env: { MEERKAT_DESKTOP_UPDATE_REPOSITORY: repository } }),
+            ),
+          ),
+          Effect.result,
+        );
+        assert.equal(result._tag, "Failure");
+      }
+    }),
+  );
+
+  it.effect(
+    "requires an owned homepage before Linux Debian packaging but permits offline Mac builds",
+    () =>
+      Effect.gen(function* () {
+        for (const target of ["AppImage", "deb"]) {
+          for (const repository of [
+            undefined,
+            "pingdotgg/t3code",
+            "https://github.com/example/meerkat",
+          ]) {
+            const env =
+              repository === undefined ? {} : { MEERKAT_DESKTOP_UPDATE_REPOSITORY: repository };
+            const error = yield* validateDesktopDistributionConfig("linux", target).pipe(
+              Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env }))),
+              Effect.flip,
+            );
+            assert.instanceOf(error, MeerkatLinuxDistributionRepositoryError);
+            assert.include(error.message, "MEERKAT_DESKTOP_UPDATE_REPOSITORY");
+            assert.include(error.message, "your fork's GitHub owner/repository");
+          }
+          yield* validateDesktopDistributionConfig("linux", target).pipe(
+            Effect.provide(
+              ConfigProvider.layer(
+                ConfigProvider.fromEnv({
+                  env: {
+                    MEERKAT_DESKTOP_UPDATE_REPOSITORY: "example/meerkat-desktop",
+                  },
+                }),
+              ),
+            ),
+          );
+        }
+        for (const target of ["dmg", "zip"]) {
+          const config = yield* createBuildConfig(
+            "mac",
+            target,
+            "0.0.42",
+            false,
+            false,
+            undefined,
+            undefined,
+          ).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }))));
+          assert.isNull(config.publish);
+        }
+      }),
+  );
+
+  it.effect("labels internal validation artifacts and suppresses public update feeds", () =>
+    Effect.gen(function* () {
+      for (const platform of ["mac", "linux", "win"] as const) {
+        const target = platform === "mac" ? "dmg" : platform === "linux" ? "AppImage" : "nsis";
+        const internal = yield* createBuildConfig(
+          platform,
+          target,
+          "0.0.96",
+          false,
+          false,
+          undefined,
+          undefined,
+          false,
+          "arm64",
+          "internal-validation",
+        );
+        const release = yield* createBuildConfig(
+          platform,
+          target,
+          "0.0.96",
+          platform === "mac",
+          false,
+          undefined,
+          undefined,
+          false,
+          "arm64",
+        );
+        assert.equal(internal.productName, "Meerkat T3 (Internal Validation)");
+        assert.equal(
+          internal.artifactName,
+          "Meerkat-T3-INTERNAL-VALIDATION-${version}-${arch}.${ext}",
+        );
+        assert.isNull(internal.publish);
+        assert.deepStrictEqual(internal.extraMetadata, {
+          meerkatArtifactPurpose: "internal-validation",
+          meerkatPublicDistributionEligible: false,
+        });
+        assert.equal(internal.appId, release.appId);
+        assert.equal(release.artifactName, "Meerkat-T3-${version}-${arch}.${ext}");
+        assert.deepStrictEqual(release.extraMetadata, { meerkatArtifactPurpose: "release" });
+        assert.deepStrictEqual(release.publish, [
+          {
+            provider: "github",
+            owner: "example",
+            repo: "meerkat-desktop",
+            releaseType: "release",
+          },
+        ]);
+        if (platform === "mac") {
+          assert.equal(
+            (internal.dmg as Record<string, unknown>).title,
+            "Meerkat T3 (Internal Validation) 0.0.96 Installer",
+          );
+        }
+      }
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: { MEERKAT_DESKTOP_UPDATE_REPOSITORY: "example/meerkat-desktop" },
+          }),
+        ),
+      ),
+    ),
+  );
+
+  it.effect("retains explicit loopback mock updates for internal validation artifacts", () =>
+    Effect.gen(function* () {
+      const internal = yield* createBuildConfig(
+        "mac",
+        "zip",
+        "0.0.96-preview.20261006.1",
+        false,
+        true,
+        45678,
+        undefined,
+        false,
+        "arm64",
+        "internal-validation",
+      );
+      assert.deepStrictEqual(internal.publish, [
+        {
+          provider: "generic",
+          url: "http://localhost:45678",
+        },
+      ]);
+      assert.equal(internal.productName, "Meerkat T3 (Internal Validation)");
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: { MEERKAT_DESKTOP_UPDATE_REPOSITORY: "example/meerkat-desktop" },
+          }),
+        ),
+      ),
+    ),
   );
 
   it.effect("omits update feeds for pull request preview builds", () =>
@@ -333,7 +598,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         "mac",
         "dmg",
         "0.0.33",
-        false,
+        true,
         false,
         undefined,
         undefined,
@@ -349,20 +614,22 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         undefined,
       );
 
-      assert.notProperty(preview, "publish");
-      assert.notProperty(previewChannel, "publish");
+      assert.isNull(preview.publish);
+      assert.isNull(previewChannel.publish);
       assert.deepStrictEqual(release.publish, [
         {
           provider: "github",
-          owner: "pingdotgg",
-          repo: "t3code",
+          owner: "example",
+          repo: "meerkat-desktop",
           releaseType: "release",
         },
       ]);
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(
-          ConfigProvider.fromEnv({ env: { GITHUB_REPOSITORY: "pingdotgg/t3code" } }),
+          ConfigProvider.fromEnv({
+            env: { MEERKAT_DESKTOP_UPDATE_REPOSITORY: "example/meerkat-desktop" },
+          }),
         ),
       ),
     ),
@@ -541,6 +808,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     for (const resource of [
       ...WSL_RUNTIME_EXTRA_RESOURCES,
       ...LINUX_BROWSER_SECRET_EXTRA_RESOURCES,
+      ...MAC_ELECTRON_NOTICES_EXTRA_RESOURCES,
     ]) {
       assert.include(
         DESKTOP_FILE_EXCLUSIONS,
@@ -550,11 +818,26 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }
 
     assert.deepStrictEqual(DESKTOP_FILE_EXCLUSIONS, [
+      `!${MAC_INSTALL_GUIDE_NAME}`,
       "!**/node_modules/@anthropic-ai/claude-agent-sdk-*/**/*",
       "!**/*.map",
       "!**/*.d.cts",
       "!apps/desktop/resources/browser-secret",
       "!apps/desktop/resources/browser-secret/**/*",
+      "!apps/desktop/resources/native-notices",
+      "!apps/desktop/resources/native-notices/**/*",
+      "!apps/desktop/resources/electron-notices",
+      "!apps/desktop/resources/electron-notices/**/*",
+      "!apps/desktop/resources/LICENSE",
+      "!apps/desktop/prod-resources/native-notices",
+      "!apps/desktop/prod-resources/native-notices/**/*",
+      "!apps/desktop/prod-resources/electron-notices",
+      "!apps/desktop/prod-resources/electron-notices/**/*",
+      "!apps/desktop/prod-resources/LICENSE",
+      "!apps/desktop/prod-resources/meerkat-runtime",
+      "!apps/desktop/prod-resources/meerkat-runtime/**/*",
+      "!apps/server/dist/meerkat-runtime",
+      "!apps/server/dist/meerkat-runtime/**/*",
       "!apps/desktop/prod-resources/browser-secret",
       "!apps/desktop/prod-resources/browser-secret/**/*",
       "!apps/desktop/prod-resources/windows-server",
@@ -593,6 +876,14 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         false,
         undefined,
         undefined,
+      ).pipe(
+        Effect.provide(
+          ConfigProvider.layer(
+            ConfigProvider.fromEnv({
+              env: { MEERKAT_DESKTOP_UPDATE_REPOSITORY: "example/meerkat-desktop" },
+            }),
+          ),
+        ),
       );
       const win = yield* createBuildConfig(
         "win",
@@ -625,13 +916,23 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.deepStrictEqual(win.asarUnpack, [WINDOWS_NATIVE_ASAR_UNPACK_GLOB]);
       assert.deepStrictEqual(winWithoutWslRuntime.asar, win.asar);
       assert.deepStrictEqual(winWithoutWslRuntime.asarUnpack, win.asarUnpack);
-      assert.deepStrictEqual(mac.extraResources, DESKTOP_EXTRA_RESOURCES);
+      assert.deepStrictEqual(mac.extraResources, [
+        ...DESKTOP_EXTRA_RESOURCES,
+        ...MAC_ELECTRON_NOTICES_EXTRA_RESOURCES,
+      ]);
       assert.deepStrictEqual(linux.extraResources, [
         ...DESKTOP_EXTRA_RESOURCES,
         ...LINUX_CAPTURE_EXTRA_RESOURCES,
         { from: "apps/desktop/prod-resources/browser-secret", to: "browser-secret" },
       ]);
       assert.deepStrictEqual(win.extraResources, [
+        {
+          from: "apps/desktop/prod-resources/meerkat-profile-backup.mjs",
+          to: "meerkat-profile-backup.mjs",
+        },
+        { from: "apps/desktop/prod-resources/meerkat-runtime", to: "meerkat-runtime" },
+        { from: "apps/desktop/prod-resources/native-notices", to: "native-notices" },
+        { from: "apps/desktop/prod-resources/LICENSE", to: "LICENSE" },
         {
           from: "apps/desktop/prod-resources/resource-monitor",
           to: "resource-monitor",
@@ -642,6 +943,13 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       // No Linux CLI archive means staging never writes the runtime, so
       // listing it here would fail the build on a missing source file.
       assert.deepStrictEqual(winWithoutWslRuntime.extraResources, [
+        {
+          from: "apps/desktop/prod-resources/meerkat-profile-backup.mjs",
+          to: "meerkat-profile-backup.mjs",
+        },
+        { from: "apps/desktop/prod-resources/meerkat-runtime", to: "meerkat-runtime" },
+        { from: "apps/desktop/prod-resources/native-notices", to: "native-notices" },
+        { from: "apps/desktop/prod-resources/LICENSE", to: "LICENSE" },
         {
           from: "apps/desktop/prod-resources/resource-monitor",
           to: "resource-monitor",
@@ -658,12 +966,13 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         "**/*.map",
       ]);
       assert.deepStrictEqual(mac.dmg, {
-        title: "T3 Code (Alpha) 1.2.3 Installer",
+        title: "Meerkat T3 (Prototype) 1.2.3 Installer",
         background: "dmg/dmg-background-latest.png",
         window: { width: 640, height: 432 },
         contents: [
-          { x: 166, y: 214, type: "file" },
-          { x: 474, y: 214, type: "link", path: "/Applications" },
+          { x: 130, y: 214, type: "file" },
+          { x: 320, y: 214, type: "file", path: MAC_INSTALL_GUIDE_NAME },
+          { x: 510, y: 214, type: "link", path: "/Applications" },
         ],
         iconSize: 120,
         iconTextSize: 12,
@@ -673,7 +982,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       // Linux must register the renderer schemes so the generated .desktop
       // entry advertises MimeType=x-scheme-handler/t3code; for OAuth deep links.
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).protocols, [
-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
+        { name: "Meerkat T3", schemes: ["meerkat-t3", "meerkat-t3-dev"] },
       ]);
       assert.deepStrictEqual(mac.files, [...DESKTOP_FILE_EXCLUSIONS, ...MAC_FILE_EXCLUSIONS]);
       assert.deepStrictEqual(linux.files, [...DESKTOP_FILE_EXCLUSIONS, ...LINUX_FILE_EXCLUSIONS]);
@@ -1677,6 +1986,116 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
   });
 
+  it.effect(
+    "stages the maintained Mac install guide beside the app through the archive matcher",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const repoRoot = path.resolve(import.meta.dirname, "..");
+        const stageAppDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-install-guide-" });
+        const source = yield* fs.readFileString(path.join(repoRoot, "docs/user/install.md"));
+        const guidePath = yield* stageMacInstallGuide({ repoRoot, stageAppDir });
+        const text = yield* fs.readFileString(guidePath);
+        assert.strictEqual(text, renderMacInstallGuide(source));
+        assert.include(text, "https://support.apple.com/en-us/102445");
+        assert.include(text, "Your first task (in-app Help)");
+        assert.include(text, "Recovery and troubleshooting (in-app Help)");
+        assert.notInclude(text, "](getting-started.md)");
+        assert.notInclude(text, "**");
+        assert.strictEqual((yield* fs.stat(guidePath)).mode & 0o777, 0o644);
+
+        // Use the installed archive target's copier, without building or signing an app.
+        const desktopRequire = NodeModule.createRequire(
+          path.join(repoRoot, "apps/desktop/package.json"),
+        );
+        const builderRequire = NodeModule.createRequire(desktopRequire.resolve("electron-builder"));
+        const matcher = builderRequire("app-builder-lib/out/fileMatcher.js") as {
+          getFileMatchers: (
+            config: Record<string, unknown>,
+            name: string,
+            destination: string,
+            options: {
+              defaultSrc: string;
+              globalOutDir: string;
+              macroExpander: (value: string) => string;
+              customBuildOptions: unknown;
+            },
+          ) => unknown;
+          copyFiles: (matchers: unknown, transformer: null, hardLink: boolean) => Promise<void>;
+        };
+        const config = yield* createBuildConfig(
+          "mac",
+          "dmg",
+          "0.1.0",
+          false,
+          false,
+          undefined,
+          undefined,
+          false,
+          "arm64",
+          "release",
+          guidePath,
+        );
+        const dmgContents = (config.dmg as { contents: ReadonlyArray<{ path?: string }> }).contents;
+        assert.strictEqual(yield* fs.readFileString(dmgContents[1]!.path!), text);
+        const appOutDir = path.join(stageAppDir, "dist/mac-arm64");
+        const packagedApp = path.join(appOutDir, "Meerkat T3 (Prototype).app");
+        yield* fs.makeDirectory(packagedApp, { recursive: true });
+        yield* fs.writeFileString(path.join(packagedApp, "fixture.txt"), "unchanged app fixture");
+        yield* fs.writeFileString(path.join(stageAppDir, "unrelated.txt"), "must not ship");
+        yield* Effect.tryPromise(() =>
+          matcher.copyFiles(
+            matcher.getFileMatchers(config, "extraDistFiles", appOutDir, {
+              defaultSrc: stageAppDir,
+              globalOutDir: path.join(stageAppDir, "dist"),
+              macroExpander: (value) => value,
+              customBuildOptions: config.mac,
+            }),
+            null,
+            true,
+          ),
+        );
+        assert.deepStrictEqual((yield* fs.readDirectory(appOutDir)).sort(), [
+          MAC_INSTALL_GUIDE_NAME,
+          "Meerkat T3 (Prototype).app",
+        ]);
+        assert.strictEqual(
+          yield* fs.readFileString(path.join(appOutDir, MAC_INSTALL_GUIDE_NAME)),
+          text,
+        );
+        assert.strictEqual(
+          yield* fs.readFileString(path.join(packagedApp, "fixture.txt")),
+          "unchanged app fixture",
+        );
+      }),
+  );
+
+  it.effect("refuses a missing Mac install guide before staging output", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const repoRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-install-missing-" });
+      const stageAppDir = path.join(repoRoot, "stage");
+      yield* stageMacInstallGuide({ repoRoot, stageAppDir }).pipe(Effect.flip);
+      assert.isFalse(yield* fs.exists(stageAppDir));
+    }),
+  );
+
+  it.effect("refuses an empty Mac install guide before staging output", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const repoRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-install-empty-" });
+      const stageAppDir = path.join(repoRoot, "stage");
+      yield* fs.makeDirectory(path.join(repoRoot, "docs/user"), { recursive: true });
+      yield* fs.writeFileString(path.join(repoRoot, "docs/user/install.md"), " \n");
+      const error = yield* stageMacInstallGuide({ repoRoot, stageAppDir }).pipe(Effect.flip);
+      assert.include(error.message, "Mac installation guide is empty:");
+      assert.isFalse(yield* fs.exists(stageAppDir));
+    }),
+  );
+
   it.effect("rasterizes staged DMG backgrounds at standard and Retina sizes", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -1756,7 +2175,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     });
 
     assert.deepStrictEqual(configuration, {
-      appId: "com.t3tools.t3code",
+      appId: "ai.rkat.meerkat-t3",
       teamId: "ABC1234567",
       rpDomains: ["example.clerk.accounts.dev"],
       provisioningProfilePath: "/tmp/t3code.provisionprofile",
@@ -1770,16 +2189,84 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       T3CODE_CLERK_PASSKEY_RP_DOMAINS:
         " Clerk.Example.com,example.clerk.accounts.dev,clerk.example.com ",
     });
-    const entitlements = renderMacPasskeyEntitlements(configuration);
+    const entitlements = renderMacEntitlements(configuration);
 
     assert.deepStrictEqual(configuration.rpDomains, [
       "clerk.example.com",
       "example.clerk.accounts.dev",
     ]);
-    assert.include(entitlements, "<string>ABC1234567.com.t3tools.t3code</string>");
+    assert.include(entitlements, "<string>ABC1234567.ai.rkat.meerkat-t3</string>");
     assert.include(entitlements, "<string>webcredentials:clerk.example.com</string>");
     assert.include(entitlements, "<string>webcredentials:example.clerk.accounts.dev</string>");
     assert.include(entitlements, "<key>com.apple.security.cs.allow-jit</key>");
+  });
+
+  it("keeps local macOS runtime entitlements without Clerk or provisioning inputs", () => {
+    const publishableKey = `pk_test_${btoa("example.clerk.accounts.dev$")}`;
+    for (const env of [
+      {},
+      { T3CODE_APPLE_TEAM_ID: "unused" },
+      { T3CODE_CLERK_PUBLISHABLE_KEY: publishableKey },
+      {
+        T3CODE_CLERK_PUBLISHABLE_KEY: publishableKey,
+        T3CODE_CLERK_JWT_TEMPLATE: "relay",
+        T3CODE_RELAY_URL: "http://relay.example.test",
+      },
+    ]) {
+      const configuration = resolveOptionalMacPasskeySigningConfiguration(env);
+      assert.isUndefined(configuration);
+      const entitlements = renderMacEntitlements(configuration);
+      for (const permission of [
+        "com.apple.security.cs.allow-jit",
+        "com.apple.security.cs.allow-unsigned-executable-memory",
+        "com.apple.security.cs.disable-library-validation",
+      ]) {
+        assert.include(entitlements, `<key>${permission}</key>\n    <true/>`);
+      }
+      assert.notInclude(entitlements, "com.apple.application-identifier");
+      assert.notInclude(entitlements, "com.apple.developer.team-identifier");
+      assert.notInclude(entitlements, "com.apple.developer.associated-domains");
+      assert.notInclude(entitlements, "webcredentials:");
+    }
+  });
+
+  it("retains macOS passkey requirements when the renderer enables managed cloud auth", () => {
+    const env = {
+      T3CODE_APPLE_TEAM_ID: "ABC1234567",
+      VITE_CLERK_PUBLISHABLE_KEY: `pk_test_${btoa("example.clerk.accounts.dev$")}`,
+      VITE_CLERK_JWT_TEMPLATE: "relay",
+      VITE_T3CODE_RELAY_URL: "https://relay.example.test/",
+    };
+    assert.throws(
+      () => resolveOptionalMacPasskeySigningConfiguration(env),
+      MissingMacPasskeyProvisioningProfileError,
+    );
+    const configuration = resolveOptionalMacPasskeySigningConfiguration({
+      ...env,
+      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/meerkat.provisionprofile",
+    });
+    assert.isDefined(configuration);
+    assert.include(
+      renderMacEntitlements(configuration),
+      "<string>webcredentials:example.clerk.accounts.dev</string>",
+    );
+    assert.equal(configuration?.provisioningProfilePath, "/tmp/meerkat.provisionprofile");
+  });
+
+  it("retains explicit macOS passkey configuration without inferring a cloud requirement", () => {
+    const env = {
+      T3CODE_APPLE_TEAM_ID: "ABC1234567",
+      T3CODE_CLERK_PASSKEY_RP_DOMAINS: "accounts.example.test",
+    };
+    assert.throws(
+      () => resolveOptionalMacPasskeySigningConfiguration(env),
+      MissingMacPasskeyProvisioningProfileError,
+    );
+    const configuration = resolveOptionalMacPasskeySigningConfiguration({
+      ...env,
+      T3CODE_MACOS_PROVISIONING_PROFILE: "/tmp/meerkat.provisionprofile",
+    });
+    assert.deepStrictEqual(configuration?.rpDomains, ["accounts.example.test"]);
   });
 
   it("rejects incomplete macOS passkey signing configuration", () => {
@@ -1863,6 +2350,31 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     assert.notInclude(error.message, secret);
   });
 
+  it.effect("rejects signed macOS builds on a non-macOS host before any staging", () =>
+    Effect.gen(function* () {
+      for (const hostPlatform of ["linux", "win32"] as const) {
+        const error = yield* buildDesktopArtifact({
+          artifactPurpose: "release",
+          platform: "mac",
+          target: "zip",
+          arch: "arm64",
+          version: "1.2.3",
+          outputDir: "/must-not-stage",
+          skipBuild: false,
+          keepStage: false,
+          signed: true,
+          verbose: false,
+          mockUpdates: false,
+          mockUpdateServerPort: undefined,
+          wslRuntime: undefined,
+        }).pipe(Effect.provideService(HostProcessPlatform, hostPlatform), Effect.flip);
+        assert.instanceOf(error, SignedMacBuildHostError);
+        assert.equal(error.hostPlatform, hostPlatform);
+        assert.include(error.message, "requires a macOS host");
+      }
+    }),
+  );
+
   it.effect("adds passkey entitlements and both renderer protocols to signed macOS builds", () =>
     Effect.gen(function* () {
       const config = yield* createBuildConfig("mac", "dmg", "1.2.3", true, false, undefined, {
@@ -1871,14 +2383,99 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       });
 
       const mac = config.mac as Record<string, unknown>;
-      assert.equal(config.appId, "com.t3tools.t3code");
+      assert.equal(config.appId, "ai.rkat.meerkat-t3");
       assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
       assert.equal(mac.provisioningProfile, "/tmp/t3code.provisionprofile");
-      assert.match(String(mac.sign), /[\\/]scripts[\\/]sign-macos\.ts$/);
+      assert.isTrue(mac.forceCodeSigning);
+      assert.isTrue(mac.notarize);
+      assert.equal(mac.type, "distribution");
+      assert.notProperty(mac, "sign");
       assert.deepStrictEqual(mac.protocols, [
-        { name: "T3 Code", schemes: ["t3code", "t3code-dev"] },
+        { name: "Meerkat T3", schemes: ["meerkat-t3", "meerkat-t3-dev"] },
       ]);
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect(
+    "requires signing and notarization for local macOS builds without a passkey profile",
+    () =>
+      Effect.gen(function* () {
+        const config = yield* createBuildConfig("mac", "zip", "1.2.3", true, false, undefined, {
+          entitlementsPath: "/tmp/entitlements.mac.plist",
+        });
+        const mac = config.mac as Record<string, unknown>;
+        assert.isTrue(mac.forceCodeSigning);
+        assert.isTrue(mac.notarize);
+        assert.equal(mac.entitlements, "/tmp/entitlements.mac.plist");
+        assert.notProperty(mac, "provisioningProfile");
+        assert.equal(mac.type, "distribution");
+        assert.notProperty(mac, "sign");
+      }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("ad-hoc signs unsigned macOS builds without altering verified native resources", () =>
+    Effect.gen(function* () {
+      const config = yield* createBuildConfig(
+        "mac",
+        "zip",
+        "1.2.3",
+        false,
+        false,
+        undefined,
+        undefined,
+      );
+      const mac = config.mac as Record<string, unknown>;
+      assert.notProperty(mac, "forceCodeSigning");
+      assert.equal(mac.identity, "-");
+      assert.isFalse(mac.notarize);
+      assert.isFalse(mac.hardenedRuntime);
+      assert.isNull(config.publish);
+      assert.deepStrictEqual(config.extraMetadata, { meerkatArtifactPurpose: "release" });
+      const ignored = (mac.signIgnore as string[]).map((pattern) => new RegExp(pattern));
+      assert.isTrue(
+        ignored.some((pattern) =>
+          pattern.test("/app/Contents/Resources/meerkat-runtime/meerkat-desktop-stdio"),
+        ),
+      );
+      assert.isTrue(
+        ignored.some((pattern) =>
+          pattern.test("/app/Contents/Resources/resource-monitor/t3-resource-monitor"),
+        ),
+      );
+      assert.isFalse(
+        ignored.some((pattern) =>
+          pattern.test("/app/Contents/Frameworks/Electron Framework.framework/Electron Framework"),
+        ),
+      );
+      assert.isFalse(ignored.some((pattern) => pattern.test("/app/Contents/MacOS/Meerkat T3")));
+      assert.notProperty(mac, "sign");
+      assert.notProperty(mac, "type");
+      assert.notProperty(mac, "entitlements");
+      assert.notProperty(mac, "provisioningProfile");
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
+  it.effect("rejects a public update feed for an unsigned macOS release", () =>
+    Effect.gen(function* () {
+      const error = yield* createBuildConfig(
+        "mac",
+        "zip",
+        "0.0.168",
+        false,
+        false,
+        undefined,
+        undefined,
+      ).pipe(Effect.flip);
+      assert.instanceOf(error, UnsignedMacUpdateFeedError);
+    }).pipe(
+      Effect.provide(
+        ConfigProvider.layer(
+          ConfigProvider.fromEnv({
+            env: { MEERKAT_DESKTOP_UPDATE_REPOSITORY: "example/meerkat-desktop" },
+          }),
+        ),
+      ),
+    ),
   );
 
   it.effect("uses the nightly DMG background for nightly macOS builds", () =>
@@ -1921,6 +2518,13 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
   it("stages the resource monitor as an external executable resource", () => {
     assert.deepStrictEqual(DESKTOP_EXTRA_RESOURCES, [
+      {
+        from: "apps/desktop/prod-resources/meerkat-profile-backup.mjs",
+        to: "meerkat-profile-backup.mjs",
+      },
+      { from: "apps/desktop/prod-resources/meerkat-runtime", to: "meerkat-runtime" },
+      { from: "apps/desktop/prod-resources/native-notices", to: "native-notices" },
+      { from: "apps/desktop/prod-resources/LICENSE", to: "LICENSE" },
       {
         from: "apps/desktop/prod-resources/resource-monitor",
         to: "resource-monitor",
@@ -2109,6 +2713,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   it.effect("resolves default platform and architecture from host references", () =>
     Effect.gen(function* () {
       const resolved = yield* resolveBuildOptions({
+        artifactPurpose: Option.none(),
         platform: Option.none(),
         target: Option.none(),
         arch: Option.none(),
@@ -2141,6 +2746,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(resolved.platform, "win");
       assert.equal(resolved.target, "nsis");
       assert.equal(resolved.arch, "arm64");
+      assert.equal(resolved.artifactPurpose, "release");
     }),
   );
 
@@ -2149,6 +2755,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       for (const platform of ["linux", "win"] as const) {
         const error = yield* Effect.flip(
           resolveBuildOptions({
+            artifactPurpose: Option.none(),
             platform: Option.some(platform),
             target: Option.none(),
             arch: Option.some("universal"),
@@ -2170,9 +2777,40 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
+  it.effect("requires explicit internal artifact purpose and separates its default output", () =>
+    Effect.gen(function* () {
+      const input = {
+        artifactPurpose: Option.none<"release" | "internal-validation">(),
+        platform: Option.some("mac" as const),
+        target: Option.none<string>(),
+        arch: Option.some("arm64" as const),
+        buildVersion: Option.some("0.0.96-preview.20261006.1"),
+        outputDir: Option.none<string>(),
+        skipBuild: Option.some(true),
+        keepStage: Option.some(true),
+        signed: Option.some(false),
+        verbose: Option.some(false),
+        mockUpdates: Option.some(true),
+        mockUpdateServerPort: Option.none<number>(),
+        wslRuntime: Option.none<string>(),
+      };
+      const release = yield* resolveBuildOptions(input);
+      assert.equal(release.artifactPurpose, "release");
+      assert.match(release.outputDir, /[/\\]release-mock$/);
+      const internal = yield* resolveBuildOptions({
+        ...input,
+        artifactPurpose: Option.some("internal-validation"),
+      });
+      assert.equal(internal.artifactPurpose, "internal-validation");
+      assert.match(internal.outputDir, /[/\\]release-internal$/);
+      assert.equal(internal.mockUpdates, true);
+    }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
+  );
+
   it.effect("preserves explicit false boolean flags over true env defaults", () =>
     Effect.gen(function* () {
       const resolved = yield* resolveBuildOptions({
+        artifactPurpose: Option.none(),
         platform: Option.some("mac"),
         target: Option.none(),
         arch: Option.some("arm64"),

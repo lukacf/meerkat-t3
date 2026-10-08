@@ -3,6 +3,8 @@ import type {
   ServerProviderVersionAdvisory,
   ServerProviderCompatibilityAdvisory,
 } from "@t3tools/contracts";
+import { meerkatCredentialStatusDetail } from "./meerkatCredentials";
+import type { ProviderOperateAccess } from "./ProviderSettingsPanel.logic";
 
 /**
  * Visual treatment for each server-reported provider status. Centralized so
@@ -33,7 +35,11 @@ export type ProviderStatusKey = keyof typeof PROVIDER_STATUS_STYLES;
  * driver this build does not ship. A ready provider without account metadata
  * remains available and does not imply an authentication failure.
  */
-export function getProviderSummary(provider: ServerProvider | undefined) {
+export function getProviderSummary(
+  provider: ServerProvider | undefined,
+  workspacePending = false,
+  workspaceAccess: ProviderOperateAccess = "granted",
+) {
   if (!provider) {
     return {
       headline: "Checking provider status",
@@ -53,10 +59,29 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
       detail: provider.message ?? "CLI not detected on PATH.",
     };
   }
+  if (workspacePending) {
+    if (workspaceAccess !== "granted") {
+      return {
+        headline: "Checkout account not checked",
+        detail:
+          workspaceAccess === "denied"
+            ? "This connection cannot check the checkout's account or models. Reconnect with permission to operate this environment."
+            : "Waiting for connection permissions before checking this checkout's account and models.",
+      };
+    }
+    return {
+      headline: "Checking checkout account",
+      detail:
+        "Waiting for this checkout's account status and model catalog. Use Refresh provider status to retry.",
+    };
+  }
   if (provider.auth.status === "unauthenticated") {
     return {
       headline: "Not authenticated",
-      detail: provider.message ?? null,
+      detail:
+        provider.driver === "meerkat"
+          ? meerkatCredentialStatusDetail(provider.message)
+          : (provider.message ?? null),
     };
   }
   if (provider.status === "warning") {
@@ -74,6 +99,12 @@ export function getProviderSummary(provider: ServerProvider | undefined) {
   }
   if (provider.auth.status === "authenticated") {
     const authLabel = provider.auth.label ?? provider.auth.type;
+    if (provider.driver === "meerkat") {
+      return {
+        headline: authLabel ? `Credentials detected · ${authLabel}` : "Credentials detected",
+        detail: provider.message ?? "Your first task will confirm access to the selected model.",
+      };
+    }
     return {
       headline: authLabel ? `Authenticated · ${authLabel}` : "Authenticated",
       detail: provider.message ?? null,

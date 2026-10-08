@@ -16,10 +16,13 @@ import {
   type OrchestrationCommand,
   type OrchestrationEvent,
   ProviderInstanceId,
+  ProviderDriverKind,
+  type ThreadPreparedTurn,
 } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { it as effectIt } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
 import * as Metric from "effect/Metric";
@@ -53,7 +56,13 @@ import {
   type OrchestrationProjectionPipelineShape,
 } from "../Services/ProjectionPipeline.ts";
 import { ProjectionSnapshotQuery } from "../Services/ProjectionSnapshotQuery.ts";
+import * as PreparedTurnRecovery from "../PreparedTurnRecovery.ts";
 import { ServerConfig } from "../../config.ts";
+import {
+  ProfileRestoreReview,
+  RESTORE_REVIEW_MESSAGE,
+  type RestoreReviewService,
+} from "../../restoreReview.ts";
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asMessageId = (value: string): MessageId => MessageId.make(value);
@@ -104,8 +113,10 @@ async function createOrchestrationSystem(
   );
   const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
   const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
+  const recovery = await runtime.runPromise(PreparedTurnRecovery.make);
   return {
     engine,
+    recovery,
     readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
     readThread: (threadId: ThreadId) =>
       runtime.runPromise(snapshotQuery.getThreadDetailById(threadId)),
@@ -130,6 +141,485 @@ const hasMetricSnapshot = (
   );
 
 describe("OrchestrationEngine", () => {
+  const preparedFixture = (suffix: string): ThreadPreparedTurn => ({
+    recoveryId: CommandId.make(`prepared-send-${suffix}`),
+    projectId: ProjectId.make(`prepared-project-${suffix}`),
+    projectCwd: `/tmp/prepared-project-${suffix}`,
+    expectedCwd: `/tmp/prepared-checkout-${suffix}`,
+    providerIdentity: {
+      driverKind: ProviderDriverKind.make("meerkat"),
+      continuationKey: "meerkat-test-continuity",
+    },
+    command: {
+      type: "thread.turn.start",
+      commandId: CommandId.make(`prepared-send-${suffix}`),
+      threadId: ThreadId.make(`prepared-thread-${suffix}`),
+      message: {
+        messageId: MessageId.make(`prepared-message-${suffix}`),
+        role: "user",
+        text: "Keep this exact first message",
+        attachments: [],
+      },
+      modelSelection: {
+        instanceId: ProviderInstanceId.make("meerkat"),
+        model: "openai/gpt-6-astra",
+        options: [{ id: "reasoning_effort", value: "high" }],
+      },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      createdAt: now(),
+    },
+    phase: "blocked",
+    setup: "finished",
+    reason: "Connect the checkout account.",
+    createdAt: now(),
+    updatedAt: now(),
+  });
+
+  async function prepare(
+    system: Awaited<ReturnType<typeof createOrchestrationSystem>>,
+    prepared: ThreadPreparedTurn,
+  ) {
+    await system.run(
+      system.engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make(`${prepared.recoveryId}-project`),
+        projectId: prepared.projectId,
+        title: "Prepared project",
+        workspaceRoot: prepared.projectCwd,
+        createdAt: now(),
+      }),
+    );
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make(`${prepared.recoveryId}-thread`),
+        threadId: prepared.command.threadId,
+        projectId: prepared.projectId,
+        title: "Prepared thread",
+        modelSelection: prepared.command.modelSelection!,
+        runtimeMode: prepared.command.runtimeMode,
+        interactionMode: prepared.command.interactionMode,
+        branch: "prepared-branch",
+        worktreePath: prepared.expectedCwd,
+        createdAt: now(),
+      }),
+    );
+    await system.run(
+      system.engine.dispatch({
+        type: "thread.prepared-turn.set",
+        commandId: CommandId.make(`${prepared.recoveryId}-prepare`),
+        threadId: prepared.command.threadId,
+        preparedTurn: prepared,
+        createdAt: now(),
+      }),
+    );
+  }
+
+  it("retains the exact prepared message across restart and retries once using its original receipt", async () => {
+    const directory = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-prepared-turn-"));
+    const databasePath = NodePath.join(directory, "state.sqlite");
+    const prepared = preparedFixture("restart");
+    let system = await createOrchestrationSystem(databasePath);
+    try {
+      await prepare(system, prepared);
+      const saved = Option.getOrThrow(await system.readThread(prepared.command.threadId));
+      expect(saved.preparedTurn).toEqual(prepared);
+      expect(saved.messages.map((message) => message.id)).toEqual([
+        prepared.command.message.messageId,
+      ]);
+      await system.dispose();
+      system = await createOrchestrationSystem(databasePath);
+      const recovery = system.recovery;
+      expect(
+        await system.run(
+          recovery.get({ threadId: prepared.command.threadId, recoveryId: prepared.recoveryId }),
+        ),
+      ).toEqual({ status: "pending", preparedTurn: prepared });
+      const denied = await system.run(system.engine.dispatch(prepared.command).pipe(Effect.flip));
+      expect(denied.message).toContain("prepared message");
+      const input = {
+        threadId: prepared.command.threadId,
+        recoveryId: prepared.recoveryId,
+        expectedCwd: prepared.expectedCwd!,
+      };
+      await expect(
+        system.run(
+          system.engine.dispatch({
+            type: "thread.prepared-turn.release",
+            commandId: prepared.recoveryId,
+            threadId: prepared.command.threadId,
+            recoveryId: prepared.recoveryId,
+            expectedCwd: prepared.expectedCwd,
+            createdAt: now(),
+          }),
+        ),
+      ).rejects.toThrow("separate command identity");
+      let preflights = 0;
+      const result = await system.run(
+        recovery.retry(input, (original) =>
+          Effect.sync(() => {
+            preflights++;
+            expect(original.command).toEqual(prepared.command);
+          }),
+        ),
+      );
+      expect(
+        await system.run(
+          recovery.retry(input, () =>
+            Effect.die("Accepted receipt must bypass account and setup work"),
+          ),
+        ),
+      ).toEqual(result);
+      expect(preflights).toBe(1);
+      const after = Option.getOrThrow(await system.readThread(prepared.command.threadId));
+      expect(after.preparedTurn).toBeNull();
+      expect(after.messages.map((message) => message.id)).toEqual([
+        prepared.command.message.messageId,
+      ]);
+      const events = await system.run(Stream.runCollect(system.engine.readEvents(0)));
+      expect(events.filter((event) => event.type === "thread.turn-start-requested")).toHaveLength(
+        1,
+      );
+      expect(
+        events
+          .filter((event) => event.type === "thread.turn-start-requested")
+          .map((event) => event.commandId),
+      ).toEqual([prepared.recoveryId]);
+      await expect(
+        system.run(
+          system.engine.dispatch({
+            type: "thread.prepared-turn.set",
+            commandId: CommandId.make("late-setup-finish"),
+            threadId: prepared.command.threadId,
+            preparedTurn: prepared,
+            createdAt: now(),
+          }),
+        ),
+      ).rejects.toThrow("already been admitted or retired");
+      await expect(
+        system.run(
+          system.engine.dispatch({
+            type: "thread.prepared-turn.release",
+            commandId: CommandId.make("release-accepted-prepared"),
+            threadId: prepared.command.threadId,
+            recoveryId: prepared.recoveryId,
+            expectedCwd: prepared.expectedCwd,
+            createdAt: now(),
+          }),
+        ),
+      ).rejects.toThrow("already been admitted or retired");
+    } finally {
+      await system.dispose();
+      await NodeFSP.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("withdraws an unstarted message and fences a retry whose preflight finishes after release", async () => {
+    const system = await createOrchestrationSystem();
+    const prepared = preparedFixture("release");
+    try {
+      await prepare(system, prepared);
+      const recovery = system.recovery;
+      const reached = await system.run(Deferred.make<void>());
+      const resume = await system.run(Deferred.make<void>());
+      const retry = system.run(
+        recovery.retry(
+          {
+            threadId: prepared.command.threadId,
+            recoveryId: prepared.recoveryId,
+            expectedCwd: prepared.expectedCwd!,
+          },
+          () => Deferred.succeed(reached, undefined).pipe(Effect.andThen(Deferred.await(resume))),
+        ),
+      );
+      const rejected = expect(retry).rejects.toThrow("released for editing");
+      await system.run(Deferred.await(reached));
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.prepared-turn.release",
+          commandId: CommandId.make("release-prepared"),
+          threadId: prepared.command.threadId,
+          recoveryId: prepared.recoveryId,
+          expectedCwd: prepared.expectedCwd,
+          createdAt: now(),
+        }),
+      );
+      await system.run(Deferred.succeed(resume, undefined));
+      await rejected;
+      const released = Option.getOrThrow(await system.readThread(prepared.command.threadId));
+      expect(released.messages).toEqual([]);
+      expect(released.preparedTurn?.phase).toBe("released");
+      expect(released.preparedTurn?.command).toEqual(prepared.command);
+      await system.run(
+        system.engine.dispatch({
+          ...prepared.command,
+          commandId: CommandId.make("edited-first-send"),
+          message: {
+            ...prepared.command.message,
+            messageId: MessageId.make("edited-first-message"),
+            text: "Edited message",
+          },
+        }),
+      );
+      const events = await system.run(Stream.runCollect(system.engine.readEvents(0)));
+      expect(
+        events
+          .filter((event) => event.type === "thread.turn-start-requested")
+          .map((event) => event.commandId),
+      ).toEqual(["edited-first-send"]);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("requires explicit interrupted-setup consent and rejects changed checkout or payload", async () => {
+    const system = await createOrchestrationSystem();
+    const prepared = { ...preparedFixture("interrupted"), setup: "sync_running" as const };
+    try {
+      await prepare(system, prepared);
+      const recovery = system.recovery;
+      let preflights = 0;
+      const input = {
+        threadId: prepared.command.threadId,
+        recoveryId: prepared.recoveryId,
+        expectedCwd: prepared.expectedCwd!,
+      };
+      await expect(
+        system.run(
+          recovery.retry(input, () =>
+            Effect.sync(() => {
+              preflights++;
+            }),
+          ),
+        ),
+      ).rejects.toThrow("without rerunning setup");
+      expect(preflights).toBe(0);
+      await expect(
+        system.run(
+          system.engine.dispatch({
+            type: "thread.prepared-turn.set",
+            commandId: CommandId.make("replace-prepared-provider"),
+            threadId: prepared.command.threadId,
+            preparedTurn: {
+              ...prepared,
+              providerIdentity: {
+                driverKind: ProviderDriverKind.make("codex"),
+                continuationKey: "replacement",
+              },
+            },
+            createdAt: now(),
+          }),
+        ),
+      ).rejects.toThrow("cannot be replaced or rebound");
+      await expect(
+        system.run(
+          system.engine.dispatch(
+            {
+              ...prepared.command,
+              message: { ...prepared.command.message, text: "Wrong replacement" },
+            },
+            { preparedTurnRecoveryId: prepared.recoveryId, continueAfterInterruptedSetup: true },
+          ),
+        ),
+      ).rejects.toThrow("prepared message");
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("move-prepared-checkout"),
+          threadId: prepared.command.threadId,
+          worktreePath: "/tmp/different-checkout",
+        }),
+      );
+      await expect(
+        system.run(
+          recovery.retry({ ...input, continueAfterInterruptedSetup: true }, () => Effect.void),
+        ),
+      ).rejects.toThrow("saved checkout has changed");
+      const events = await system.run(Stream.runCollect(system.engine.readEvents(0)));
+      expect(events.filter((event) => event.type === "thread.turn-start-requested")).toEqual([]);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("keeps an active bootstrap exclusively owned and only releases incomplete preparation after failure", async () => {
+    const system = await createOrchestrationSystem();
+    const prepared = { ...preparedFixture("live-owner"), phase: "ready" as const };
+    try {
+      await prepare(system, prepared);
+      let preflights = 0;
+      await expect(
+        system.run(
+          system.recovery.retry(
+            {
+              threadId: prepared.command.threadId,
+              recoveryId: prepared.recoveryId,
+              expectedCwd: prepared.expectedCwd!,
+            },
+            () =>
+              Effect.sync(() => {
+                preflights++;
+              }),
+          ),
+        ),
+      ).rejects.toThrow("owned by its original request");
+      await expect(
+        system.run(
+          system.engine.dispatch({
+            type: "thread.prepared-turn.release",
+            commandId: CommandId.make("release-live-owner"),
+            threadId: prepared.command.threadId,
+            recoveryId: prepared.recoveryId,
+            expectedCwd: prepared.expectedCwd,
+            createdAt: now(),
+          }),
+        ),
+      ).rejects.toThrow("no longer available to edit");
+      expect(preflights).toBe(0);
+      await system.run(
+        system.engine.dispatch(prepared.command, { preparedTurnRecoveryId: prepared.recoveryId }),
+      );
+      expect(
+        Option.getOrThrow(await system.readThread(prepared.command.threadId)).preparedTurn,
+      ).toBeNull();
+
+      const { reason: _reason, ...incomplete } = preparedFixture("incomplete");
+      const preparing = { ...incomplete, phase: "preparing" as const };
+      await prepare(system, preparing);
+      const release = {
+        type: "thread.prepared-turn.release" as const,
+        threadId: preparing.command.threadId,
+        recoveryId: preparing.recoveryId,
+        expectedCwd: preparing.expectedCwd,
+        createdAt: now(),
+      };
+      await expect(
+        system.run(
+          system.engine.dispatch({
+            ...release,
+            commandId: CommandId.make("release-preparing-owner"),
+          }),
+        ),
+      ).rejects.toThrow("no longer available to edit");
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.prepared-turn.set",
+          commandId: CommandId.make("mark-preparing-interrupted"),
+          threadId: preparing.command.threadId,
+          preparedTurn: { ...preparing, reason: "Checkout creation was interrupted." },
+          createdAt: now(),
+        }),
+      );
+      await expect(
+        system.run(
+          system.recovery.retry(
+            {
+              threadId: preparing.command.threadId,
+              recoveryId: preparing.recoveryId,
+              expectedCwd: preparing.expectedCwd!,
+            },
+            () => Effect.void,
+          ),
+        ),
+      ).rejects.toThrow("has not finished");
+      await system.run(
+        system.engine.dispatch({
+          ...release,
+          commandId: CommandId.make("release-interrupted-owner"),
+        }),
+      );
+      const edited = Option.getOrThrow(await system.readThread(preparing.command.threadId));
+      expect(edited.preparedTurn?.phase).toBe("released");
+      expect(edited.messages).toEqual([]);
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  effectIt.effect("rejects restored work before recording admission and still accepts Stop", () =>
+    Effect.gen(function* () {
+      const restoreHold: RestoreReviewService = {
+        held: true,
+        status: () => ({
+          status: "required",
+          restoreId: "restore",
+          restoredAt: null,
+          backupCreatedAt: null,
+          message: RESTORE_REVIEW_MESSAGE,
+        }),
+        consent: async () => {
+          throw new Error("Unused consent");
+        },
+      };
+      const engine = yield* OrchestrationEngineService;
+      const receipts = yield* OrchestrationCommandReceipts.OrchestrationCommandReceiptRepository;
+      const projectId = ProjectId.make("restored-project");
+      const threadId = ThreadId.make("restored-thread");
+      yield* engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("restore-project"),
+        projectId,
+        title: "Restored project",
+        workspaceRoot: "/tmp/restored-project",
+        createdAt: now(),
+      });
+      yield* engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("restore-thread"),
+        projectId,
+        threadId,
+        title: "Restored thread",
+        modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+        interactionMode: "default",
+        runtimeMode: "full-access",
+        branch: null,
+        worktreePath: null,
+        createdAt: now(),
+      });
+      const command: OrchestrationCommand = {
+        type: "thread.turn.start",
+        commandId: CommandId.make("restored-send"),
+        threadId,
+        message: {
+          messageId: MessageId.make("restored-message"),
+          role: "user",
+          text: "Do not replay before review",
+          attachments: [],
+        },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: now(),
+      };
+      const sequence = yield* engine.latestSequence;
+      const rejection = yield* engine
+        .dispatch(command)
+        .pipe(Effect.provideService(ProfileRestoreReview, restoreHold), Effect.flip);
+      expect(rejection).toMatchObject({ detail: RESTORE_REVIEW_MESSAGE });
+      expect(yield* engine.latestSequence).toBe(sequence);
+      expect(Option.isNone(yield* receipts.getByCommandId({ commandId: command.commandId }))).toBe(
+        true,
+      );
+      yield* engine
+        .dispatch({
+          type: "thread.turn.interrupt",
+          commandId: CommandId.make("restored-stop"),
+          threadId,
+          createdAt: now(),
+        })
+        .pipe(Effect.provideService(ProfileRestoreReview, restoreHold));
+      expect(
+        Option.isSome(
+          yield* receipts.getByCommandId({ commandId: CommandId.make("restored-stop") }),
+        ),
+      ).toBe(true);
+      yield* engine.dispatch(command);
+      expect(Option.isSome(yield* receipts.getByCommandId({ commandId: command.commandId }))).toBe(
+        true,
+      );
+    }).pipe(Effect.provide(makeOrchestrationLayer())),
+  );
+
   it.each(["running", "stopped"] as const)(
     "sends async answers with a %s session and rejects old duplicate replies",
     async (status) => {
@@ -419,6 +909,7 @@ describe("OrchestrationEngine", () => {
     const layer = OrchestrationEngineLive.pipe(
       Layer.provide(
         Layer.succeed(ProjectionSnapshotQuery, {
+          getReviewWorkspaceRoots: () => Effect.die("unused"),
           getUserInputActivity: () => Effect.die("unused"),
           listActivitiesByKind: () => Effect.die("unused"),
           getCommandReadModel: () => Effect.succeed(commandReadModel),

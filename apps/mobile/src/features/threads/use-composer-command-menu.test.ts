@@ -24,6 +24,23 @@ import {
 } from "./use-composer-command-menu";
 
 describe("mobile slash commands", () => {
+  it("keeps native source identity when selecting a same-name skill", () => {
+    const path = "meerkat-skill://b3fdcd90-cb8c-40c2-aee5-c1aba30a9b64/review";
+    const result = resolveComposerCommandSelection({
+      draftMessage: "$rev",
+      trigger: { rangeStart: 0, rangeEnd: 4 },
+      item: {
+        id: `skill:${path}`,
+        type: "skill",
+        skill: { name: "review", path, enabled: true },
+        label: "review",
+        description: "Native review",
+      },
+      allowInteractionMode: false,
+    });
+    const text = `[review](${path}) `;
+    expect(result).toEqual({ text, cursor: text.length, interactionMode: null });
+  });
   const antigravity = {
     driver: ProviderDriverKind.make("antigravity"),
     showInteractionModeToggle: false,

@@ -167,7 +167,7 @@ interface ProviderSettingsFormProps {
    * and `settings` renders the shared settings row treatment.
    */
   readonly variant: "card" | "dialog" | "settings";
-  readonly onChange: (nextConfig: Record<string, unknown> | undefined) => void;
+  readonly onChange: (nextConfig: Record<string, unknown> | undefined) => void | Promise<boolean>;
 }
 
 /** Stores the default choice as an omitted key so unchanged configs stay small. */
@@ -290,6 +290,7 @@ function ProviderSettingsFieldRow({
           autoComplete={field.control === "password" ? "off" : undefined}
           value={readProviderConfigString(value, field.key)}
           onCommit={(next) => onChange(nextProviderConfigWithFieldValue(value, field, next))}
+          normalize={(next) => next.trim()}
           placeholder={field.placeholder}
           spellCheck={false}
         />
@@ -382,6 +383,7 @@ function ProviderSettingsFieldRow({
             autoComplete={field.control === "password" ? "off" : undefined}
             value={readProviderConfigString(value, field.key)}
             onCommit={(next) => onChange(nextProviderConfigWithFieldValue(value, field, next))}
+            normalize={(next) => next.trim()}
             placeholder={field.placeholder}
             spellCheck={false}
           />

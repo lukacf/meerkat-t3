@@ -6,6 +6,7 @@ import {
   projectAxisValue,
   selectEnvironmentAxis,
   selectProjectAxis,
+  settingsScopeEnvironmentDiscriminator,
   settingsScopeEnvironmentLabel,
 } from "./settingsScopeAxis";
 
@@ -46,6 +47,56 @@ describe("settings scope environment labels", () => {
     expect(settingsScopeEnvironmentLabel(first, [first, { ...second, label: "Production" }])).toBe(
       "Development",
     );
+  });
+});
+
+describe("compact environment discriminators", () => {
+  const discriminators = (environments: (typeof first)[]) =>
+    environments.map((environment) =>
+      settingsScopeEnvironmentDiscriminator(environment, environments),
+    );
+
+  it("keeps loopback ports distinct without the repeated address prefix", () => {
+    expect(
+      discriminators([
+        { ...first, displayUrl: "http://127.0.0.1:15810" },
+        { ...second, displayUrl: "http://127.0.0.1:3774" },
+      ]),
+    ).toEqual([":15810", ":3774"]);
+  });
+
+  it("keeps short, unique remote hosts readable", () => {
+    expect(discriminators([first, second])).toEqual(["first.example.com", "second.example.com"]);
+  });
+
+  it("uses distinct identities when the same name also has the same address", () => {
+    const environments = [
+      {
+        ...first,
+        environmentId: EnvironmentId.make("a8305d44-1111"),
+        displayUrl: "http://localhost:3774",
+      },
+      {
+        ...second,
+        environmentId: EnvironmentId.make("a8305d45-2222"),
+        displayUrl: "http://127.0.0.1:3774",
+      },
+    ];
+    expect(discriminators(environments)).toEqual(["#a8305d44", "#a8305d45"]);
+    expect(discriminators(environments.toReversed())).toEqual(["#a8305d45", "#a8305d44"]);
+  });
+
+  it("uses identities for long or invalid addresses without clipping their shared prefix", () => {
+    expect(
+      discriminators([
+        { ...first, displayUrl: "https://first.very-long-environment-name.example.com" },
+        { ...second, displayUrl: "unavailable" },
+      ]),
+    ).toEqual(["#first", "#second"]);
+  });
+
+  it("needs no discriminator after the duplicate environment is renamed", () => {
+    expect(discriminators([first, { ...second, label: "Production" }])).toEqual([null, null]);
   });
 });
 

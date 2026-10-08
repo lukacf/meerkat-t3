@@ -30,10 +30,25 @@ export class DesktopUserDataPathResolutionError extends Schema.TaggedError<Deskt
   }
 }
 
+export class DesktopUserDataDirectoryError extends Schema.TaggedError<DesktopUserDataDirectoryError>()(
+  "DesktopUserDataDirectoryError",
+  {
+    path: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `Failed to prepare the desktop user-data directory override at "${this.path}".`;
+  }
+}
+
 export class DesktopAppIdentity extends Context.Service<
   DesktopAppIdentity,
   {
-    readonly resolveUserDataPath: Effect.Effect<string, DesktopUserDataPathResolutionError>;
+    readonly resolveUserDataPath: Effect.Effect<
+      string,
+      DesktopUserDataPathResolutionError | DesktopUserDataDirectoryError
+    >;
     readonly configure: Effect.Effect<void>;
   }
 >()("@t3tools/desktop/app/DesktopAppIdentity") {}
@@ -48,6 +63,21 @@ const normalizeCommitHash = (value: string): Option.Option<string> => {
 export const resolveUserDataPath = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
+  if (Option.isSome(environment.userDataDirectoryOverride)) {
+    const override = environment.userDataDirectoryOverride.value;
+    if (!environment.path.isAbsolute(override)) {
+      return yield* new DesktopUserDataDirectoryError({
+        path: override,
+        cause: new Error("T3CODE_DESKTOP_USER_DATA_DIR must be an absolute path."),
+      });
+    }
+    // Startup prepares this synchronously before Clerk. Later identity reads
+    // must also preserve the override without probing the normal app profile.
+    yield* fileSystem.makeDirectory(override, { recursive: true }).pipe(
+      Effect.mapError((cause) => new DesktopUserDataDirectoryError({ path: override, cause })),
+    );
+    return override;
+  }
   const legacyPath = environment.path.join(
     environment.appDataDirectory,
     environment.legacyUserDataDirName,

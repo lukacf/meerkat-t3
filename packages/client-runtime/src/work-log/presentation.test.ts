@@ -137,6 +137,23 @@ describe("workEntryIndicatesToolFailure", () => {
 });
 
 describe("summarizeToolGroup", () => {
+  it("counts native skill resolution and failure as updates rather than tool calls", () => {
+    const resolved: WorkLogPresentationEntry = {
+      label: "Skills resolved: review",
+      sourceActivityKind: "skills.resolved",
+      tone: "info",
+    };
+    const failed: WorkLogPresentationEntry = {
+      ...resolved,
+      label: "Skill resolution failed",
+      sourceActivityKind: "skills.resolution-failed",
+      tone: "error",
+    };
+    expect(summarizeToolGroup([resolved, failed])).toBe("Received 2 updates");
+    expect(workEntryIndicatesToolSuccess(resolved)).toBe(false);
+    expect(workEntryDisplayIndicatesToolFailure(failed)).toBe(true);
+  });
+
   it.each(["command", "file-read", "file-change"])(
     "keeps %s approvals out of tool execution counts",
     (requestKind) => {

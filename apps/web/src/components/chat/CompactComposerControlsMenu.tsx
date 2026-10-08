@@ -12,10 +12,14 @@ import {
 import { ComposerControl, ComposerControlIcon } from "./ComposerControl";
 import { useComposerMenuProps } from "./composerEventScope";
 import { useComposerMenuState } from "./useComposerMenuState";
+import { runtimeModeConfig, runtimeModeOptions } from "./runtimeModeConfig";
 
 export const CompactComposerControlsMenu = memo(function CompactComposerControlsMenu(props: {
   interactionMode: ProviderInteractionMode;
   runtimeMode: RuntimeMode;
+  meerkatAccessModes?: boolean;
+  readOnlyAvailable?: boolean;
+  accessModeLocked?: boolean;
   showInteractionModeToggle: boolean;
   traitsMenuContent?: ReactNode;
   size?: "sm" | "xs";
@@ -79,11 +83,34 @@ export const CompactComposerControlsMenu = memo(function CompactComposerControls
             props.onRuntimeModeChange(value as RuntimeMode);
           }}
         >
-          <MenuRadioItem value="approval-required">Supervised</MenuRadioItem>
-          <MenuRadioItem value="auto-accept-edits">Auto-accept edits</MenuRadioItem>
-          <MenuRadioItem value="auto">Auto</MenuRadioItem>
-          <MenuRadioItem value="full-access">Full access</MenuRadioItem>
+          {runtimeModeOptions
+            .filter((mode) =>
+              props.meerkatAccessModes
+                ? (mode === "read-only" && props.readOnlyAvailable) ||
+                  mode === "approval-required" ||
+                  mode === "full-access"
+                : mode !== "read-only",
+            )
+            .map((mode) => (
+              <MenuRadioItem
+                key={mode}
+                value={mode}
+                disabled={props.accessModeLocked && mode !== props.runtimeMode}
+              >
+                {runtimeModeConfig[mode].label}
+              </MenuRadioItem>
+            ))}
         </MenuRadioGroup>
+        {props.meerkatAccessModes && props.runtimeMode === "approval-required" ? (
+          <div className="px-2 py-1.5 text-muted-foreground text-xs">
+            Ask before every tool call, including reads, in this thread and its workers.
+          </div>
+        ) : null}
+        {props.accessModeLocked ? (
+          <div className="px-2 py-1.5 text-muted-foreground text-xs">
+            Start a new conversation to change access.
+          </div>
+        ) : null}
       </MenuPopup>
     </Menu>
   );

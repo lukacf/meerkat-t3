@@ -3,10 +3,12 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as Result from "effect/Result";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 
 import {
+  SourceControlProviderError,
   SourceControlRepositoryError,
   type SourceControlCloneRepositoryInput,
   type SourceControlCloneRepositoryResult,
@@ -14,6 +16,7 @@ import {
   type SourceControlProviderKind,
   type SourceControlPublishRepositoryInput,
   type SourceControlPublishRepositoryResult,
+  type SourceControlPublishResume,
   type SourceControlRepositoryCloneUrls,
   type SourceControlRepositoryInfo,
   type SourceControlRepositoryLookupInput,
@@ -26,8 +29,12 @@ import {
   type GitCloneProgressLine,
 } from "../project/gitCloneProgress.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import { GitHubCliAuthenticationError } from "./GitHubCli.ts";
 import * as SourceControlProviderRegistry from "./SourceControlProviderRegistry.ts";
+
 const isSourceControlRepositoryError = Schema.is(SourceControlRepositoryError);
+const isSourceControlProviderError = Schema.is(SourceControlProviderError);
+const isGitHubCliAuthenticationError = Schema.is(GitHubCliAuthenticationError);
 
 export class SourceControlRepositoryService extends Context.Service<
   SourceControlRepositoryService,
@@ -85,6 +92,34 @@ const CLONE_ENV = {
   LC_ALL: "C",
 } satisfies NodeJS.ProcessEnv;
 
+function usesGitHubHttps(remoteUrl: string): boolean {
+  try {
+    const url = new URL(remoteUrl);
+    return (
+      url.origin === "https://github.com" &&
+      !url.username &&
+      !url.password &&
+      !url.search &&
+      !url.hash
+    );
+  } catch {
+    return false;
+  }
+}
+
+function cloneFailureDetail(remoteUrl: string, stderr: ReadonlyArray<string>): string {
+  const detail = stderr.length > 0 ? stderr.join(" ") : "The repository could not be cloned.";
+  if (
+    usesGitHubHttps(remoteUrl) &&
+    stderr.some((line) =>
+      /^fatal: (?:Authentication failed|could not read (?:Username|Password))\b/i.test(line),
+    )
+  ) {
+    return `${detail} On this project's computer, run \`gh auth login --hostname github.com\` and \`gh auth setup-git --hostname github.com\`, then retry the clone. These commands reconnect Git to your GitHub CLI account.`;
+  }
+  return detail;
+}
+
 function mapRepositoryError(operation: string, provider: SourceControlProviderKind) {
   return Effect.mapError((cause: unknown) =>
     isSourceControlRepositoryError(cause)
@@ -92,7 +127,14 @@ function mapRepositoryError(operation: string, provider: SourceControlProviderKi
       : new SourceControlRepositoryError({
           operation,
           provider,
-          detail: "The source control operation could not be completed.",
+          // A typed auth failure can provide fixed recovery guidance without
+          // promoting arbitrary provider stderr (which may contain tokens).
+          detail:
+            isSourceControlProviderError(cause) &&
+            cause.provider === "github" &&
+            isGitHubCliAuthenticationError(cause.cause)
+              ? "GitHub CLI is not authenticated. Run `gh auth login` on this repository's server, rescan Source Control in Settings, and retry."
+              : "The source control operation could not be completed.",
           cause,
         }),
   );
@@ -118,26 +160,33 @@ function toRepositoryInfo(
 function redactRemoteUrl(remoteUrl: string): string {
   try {
     const url = new URL(remoteUrl);
-    // Clone URLs have no legitimate query; when one is present it is a token.
-    if (url.username.length === 0 && url.password.length === 0 && url.search.length === 0) {
+    // Queries and fragments are unnecessary in a displayed clone address and
+    // may contain credentials, just like userinfo.
+    if (!url.username && !url.password && !url.search && !url.hash) {
       return remoteUrl;
     }
     url.username = "";
     url.password = "";
     url.search = "";
+    url.hash = "";
     return url.toString();
   } catch {
+    // Do not echo a malformed URL whose credential boundaries are unknown.
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(remoteUrl)) return "Repository URL not saved";
     return remoteUrl;
   }
 }
 
-// Userinfo may itself contain `@`; everything up to the last one before the
-// host boundary goes.
-const URL_WITH_USERINFO = /\b([a-z][a-z0-9+.-]*:\/\/)[^\s/]+@/gi;
+const URL_IN_TEXT = /\b[a-z][a-z0-9+.-]*:\/\/[^\s<>]+/gi;
+const URL_TRAILING_PUNCTUATION = /["'),.;:]+$/;
 
-/** Drops `user:token@` from any URL embedded in free text. */
+/** Apply the snapshot policy to echoed URLs without losing diagnostic punctuation. */
 function redactUrlCredentials(text: string): string {
-  return text.replace(URL_WITH_USERINFO, "$1");
+  return text.replace(URL_IN_TEXT, (match) => {
+    const punctuation = match.match(URL_TRAILING_PUNCTUATION)?.[0] ?? "";
+    const address = punctuation ? match.slice(0, -punctuation.length) : match;
+    return `${redactRemoteUrl(address)}${punctuation}`;
+  });
 }
 
 function selectRemoteUrl(
@@ -283,6 +332,28 @@ export const make = Effect.gen(function* () {
     options?: SourceControlCloneOptions,
   ) {
     const prepared = yield* prepareClone(input);
+    const useGitHubCredentialHelper =
+      usesGitHubHttps(prepared.cloneUrl) && !process.env.GIT_TEMPLATE_DIR
+        ? yield* git
+            .execute({
+              operation: "SourceControlRepositoryService.inspectCloneCredentials",
+              cwd: path.dirname(prepared.destinationPath),
+              // Match any helper, including partial URL keys. Conditional includes or
+              // custom templates may add helpers only once the destination exists.
+              args: [
+                "config",
+                "--includes",
+                "--name-only",
+                "--get-regexp",
+                "^(credential(\\..*)?\\.helper|includeif\\..*\\.path|init\\.templatedir)$",
+              ],
+              allowNonZeroExit: true,
+            })
+            .pipe(
+              Effect.map((result) => result.exitCode === 1),
+              Effect.catch(() => Effect.succeed(false)),
+            )
+        : false;
     const onProgress = options?.onProgress;
     // Git interleaves progress redraws with its real messages on stderr. The
     // last non-progress lines are what explain a failure ("Repository not
@@ -303,7 +374,18 @@ export const make = Effect.gen(function* () {
       .execute({
         operation: "SourceControlRepositoryService.cloneRepository",
         cwd: path.dirname(prepared.destinationPath),
-        args: ["clone", "--progress", prepared.cloneUrl, path.basename(prepared.destinationPath)],
+        args: [
+          "clone",
+          "--progress",
+          // Clone-local config also serves later fetch/push after a restart.
+          // Only add it when no helper is configured. Git sends approved credentials
+          // to every matching helper, so appending to an existing store could copy a token.
+          ...(useGitHubCredentialHelper
+            ? ["--config", "credential.https://github.com.helper=!gh auth git-credential"]
+            : []),
+          prepared.cloneUrl,
+          path.basename(prepared.destinationPath),
+        ],
         timeoutMs: options?.timeoutMs === undefined ? CLONE_TIMEOUT_MS : options.timeoutMs,
         // Progress redraws add up on a slow multi-GB clone. The buffered copy
         // is never read (the tail is kept by hand above), so keep it small
@@ -320,10 +402,7 @@ export const make = Effect.gen(function* () {
             new SourceControlRepositoryError({
               operation: "cloneRepository",
               provider: input.provider ?? "unknown",
-              detail:
-                stderrTail.length > 0
-                  ? stderrTail.join(" ")
-                  : "The repository could not be cloned.",
+              detail: cloneFailureDetail(prepared.cloneUrl, stderrTail),
               cause,
             }),
         ),
@@ -391,18 +470,108 @@ export const make = Effect.gen(function* () {
         operation: "publishRepository",
         provider: input.provider,
       });
-      const provider = yield* providers.get(providerKind);
-      const urls = yield* provider.createRepository({
+      const requestedRemoteName =
+        input.resume?.remoteName ?? (input.remoteName?.trim() || "origin");
+      if (!/^[A-Za-z0-9._](?:[A-Za-z0-9._-]*[A-Za-z0-9._])?$/.test(requestedRemoteName)) {
+        return yield* new SourceControlRepositoryError({
+          operation: "publishRepository",
+          provider: providerKind,
+          detail:
+            "Use letters, digits, dots, underscores, or internal hyphens for the remote name before publishing.",
+        });
+      }
+      if (
+        input.resume &&
+        (input.resume.cwd !== input.cwd ||
+          input.resume.repository.provider !== providerKind ||
+          input.resume.repository.nameWithOwner !== input.repository.trim() ||
+          (input.resume.remoteUrl !== input.resume.repository.url &&
+            input.resume.remoteUrl !== input.resume.repository.sshUrl))
+      ) {
+        return yield* new SourceControlRepositoryError({
+          operation: "publishRepository",
+          provider: providerKind,
+          detail:
+            "The saved publish target does not match this checkout and repository. Return to the original checkout to finish publishing.",
+        });
+      }
+      // Only a returned create receipt establishes this recovery target. A failed
+      // or disconnected create is never inferred to have succeeded.
+      const urls = input.resume
+        ? input.resume.repository
+        : yield* (yield* providers.get(providerKind)).createRepository({
+            cwd: input.cwd,
+            repository: input.repository.trim(),
+            visibility: input.visibility,
+          });
+      const repository = toRepositoryInfo(providerKind, urls);
+      const remoteUrl = input.resume?.remoteUrl ?? selectRemoteUrl(urls, input.protocol);
+      const preferredName = requestedRemoteName;
+      const resume: SourceControlPublishResume = {
         cwd: input.cwd,
-        repository: input.repository.trim(),
-        visibility: input.visibility,
+        repository,
+        remoteName: preferredName,
+        remoteUrl,
+      };
+      const pending = (status: "remote_pending" | "push_pending", target = resume) => ({
+        repository,
+        remoteName: target.remoteName,
+        remoteUrl,
+        resume: target,
+        status,
+        detail:
+          status === "remote_pending"
+            ? "The repository was created, but its local remote could not be connected. Check this checkout's Git configuration and permissions, then retry the connection."
+            : "The repository and local remote are ready, but the push did not finish. Check the connection and Git transport credentials on this server, then retry the push.",
       });
-      const remoteUrl = selectRemoteUrl(urls, input.protocol);
-      const remoteName = yield* git.ensureRemote({
-        cwd: input.cwd,
-        preferredName: input.remoteName?.trim() || "origin",
-        url: remoteUrl,
-      });
+
+      let existingResumeRemote = false;
+      if (input.resume) {
+        const remoteNames = yield* git.execute({
+          operation: "SourceControlRepositoryService.publishRepository.resumeRemotes",
+          cwd: input.cwd,
+          args: ["remote"],
+        });
+        if (remoteNames.stdout.split(/\r?\n/).includes(preferredName)) {
+          existingResumeRemote = true;
+          for (const direction of [[], ["--push"]]) {
+            const remote = yield* git.execute({
+              operation: "SourceControlRepositoryService.publishRepository.resumeRemoteUrl",
+              cwd: input.cwd,
+              args: ["remote", "get-url", ...direction, "--all", preferredName],
+            });
+            const currentUrls = remote.stdout.trim().split(/\r?\n/);
+            if (currentUrls.some((url) => url !== remoteUrl)) {
+              return yield* new SourceControlRepositoryError({
+                operation: "publishRepository",
+                provider: providerKind,
+                detail:
+                  "The saved remote now points to another repository. Restore its original destination or finish publishing manually; no remote was changed or pushed.",
+              });
+            }
+          }
+        }
+      }
+      const remoteResult = yield* (
+        input.resume
+          ? existingResumeRemote
+            ? Effect.succeed(preferredName)
+            : git
+                .execute({
+                  operation: "SourceControlRepositoryService.publishRepository.resumeAddRemote",
+                  cwd: input.cwd,
+                  args: ["remote", "add", preferredName, remoteUrl],
+                })
+                .pipe(Effect.as(preferredName))
+          : git.ensureRemote({
+              cwd: input.cwd,
+              preferredName,
+              url: remoteUrl,
+            })
+      ).pipe(Effect.result);
+      if (Result.isFailure(remoteResult)) return pending("remote_pending");
+      const remoteName = remoteResult.success;
+      const connectedResume = { ...resume, remoteName };
 
       // An empty local repo (no commits) would make `git push HEAD:...` fail
       // with an opaque "src refspec HEAD does not match any". Treat this as a
@@ -421,7 +590,7 @@ export const make = Effect.gen(function* () {
       if (!hasCommits) {
         const details = yield* git.statusDetails(input.cwd).pipe(Effect.orElseSucceed(() => null));
         return {
-          repository: toRepositoryInfo(providerKind, urls),
+          repository,
           remoteName,
           remoteUrl,
           branch: details?.branch ?? "main",
@@ -429,10 +598,14 @@ export const make = Effect.gen(function* () {
         };
       }
 
-      const pushResult = yield* git.pushCurrentBranch(input.cwd, null, { remoteName });
+      const push = yield* git
+        .pushCurrentBranch(input.cwd, null, { remoteName })
+        .pipe(Effect.result);
+      if (Result.isFailure(push)) return pending("push_pending", connectedResume);
+      const pushResult = push.success;
 
       return {
-        repository: toRepositoryInfo(providerKind, urls),
+        repository,
         remoteName,
         remoteUrl,
         branch: pushResult.branch,

@@ -130,7 +130,7 @@ const withIdentity = <A, E, R>(
               input.legacyPathProbeError
                 ? Effect.fail(input.legacyPathProbeError)
                 : Effect.succeed(
-                    input.legacyPathExists === true && path.includes("T3 Code (Alpha)"),
+                    input.legacyPathExists === true && path.endsWith("/meerkat-t3"),
                   ),
             readFileString: () =>
               Effect.succeed(input.packageJson ?? '{"t3codeCommitHash":"abcdef1234567890"}'),
@@ -145,20 +145,102 @@ const withIdentity = <A, E, R>(
 };
 
 describe("DesktopAppIdentity", () => {
+  it.effect("creates an isolated profile before returning it without probing the normal profile", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const directory = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "meerkat-desktop-profile-",
+      });
+      const override = `${directory}/nested/electron-profile`;
+      const isolatedFileSystem = Layer.succeed(FileSystem.FileSystem, {
+        ...fileSystem,
+        exists: () => Effect.die("An explicit profile must not inspect the normal profile."),
+      });
+      const userDataPath = yield* DesktopAppIdentity.resolveUserDataPath.pipe(
+        Effect.provide(
+          Layer.merge(
+            isolatedFileSystem,
+            makeEnvironmentLayer({
+              env: {
+                T3CODE_HOME: `${directory}/server-home`,
+                T3CODE_DESKTOP_USER_DATA_DIR: ` ${override} `,
+              },
+            }),
+          ),
+        ),
+      );
+
+      assert.equal(userDataPath, override);
+      assert.equal(yield* fileSystem.exists(override), true);
+      assert.equal((yield* fileSystem.stat(override)).type, "Directory");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("refuses a relative profile override without creating or falling back to a profile", () =>
+    DesktopAppIdentity.resolveUserDataPath.pipe(
+      Effect.provide(
+        Layer.merge(
+          FileSystem.layerNoop({
+            exists: () => Effect.die("An invalid override must not inspect the normal profile."),
+            makeDirectory: () => Effect.die("A relative override must not create a directory."),
+          }),
+          makeEnvironmentLayer({ env: { T3CODE_DESKTOP_USER_DATA_DIR: "relative-profile" } }),
+        ),
+      ),
+      Effect.flip,
+      Effect.map((error) => {
+        assert.instanceOf(error, DesktopAppIdentity.DesktopUserDataDirectoryError);
+        assert.equal(error.path, "relative-profile");
+        assert.equal(
+          (error.cause as Error).message,
+          "T3CODE_DESKTOP_USER_DATA_DIR must be an absolute path.",
+        );
+      }),
+    ),
+  );
+
+  it.effect("preserves profile creation errors without falling back to the normal profile", () => {
+    const override = "/tmp/unwritable-electron-profile";
+    const cause = PlatformError.systemError({
+      _tag: "PermissionDenied",
+      module: "FileSystem",
+      method: "makeDirectory",
+      description: "permission denied",
+      pathOrDescriptor: override,
+    });
+    return DesktopAppIdentity.resolveUserDataPath.pipe(
+      Effect.provide(
+        Layer.merge(
+          FileSystem.layerNoop({
+            exists: () => Effect.die("A failed override must not inspect the normal profile."),
+            makeDirectory: () => Effect.fail(cause),
+          }),
+          makeEnvironmentLayer({ env: { T3CODE_DESKTOP_USER_DATA_DIR: override } }),
+        ),
+      ),
+      Effect.flip,
+      Effect.map((error) => {
+        assert.instanceOf(error, DesktopAppIdentity.DesktopUserDataDirectoryError);
+        assert.equal(error.path, override);
+        assert.strictEqual(error.cause, cause);
+      }),
+    );
+  });
+
   it.effect("keeps using the legacy userData path when it already exists", () =>
     withIdentity(
       Effect.gen(function* () {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         const userDataPath = yield* identity.resolveUserDataPath;
 
-        assert.equal(userDataPath, "/Users/alice/Library/Application Support/T3 Code (Alpha)");
+        assert.equal(userDataPath, "/Users/alice/Library/Application Support/meerkat-t3");
       }),
       { legacyPathExists: true },
     ),
   );
 
   it.effect("preserves failures while inspecting the legacy userData path", () => {
-    const legacyPath = "/Users/alice/Library/Application Support/T3 Code (Alpha)";
+    const legacyPath = "/Users/alice/Library/Application Support/meerkat-t3";
     const cause = PlatformError.systemError({
       _tag: "PermissionDenied",
       module: "FileSystem",
@@ -196,8 +278,8 @@ describe("DesktopAppIdentity", () => {
         const identity = yield* DesktopAppIdentity.DesktopAppIdentity;
         yield* identity.configure;
 
-        assert.deepEqual(calls.setName, ["T3 Code (Alpha)"]);
-        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "T3 Code (Alpha)");
+        assert.deepEqual(calls.setName, ["Meerkat T3 (Prototype)"]);
+        assert.equal(calls.setAboutPanelOptions[0]?.applicationName, "Meerkat T3 (Prototype)");
         assert.equal(calls.setAboutPanelOptions[0]?.applicationVersion, "1.2.3");
         assert.equal(calls.setAboutPanelOptions[0]?.version, "0123456789ab");
         // Packaged: the bundle's own icon stands, so a custom one the user

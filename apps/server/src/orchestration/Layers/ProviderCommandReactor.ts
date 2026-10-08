@@ -1,3 +1,8 @@
+import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { makeMeerkatTeamService } from "../../provider/meerkat/MeerkatTeamService.ts";
+import { restoreReviewHeld } from "../../restoreReview.ts";
+import { ProviderInstanceRegistry } from "../../provider/Services/ProviderInstanceRegistry.ts";
+import { ProjectCloneTracker } from "../../project/ProjectCloneTracker.ts";
 import { withWorkspaceLease } from "../../workspace/workspaceLease.ts";
 import {
   type ChatAttachment,
@@ -5,6 +10,7 @@ import {
   EventId,
   type ModelSelection,
   type OrchestrationEvent,
+  MeerkatTeamError,
   ProviderDriverKind,
   type ProjectId,
   type OrchestrationSession,
@@ -43,6 +49,7 @@ import {
 } from "../../provider/Errors.ts";
 import type { ProviderServiceError } from "../../provider/Errors.ts";
 import { TextGeneration } from "../../textGeneration/TextGeneration.ts";
+import { resolveTextGenerationModelForCwd } from "../../textGeneration/TextGenerationModelSelection.ts";
 import { ProviderAuthService } from "../../provider/Services/ProviderAuthService.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
@@ -58,10 +65,7 @@ import {
   type ThreadTitleMessage,
 } from "../../textGeneration/ThreadTitleContext.ts";
 import { canReplaceThreadTitle, DEFAULT_THREAD_TITLE } from "../threadTitles.ts";
-import {
-  resolveSourceControlWriterModelSelection,
-  ServerSettingsService,
-} from "../../serverSettings.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
@@ -215,6 +219,9 @@ const make = Effect.gen(function* () {
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const providerAuthService = yield* ProviderAuthService;
   const providerService = yield* ProviderService;
+  const meerkatInstances = yield* Effect.serviceOption(ProviderInstanceRegistry);
+  const meerkatSql = yield* Effect.serviceOption(SqlClient.SqlClient);
+  const meerkatCloneTracker = yield* Effect.serviceOption(ProjectCloneTracker);
   const providerRegistry = yield* ProviderRegistry;
   const gitWorkflow = yield* GitWorkflowService;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -372,6 +379,9 @@ const make = Effect.gen(function* () {
 
   const formatFailureDetail = (cause: Cause.Cause<unknown>): string => {
     const failReason = cause.reasons.find(Cause.isFailReason);
+    if (Schema.is(MeerkatTeamError)(failReason?.error)) {
+      return failReason.error.message;
+    }
     if (isProviderAdapterRequestError(failReason?.error)) {
       return failReason.error.detail;
     }
@@ -833,9 +843,12 @@ const make = Effect.gen(function* () {
   const buildSendTurnRequestForThread = Effect.fnUntraced(function* (input: {
     readonly threadId: ThreadId;
     readonly messageText: string;
+    readonly skillSelectionText: string;
     readonly attachments?: ReadonlyArray<ChatAttachment>;
     readonly modelSelection?: ModelSelection;
     readonly interactionMode?: "default" | "plan";
+    readonly handlingMode?: "queue" | "steer";
+    readonly steeringTurnId?: TurnId;
     readonly createdAt: string;
   }) {
     const thread = yield* resolveThreadShell(input.threadId);
@@ -844,11 +857,33 @@ const make = Effect.gen(function* () {
         new Error(`Thread '${input.threadId}' was not found in read model.`),
       );
     }
-    yield* ensureSessionForThread(input.threadId, input.createdAt, {
-      ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
-      pendingTurnStart: true,
-    });
-    if (input.modelSelection !== undefined) {
+    // An explicit steer must stay on the existing runtime. Session recovery or
+    // a model/config restart would turn a steering request into a new run.
+    if (input.handlingMode === "steer") {
+      const runningSession = (yield* providerService.listSessions()).find(
+        (session) => session.threadId === input.threadId,
+      );
+      if (
+        runningSession?.status !== "running" ||
+        !runningSession.activeTurnId ||
+        (runningSession.provider === "meerkat" && input.steeringTurnId === undefined) ||
+        (input.steeringTurnId !== undefined && input.steeringTurnId !== runningSession.activeTurnId)
+      ) {
+        return yield* new ProviderAdapterRequestError({
+          provider: providerErrorLabel(
+            runningSession?.provider ?? thread.session?.providerName ?? "meerkat",
+          ),
+          method: "thread.turn.start",
+          detail: "The run ended before this message could steer it. Send it as a new turn.",
+        });
+      }
+    } else {
+      yield* ensureSessionForThread(input.threadId, input.createdAt, {
+        ...(input.modelSelection !== undefined ? { modelSelection: input.modelSelection } : {}),
+        pendingTurnStart: true,
+      });
+    }
+    if (input.modelSelection !== undefined && input.handlingMode !== "steer") {
       threadModelSelections.set(input.threadId, input.modelSelection);
     }
     const normalizedInput = toNonEmptyProviderInput(input.messageText);
@@ -884,9 +919,14 @@ const make = Effect.gen(function* () {
     return {
       threadId: input.threadId,
       ...(normalizedInput ? { input: normalizedInput } : {}),
+      ...(activeSession?.provider === "meerkat"
+        ? { skillSelectionText: input.skillSelectionText }
+        : {}),
       ...(normalizedAttachments.length > 0 ? { attachments: normalizedAttachments } : {}),
       ...(modelForTurn !== undefined ? { modelSelection: modelForTurn } : {}),
       ...(input.interactionMode !== undefined ? { interactionMode: input.interactionMode } : {}),
+      ...(input.handlingMode !== undefined ? { handlingMode: input.handlingMode } : {}),
+      ...(input.steeringTurnId !== undefined ? { steeringTurnId: input.steeringTurnId } : {}),
     };
   });
 
@@ -911,13 +951,12 @@ const make = Effect.gen(function* () {
     const attachments = input.attachments ?? [];
     yield* Effect.gen(function* () {
       const settings = yield* projectSettingsForThread(input.threadId);
-      const modelSelection =
-        settings.sourceControlWriterModelSelection === null
-          ? settings.textGenerationModelSelection
-          : resolveSourceControlWriterModelSelection(
-              settings,
-              yield* providerRegistry.getProviders,
-            );
+      const modelSelection = yield* resolveTextGenerationModelForCwd({
+        registry: providerRegistry,
+        settings,
+        cwd,
+        purpose: "source-control",
+      });
 
       const generated = yield* textGeneration.generateBranchName({
         cwd,
@@ -963,9 +1002,13 @@ const make = Effect.gen(function* () {
     }) {
       const attachments = input.attachments ?? [];
       yield* Effect.gen(function* () {
-        const { textGenerationModelSelection: modelSelection } = yield* projectSettingsForThread(
-          input.threadId,
-        );
+        const settings = yield* projectSettingsForThread(input.threadId);
+        const modelSelection = yield* resolveTextGenerationModelForCwd({
+          registry: providerRegistry,
+          settings,
+          cwd: input.cwd,
+          purpose: "general",
+        });
 
         const generated = yield* textGeneration
           .generateThreadTitle({
@@ -1013,6 +1056,7 @@ const make = Effect.gen(function* () {
   const maybeRefineThreadTitle = Effect.fn("maybeRefineThreadTitle")(function* (
     threadId: ThreadId,
   ) {
+    if (yield* restoreReviewHeld) return;
     const thread = yield* resolveThreadShell(threadId);
     if (
       !thread?.titleState?.needsRefinement ||
@@ -1061,10 +1105,16 @@ const make = Effect.gen(function* () {
         thread,
         projects: project ? [project] : [],
       }) ?? process.cwd();
-    const { textGenerationModelSelection: modelSelection } = resolveProjectSettings(
+    const settings = resolveProjectSettings(
       yield* serverSettingsService.getSettings,
       thread.projectId,
     ).settings;
+    const modelSelection = yield* resolveTextGenerationModelForCwd({
+      registry: providerRegistry,
+      settings,
+      cwd,
+      purpose: "general",
+    });
     const generated = yield* textGeneration.generateThreadTitle({
       cwd,
       message,
@@ -1248,23 +1298,41 @@ const make = Effect.gen(function* () {
       );
     }
 
-    const handleTurnStartFailure = (cause: Cause.Cause<unknown>) => {
-      if (Cause.hasInterruptsOnly(cause)) {
-        return Effect.void;
-      }
+    const handleTurnStartFailure = Effect.fnUntraced(function* (cause: Cause.Cause<unknown>) {
+      if (Cause.hasInterruptsOnly(cause)) return;
       const detail = formatFailureDetail(cause);
-      return setThreadSessionErrorOnTurnStartFailure({
+      if (event.payload.handlingMode === "steer") {
+        // Rejected steering is not a terminal signal for the existing run.
+        yield* appendTurnStartFailure("Steering delivery was not confirmed", detail);
+        return;
+      }
+      const runningMeerkatSession = (yield* providerService.listSessions()).find(
+        (session) =>
+          session.threadId === event.payload.threadId &&
+          session.provider === "meerkat" &&
+          session.status === "running" &&
+          session.activeTurnId !== undefined,
+      );
+      if (runningMeerkatSession) {
+        yield* appendTurnStartFailure("Message was not sent to the running turn", detail);
+        return;
+      }
+      yield* setThreadSessionErrorOnTurnStartFailure({
         threadId: event.payload.threadId,
         detail,
         createdAt: event.payload.createdAt,
-      }).pipe(
-        Effect.flatMap(() => appendTurnStartFailure("Provider turn start failed", detail)),
-        Effect.asVoid,
-      );
-    };
+      });
+      yield* appendTurnStartFailure("Provider turn start failed", detail);
+    });
 
     const recoverTurnStartFailure = (cause: Cause.Cause<unknown>) =>
       handleTurnStartFailure(cause).pipe(
+        Effect.tap(() =>
+          Effect.logWarning("provider turn start failed", {
+            threadId: event.payload.threadId,
+            cause: Cause.pretty(cause),
+          }),
+        ),
         Effect.catchCause((recoveryCause) =>
           Effect.logWarning("provider command reactor failed to recover turn start failure", {
             eventType: event.type,
@@ -1476,6 +1544,7 @@ const make = Effect.gen(function* () {
     }
     const sendTurnRequest = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
+      skillSelectionText: message.text,
       messageText: projectComposerContextForProvider({
         text: message.text,
         records: message.context?.records ?? [],
@@ -1485,6 +1554,12 @@ const make = Effect.gen(function* () {
         ? { modelSelection: event.payload.modelSelection }
         : {}),
       interactionMode: event.payload.interactionMode,
+      ...(event.payload.handlingMode !== undefined
+        ? { handlingMode: event.payload.handlingMode }
+        : {}),
+      ...(event.payload.steeringTurnId !== undefined
+        ? { steeringTurnId: event.payload.steeringTurnId }
+        : {}),
       createdAt: event.payload.createdAt,
     }).pipe(
       Effect.asSome,
@@ -1495,9 +1570,44 @@ const make = Effect.gen(function* () {
       return;
     }
 
-    const send = providerService
-      .sendTurn(sendTurnRequest.value)
-      .pipe(Effect.asVoid, Effect.catchCause(recoverTurnStartFailure));
+    const applyMeerkatConnections = Effect.gen(function* () {
+      const session = (yield* providerService.listSessions()).find(
+        (item) => item.threadId === event.payload.threadId,
+      );
+      if (session?.provider !== "meerkat" || !session.providerInstanceId) return;
+      // Steering targets an already admitted run, whose connection selection is already applied.
+      if (event.payload.handlingMode === "steer" || session.status === "running") return;
+      const shell = yield* resolveThreadShell(event.payload.threadId);
+      if (!shell) return;
+      if (
+        Option.isNone(meerkatInstances) ||
+        Option.isNone(meerkatSql) ||
+        Option.isNone(meerkatCloneTracker)
+      )
+        return yield* new MeerkatTeamError({
+          projectId: shell.projectId,
+          operation: "agent-connections",
+          message: "Meerkat connection services are unavailable. The turn was not sent.",
+        });
+      const team = yield* makeMeerkatTeamService.pipe(
+        Effect.provideService(ProviderInstanceRegistry, meerkatInstances.value),
+        Effect.provideService(SqlClient.SqlClient, meerkatSql.value),
+        Effect.provideService(ProjectCloneTracker, meerkatCloneTracker.value),
+      );
+      yield* team.applyThreadConnections(
+        {
+          projectId: shell.projectId,
+          threadId: event.payload.threadId,
+          instanceId: session.providerInstanceId,
+        },
+        true,
+      );
+    });
+    const send = applyMeerkatConnections.pipe(
+      Effect.andThen(providerService.sendTurn(sendTurnRequest.value)),
+      Effect.asVoid,
+      Effect.catchCause(recoverTurnStartFailure),
+    );
     // The forked send settles `sent` from here on, so drop the entry the post-processing hook uses.
     if (resumed && event.commandId !== null) resumedTurnStarts.delete(event.commandId);
     yield* send.pipe(
@@ -1529,6 +1639,27 @@ const make = Effect.gen(function* () {
       });
     }
 
+    const providerSession = (yield* providerService.listSessions()).find(
+      (candidate) => candidate.threadId === event.payload.threadId,
+    );
+    const isMeerkat = (providerSession?.provider ?? session.providerName) === "meerkat";
+    // Meerkat exposes the application run id as its turn id. Pin the target so
+    // a delayed stop cannot cancel a successor that starts before the RPC lands.
+    const interruptTurnId = isMeerkat
+      ? (event.payload.turnId ?? providerSession?.activeTurnId ?? session.activeTurnId ?? undefined)
+      : undefined;
+    if (isMeerkat && interruptTurnId === undefined) {
+      return yield* appendProviderFailureActivity({
+        threadId: event.payload.threadId,
+        kind: "provider.turn.interrupt.failed",
+        summary: "Provider turn interrupt failed",
+        detail: "No active Meerkat run is available to cancel.",
+        turnId: null,
+        createdAt: event.payload.createdAt,
+      });
+    }
+    const failureTurnId = interruptTurnId ?? event.payload.turnId;
+
     const recoverInterruptFailure = (cause: Cause.Cause<unknown>) => {
       if (Cause.hasInterruptsOnly(cause)) {
         return Effect.interrupt;
@@ -1542,11 +1673,24 @@ const make = Effect.gen(function* () {
           !latestSession ||
           latestSession.status === "stopped" ||
           latestSession.status === "ready" ||
-          (event.payload.turnId !== undefined &&
+          (failureTurnId !== undefined &&
             latestSession.activeTurnId !== null &&
-            latestSession.activeTurnId !== event.payload.turnId)
+            latestSession.activeTurnId !== failureTurnId)
         ) {
           return;
+        }
+
+        if (isMeerkat || latestSession.providerName === "meerkat") {
+          // MobKit cancellation is cooperative. A failed request does not
+          // authorize detaching the live member or declaring its turn stopped.
+          return yield* appendProviderFailureActivity({
+            threadId: event.payload.threadId,
+            kind: "provider.turn.interrupt.failed",
+            summary: "Provider turn interrupt failed",
+            detail,
+            turnId: failureTurnId ?? null,
+            createdAt: event.payload.createdAt,
+          });
         }
 
         yield* providerService.stopSession({ threadId: event.payload.threadId }).pipe(
@@ -1599,9 +1743,12 @@ const make = Effect.gen(function* () {
       });
     };
 
-    // Orchestration turn ids are not provider turn ids, so interrupt by session.
+    // Other providers have distinct orchestration/provider turn identities.
     yield* providerService
-      .interruptTurn({ threadId: event.payload.threadId })
+      .interruptTurn({
+        threadId: event.payload.threadId,
+        ...(interruptTurnId !== undefined ? { turnId: interruptTurnId } : {}),
+      })
       .pipe(Effect.catchCause(recoverInterruptFailure));
   });
 
@@ -1865,6 +2012,7 @@ const make = Effect.gen(function* () {
   const worker = yield* makeDrainableWorker(processDomainEventSafely);
 
   const start: ProviderCommandReactorShape["start"] = Effect.fn("start")(function* () {
+    const recoveryHeld = yield* restoreReviewHeld;
     const pendingTitles = yield* findPendingThreadTitles().pipe(
       Effect.catchCause((cause) => {
         if (Cause.hasInterruptsOnly(cause)) {
@@ -1922,6 +2070,7 @@ const make = Effect.gen(function* () {
       }),
     );
     const activation = yield* ServerActivation;
+    if (recoveryHeld) return;
     if (activation === undefined) {
       yield* recoverTitles;
     } else {

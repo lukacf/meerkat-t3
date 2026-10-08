@@ -43,12 +43,19 @@ import { Switch } from "../ui/switch";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import type { DriverOption } from "./providerDriverMeta";
+import type { ProviderOperateAccess } from "./ProviderSettingsPanel.logic";
 import { ProviderSettingsForm } from "./ProviderSettingsForm";
 import { ProviderModelsSection } from "./ProviderModelsSection";
 import { ProviderInstanceIcon, providerInstanceInitials } from "../chat/ProviderInstanceIcon";
 import { ProviderAccentColorPicker } from "./ProviderAccentColorPicker";
 import { RedactedSensitiveText } from "./RedactedSensitiveText";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
+import {
+  MEERKAT_CREDENTIAL_PRESETS,
+  MEERKAT_CREDENTIAL_FIELDS,
+  MEERKAT_AZURE_CREDENTIAL_GUIDANCE,
+  MEERKAT_BROWSER_SIGN_IN_GUIDANCE,
+} from "./meerkatCredentials";
 import {
   getProviderVersionAdvisoryPresentation,
   PROVIDER_STATUS_STYLES,
@@ -155,7 +162,9 @@ function nextConfigBlobWithValue(
 export function deriveProviderModelsForDisplay(input: {
   readonly liveModels: ReadonlyArray<ServerProviderModel> | undefined;
   readonly customModels: ReadonlyArray<CustomModelDefinition>;
+  readonly modelsManagedByRuntime?: boolean;
 }): ReadonlyArray<ServerProviderModel> {
+  if (input.modelsManagedByRuntime) return input.liveModels ?? [];
   const liveCustomModelsBySlug = new Map(
     Arr.filterMap(input.liveModels ?? [], (model) =>
       model.isCustom ? Result.succeed([model.slug, model] as const) : Result.failVoid,
@@ -187,10 +196,15 @@ function ProviderAuthEmail(props: { readonly email: string | undefined }) {
   );
 }
 
-function ProviderEnvironmentSection(props: {
+export function ProviderEnvironmentSection(props: {
   readonly environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>;
   readonly onChange: (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => void;
+  readonly nativeCredentials?: boolean;
+  readonly canEdit?: () => boolean;
 }) {
+  const isApiKey = (name: string) =>
+    props.nativeCredentials === true &&
+    MEERKAT_CREDENTIAL_FIELDS.some((field) => field.name === name && field.sensitive);
   const [rows, setRows] = useState<ReadonlyArray<EnvironmentDraftRow>>(() =>
     props.environment.map(makeEnvironmentDraftRow),
   );
@@ -231,18 +245,32 @@ function ProviderEnvironmentSection(props: {
         continue;
       }
       const { id: _id, ...rest } = row;
-      published.push({ ...rest, name });
+      published.push({ ...rest, name, sensitive: isApiKey(name) || row.sensitive });
     }
     lastPublishedEnvironmentRef.current = published;
     props.onChange(published);
   };
 
   const updateVariable = (id: string, patch: Partial<Omit<EnvironmentDraftRow, "id">>) => {
+    if (props.canEdit?.() === false) return;
+    const original = rows.find((row) => row.id === id);
+    if (!original) return;
+    // The saved value is unknown here. Changing its storage or name would
+    // remove the original secret and publish an empty replacement.
+    if (
+      original.valueRedacted &&
+      !patch.value &&
+      ((patch.name !== undefined && patch.name !== original.name) ||
+        patch.sensitive === false ||
+        patch.value !== undefined)
+    )
+      return;
     const nextRows = rows.map((row) =>
       row.id === id
         ? {
             ...row,
             ...patch,
+            ...(isApiKey(patch.name ?? row.name) ? { sensitive: true } : {}),
             ...(patch.value !== undefined ? { valueRedacted: false } : {}),
           }
         : row,
@@ -252,12 +280,14 @@ function ProviderEnvironmentSection(props: {
   };
 
   const removeVariable = (id: string) => {
+    if (props.canEdit?.() === false) return;
     const nextRows = rows.filter((row) => row.id !== id);
     setRows(nextRows);
     publishRows(nextRows);
   };
 
-  const addVariable = () =>
+  const addVariable = () => {
+    if (props.canEdit?.() === false) return;
     setRows([
       ...rows,
       {
@@ -267,95 +297,173 @@ function ProviderEnvironmentSection(props: {
         sensitive: true,
       },
     ]);
+  };
+  const addPreset = (preset: (typeof MEERKAT_CREDENTIAL_PRESETS)[number]) => {
+    if (props.canEdit?.() === false) return;
+    setRows([
+      ...rows,
+      ...preset.variables
+        .filter((variable) => !rows.some((row) => row.name === variable.name))
+        .map((variable) => ({
+          id: nextEnvironmentVariableDraftId(),
+          name: variable.name,
+          value: "",
+          sensitive: variable.sensitive,
+        })),
+    ]);
+  };
 
   return (
     <SettingsRow
-      title="Variables"
-      description="API keys, base URLs, and other per-instance CLI settings."
+      title={props.nativeCredentials ? "API keys" : "Variables"}
+      description={
+        props.nativeCredentials
+          ? "Choose a provider, then enter your key. Credentials are saved on the selected environment."
+          : "API keys, base URLs, and other per-instance CLI settings."
+      }
       control={
-        <Button type="button" size="sm" variant="outline" onClick={addVariable}>
-          <PlusIcon className="size-3" />
-          Add variable
-        </Button>
+        props.nativeCredentials ? undefined : (
+          <Button type="button" size="sm" variant="outline" onClick={addVariable}>
+            <PlusIcon className="size-3" />
+            Add variable
+          </Button>
+        )
       }
     >
+      {props.nativeCredentials ? (
+        <div className="mt-3 flex flex-wrap gap-2">
+          {MEERKAT_CREDENTIAL_PRESETS.map((preset) => (
+            <Button
+              key={preset.label}
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={preset.variables.every((variable) =>
+                rows.some((row) => row.name === variable.name),
+              )}
+              onClick={() => addPreset(preset)}
+            >
+              <PlusIcon className="size-3" />
+              {preset.label}
+            </Button>
+          ))}
+          <Button type="button" size="sm" variant="ghost" onClick={addVariable}>
+            <PlusIcon className="size-3" />
+            Advanced variable
+          </Button>
+        </div>
+      ) : null}
+      {props.nativeCredentials &&
+      rows.some((row) => /^(RKAT_)?AZURE_OPENAI_(ENDPOINT|API_KEY)$/.test(row.name)) ? (
+        <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+          {MEERKAT_AZURE_CREDENTIAL_GUIDANCE}
+        </p>
+      ) : null}
       {rows.length > 0 ? (
         <div className="mt-3 min-w-0 space-y-2 pb-2">
-          {rows.map((variable, index) => (
-            <div key={variable.id} className="flex min-w-0 flex-wrap items-center gap-1.5">
-              <DraftInput
-                size="sm"
-                font="mono"
-                className="w-full min-w-0 sm:w-44 sm:shrink-0"
-                value={variable.name}
-                onCommit={(name) => updateVariable(variable.id, { name: name.trim() })}
-                placeholder="VARIABLE_NAME"
-                spellCheck={false}
-                aria-label={`Environment variable name ${index + 1}`}
-              />
-              <span className="hidden text-xs text-muted-foreground sm:inline" aria-hidden>
-                =
-              </span>
-              <DraftInput
-                size="sm"
-                font="mono"
-                className="min-w-0 flex-1"
-                value={variable.valueRedacted ? "" : variable.value}
-                onCommit={(value) => updateVariable(variable.id, { value })}
-                type={variable.sensitive ? "password" : undefined}
-                autoComplete="off"
-                placeholder={
-                  variable.valueRedacted ? "Stored secret, enter a new value to replace" : "value"
-                }
-                spellCheck={false}
-                aria-label={`Environment variable value ${index + 1}`}
-              />
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <Button
-                      type="button"
-                      size="icon-micro"
-                      variant="ghost-muted"
-                      onClick={() => {
-                        const sensitive = !variable.sensitive;
-                        updateVariable(variable.id, {
-                          sensitive,
-                          ...(sensitive && variable.valueRedacted === undefined
-                            ? {}
-                            : { valueRedacted: sensitive ? variable.valueRedacted : false }),
-                        });
-                      }}
-                      aria-pressed={variable.sensitive}
-                      aria-label={`Mark environment variable ${variable.name || index + 1} as sensitive`}
-                    >
-                      {variable.sensitive ? (
-                        <LockIcon className="size-3" />
-                      ) : (
-                        <LockOpenIcon className="size-3" />
-                      )}
-                    </Button>
+          {rows.map((variable, index) => {
+            const credential = props.nativeCredentials
+              ? MEERKAT_CREDENTIAL_FIELDS.find((preset) => preset.name === variable.name)
+              : undefined;
+            return (
+              <div key={variable.id} className="flex min-w-0 flex-wrap items-center gap-1.5">
+                {credential ? (
+                  <div className="w-full min-w-0">
+                    <label htmlFor={variable.id} className="text-xs font-medium">
+                      {credential.label}
+                    </label>
+                    <p className="break-all font-mono text-3xs text-muted-foreground">
+                      {variable.name}
+                    </p>
+                  </div>
+                ) : (
+                  <DraftInput
+                    size="sm"
+                    font="mono"
+                    className="w-full min-w-0 sm:w-60 sm:shrink-0"
+                    value={variable.name}
+                    onCommit={(name) => updateVariable(variable.id, { name: name.trim() })}
+                    disabled={variable.valueRedacted === true}
+                    placeholder="VARIABLE_NAME"
+                    spellCheck={false}
+                    aria-label={`Environment variable name ${index + 1}`}
+                  />
+                )}
+                {!credential ? (
+                  <span className="hidden text-xs text-muted-foreground sm:inline" aria-hidden>
+                    =
+                  </span>
+                ) : null}
+                <DraftInput
+                  id={variable.id}
+                  size="sm"
+                  font="mono"
+                  className="min-w-0 flex-1"
+                  value={variable.valueRedacted ? "" : variable.value}
+                  onCommit={(value) => updateVariable(variable.id, { value })}
+                  type={isApiKey(variable.name) || variable.sensitive ? "password" : undefined}
+                  autoComplete="off"
+                  placeholder={
+                    variable.valueRedacted ? "Stored secret, enter a new value to replace" : "value"
                   }
+                  spellCheck={false}
+                  aria-label={credential?.label ?? `Environment variable value ${index + 1}`}
                 />
-                <TooltipPopup side="top">
-                  {variable.sensitive ? "Sensitive, stored separately" : "Plain text"}
-                </TooltipPopup>
-              </Tooltip>
-              <Button
-                type="button"
-                size="icon-micro"
-                variant="ghost-destructive"
-                onClick={() => removeVariable(variable.id)}
-                aria-label={`Remove environment variable ${variable.name || index + 1}`}
-              >
-                <XIcon className="size-3" />
-              </Button>
-            </div>
-          ))}
+                {!isApiKey(variable.name) ? (
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <Button
+                          type="button"
+                          size="icon-micro"
+                          variant="ghost-muted"
+                          disabled={variable.valueRedacted === true}
+                          onClick={() => {
+                            updateVariable(variable.id, { sensitive: !variable.sensitive });
+                          }}
+                          aria-pressed={variable.sensitive}
+                          aria-label={`Mark environment variable ${variable.name || index + 1} as sensitive`}
+                        >
+                          {variable.sensitive ? (
+                            <LockIcon className="size-3" />
+                          ) : (
+                            <LockOpenIcon className="size-3" />
+                          )}
+                        </Button>
+                      }
+                    />
+                    <TooltipPopup side="top">
+                      {variable.sensitive ? "Sensitive, stored separately" : "Plain text"}
+                    </TooltipPopup>
+                  </Tooltip>
+                ) : null}
+                <Button
+                  type="button"
+                  size="icon-micro"
+                  variant="ghost-destructive"
+                  onClick={() => removeVariable(variable.id)}
+                  aria-label={`Remove environment variable ${variable.name || index + 1}`}
+                >
+                  <XIcon className="size-3" />
+                </Button>
+              </div>
+            );
+          })}
           <p className="text-xs text-muted-foreground">
             Sensitive values are stored separately and never returned to the app.
           </p>
+          {rows.some((row) => row.valueRedacted && !isApiKey(row.name)) ? (
+            <p className="text-xs text-muted-foreground">
+              To rename a saved secret or change how it is stored, add a new variable with its
+              value, then remove the original.
+            </p>
+          ) : null}
         </div>
+      ) : null}
+      {props.nativeCredentials ? (
+        <p className="mt-3 text-xs leading-relaxed text-muted-foreground">
+          {MEERKAT_BROWSER_SIGN_IN_GUIDANCE}
+        </p>
       ) : null}
     </SettingsRow>
   );
@@ -366,11 +474,14 @@ interface ProviderInstanceCardProps {
   readonly instance: ProviderInstanceConfig;
   readonly driverOption: DriverOption | undefined;
   readonly liveProvider: ServerProvider | undefined;
+  readonly workspaceReadinessPending?: boolean;
+  readonly workspaceReadinessAccess?: ProviderOperateAccess;
   readonly mode: "list" | "editor";
   readonly selected?: boolean | undefined;
   readonly onSelect?: (() => void) | undefined;
   readonly readOnly?: boolean | undefined;
-  readonly onUpdate: (nextInstance: ProviderInstanceConfig) => void;
+  readonly instanceWritesPending?: boolean;
+  readonly onUpdate: (nextInstance: ProviderInstanceConfig) => void | Promise<boolean>;
   /**
    * Pass `undefined` to hide the delete footer entirely. Built-in default
    * instance slots use `undefined` — they can't be deleted without losing
@@ -387,6 +498,7 @@ interface ProviderInstanceCardProps {
    */
   readonly headerAction?: ReactNode | undefined;
   readonly setup?: ReactNode;
+  readonly credentials?: ReactNode;
   readonly hiddenModels: ReadonlyArray<string>;
   readonly favoriteModels: ReadonlyArray<string>;
   readonly modelOrder: ReadonlyArray<string>;
@@ -422,14 +534,18 @@ export function ProviderInstanceCard({
   instance,
   driverOption,
   liveProvider,
+  workspaceReadinessPending = false,
+  workspaceReadinessAccess = "granted",
   mode,
   selected = false,
   onSelect,
-  readOnly = false,
+  readOnly: configuredReadOnly = false,
+  instanceWritesPending = false,
   onUpdate,
   onDelete,
   headerAction,
   setup,
+  credentials,
   hiddenModels,
   favoriteModels,
   modelOrder,
@@ -440,6 +556,7 @@ export function ProviderInstanceCard({
   onInstallRecommended,
   isUpdating = false,
 }: ProviderInstanceCardProps) {
+  const readOnly = configuredReadOnly || instanceWritesPending;
   const enabled = resolveProviderInstanceEnabled(instance);
   const compatibility = enabled ? liveProvider?.compatibilityAdvisory : undefined;
   // A locally disabled provider reads "Disabled" with a muted dot even if its
@@ -449,7 +566,7 @@ export function ProviderInstanceCard({
     : "disabled";
   const statusStyle = PROVIDER_STATUS_STYLES[statusKey];
   const summary = enabled
-    ? getProviderSummary(liveProvider)
+    ? getProviderSummary(liveProvider, workspaceReadinessPending, workspaceReadinessAccess)
     : { headline: "Disabled", detail: null };
   const authEmail = liveProvider?.auth.email?.trim();
   const isAuthenticated = enabled && liveProvider?.auth.status === "authenticated";
@@ -501,18 +618,21 @@ export function ProviderInstanceCard({
     ? instance.driver
     : null;
   const customModels =
-    instance.driver === "antigravity" ? [] : readConfigCustomModels(instance.config);
+    instance.driver === "antigravity" || driverOption?.modelsManagedByRuntime
+      ? []
+      : readConfigCustomModels(instance.config);
   // Server-returned models may lag behind settings writes. Treat probe
   // models as the source for built-ins only; custom rows come directly
   // from the current instance config so add/remove reflects immediately.
   const modelsForDisplay = deriveProviderModelsForDisplay({
     liveModels: liveProvider?.models,
     customModels,
+    modelsManagedByRuntime: driverOption?.modelsManagedByRuntime ?? false,
   });
   const updateDisplayName = (value: string) => {
     const trimmed = value.trim();
     const { displayName: _omit, ...rest } = instance;
-    onUpdate(
+    return onUpdate(
       trimmed.length > 0
         ? ({ ...rest, displayName: trimmed } as ProviderInstanceConfig)
         : (rest as ProviderInstanceConfig),
@@ -520,13 +640,13 @@ export function ProviderInstanceCard({
   };
 
   const updateEnabled = (value: boolean) => {
-    onUpdate({ ...instance, enabled: value });
+    return onUpdate({ ...instance, enabled: value });
   };
 
   const updateAccentColor = (value: string) => {
     const normalized = normalizeProviderAccentColor(value);
     const { accentColor: _omit, ...rest } = instance;
-    onUpdate(
+    return onUpdate(
       normalized
         ? ({ ...rest, accentColor: normalized } as ProviderInstanceConfig)
         : (rest as ProviderInstanceConfig),
@@ -535,7 +655,7 @@ export function ProviderInstanceCard({
 
   const updateConfig = (nextConfig: Record<string, unknown> | undefined) => {
     const { config: _omit, ...rest } = instance;
-    onUpdate(
+    return onUpdate(
       nextConfig !== undefined
         ? ({ ...rest, config: nextConfig } as ProviderInstanceConfig)
         : (rest as ProviderInstanceConfig),
@@ -549,13 +669,13 @@ export function ProviderInstanceCard({
       next.map(toCustomModelSetting),
     );
     const { config: _omit, ...rest } = instance;
-    onUpdate({ ...rest, config: nextConfig } as ProviderInstanceConfig);
+    return onUpdate({ ...rest, config: nextConfig } as ProviderInstanceConfig);
   };
 
   const updateEnvironment = (environment: ReadonlyArray<ProviderInstanceEnvironmentVariable>) => {
     const cleaned = environment.filter((variable) => variable.name.trim().length > 0);
     const { environment: _omit, ...rest } = instance;
-    onUpdate(
+    return onUpdate(
       cleaned.length > 0
         ? ({ ...rest, environment: cleaned } as ProviderInstanceConfig)
         : (rest as ProviderInstanceConfig),
@@ -612,7 +732,9 @@ export function ProviderInstanceCard({
     isAuthenticated && authEmail ? (
       <>
         {needsAttention ? statusDotNode : null}
-        <span>Authenticated as</span>
+        <span>
+          {instance.driver === "meerkat" ? "Credentials detected for" : "Authenticated as"}
+        </span>
         <ProviderAuthEmail email={authEmail} />
         {authLabel ? <span>· {authLabel}</span> : null}
         {inlineStatusDetail ? (
@@ -862,18 +984,56 @@ export function ProviderInstanceCard({
 
   return (
     <>
-      <SettingsSection title={displayName} icon={titleIconNode} headerAction={editorHeaderAction}>
+      {instance.driver === "meerkat" ? (
+        <SettingsSection
+          id="provider-environment"
+          title="Credentials"
+          icon={titleIconNode}
+          headerAction={editorHeaderAction}
+          inert={configuredReadOnly}
+          aria-disabled={configuredReadOnly || undefined}
+          className={configuredReadOnly ? "opacity-50 select-none" : undefined}
+        >
+          <SettingsRow
+            title="Connection"
+            status={
+              <ProviderStatusDiagnostic detail={statusDiagnostic}>
+                <div
+                  tabIndex={statusDiagnostic ? 0 : undefined}
+                  className="flex min-w-0 flex-wrap items-baseline gap-x-1.5"
+                >
+                  {editorStatusNode}
+                </div>
+              </ProviderStatusDiagnostic>
+            }
+          />
+          {credentials ?? (
+            <ProviderEnvironmentSection
+              nativeCredentials
+              environment={instance.environment ?? []}
+              onChange={updateEnvironment}
+            />
+          )}
+        </SettingsSection>
+      ) : null}
+      <SettingsSection
+        title={instance.driver === "meerkat" ? "Appearance" : displayName}
+        icon={instance.driver === "meerkat" ? undefined : titleIconNode}
+        headerAction={instance.driver === "meerkat" ? undefined : editorHeaderAction}
+      >
         <SettingsRow
           title="Display name"
           status={
-            <ProviderStatusDiagnostic detail={statusDiagnostic}>
-              <div
-                tabIndex={statusDiagnostic ? 0 : undefined}
-                className="flex min-w-0 flex-wrap items-baseline gap-x-1.5"
-              >
-                {editorStatusNode}
-              </div>
-            </ProviderStatusDiagnostic>
+            instance.driver === "meerkat" ? undefined : (
+              <ProviderStatusDiagnostic detail={statusDiagnostic}>
+                <div
+                  tabIndex={statusDiagnostic ? 0 : undefined}
+                  className="flex min-w-0 flex-wrap items-baseline gap-x-1.5"
+                >
+                  {editorStatusNode}
+                </div>
+              </ProviderStatusDiagnostic>
+            )
           }
           control={
             <div
@@ -897,6 +1057,7 @@ export function ProviderInstanceCard({
                 className="min-w-0 flex-1 @min-[32rem]/settings-row:w-56"
                 value={instance.displayName ?? ""}
                 onCommit={updateDisplayName}
+                normalize={(value) => value.trim()}
                 placeholder={driverOption?.label ?? "Instance label"}
                 spellCheck={false}
               />
@@ -914,13 +1075,21 @@ export function ProviderInstanceCard({
         className={readOnly ? "opacity-50 select-none" : undefined}
       >
         {driverOption ? (
-          <ProviderSettingsForm
-            definition={driverOption}
-            value={instance.config}
-            idPrefix={`provider-instance-${instanceId}`}
-            variant="settings"
-            onChange={updateConfig}
-          />
+          <>
+            {driverOption.runtimeDescription ? (
+              <SettingsRow
+                title={driverOption.label}
+                description={driverOption.runtimeDescription}
+              />
+            ) : null}
+            <ProviderSettingsForm
+              definition={driverOption}
+              value={instance.config}
+              idPrefix={`provider-instance-${instanceId}`}
+              variant="settings"
+              onChange={updateConfig}
+            />
+          </>
         ) : (
           <SettingsRow
             title="Driver"
@@ -935,17 +1104,20 @@ export function ProviderInstanceCard({
         )}
       </SettingsSection>
 
-      <SettingsSection
-        title="Environment"
-        inert={readOnly}
-        aria-disabled={readOnly || undefined}
-        className={readOnly ? "opacity-50 select-none" : undefined}
-      >
-        <ProviderEnvironmentSection
-          environment={instance.environment ?? []}
-          onChange={updateEnvironment}
-        />
-      </SettingsSection>
+      {instance.driver !== "meerkat" ? (
+        <SettingsSection
+          id="provider-environment"
+          title="Environment"
+          inert={readOnly}
+          aria-disabled={readOnly || undefined}
+          className={readOnly ? "opacity-50 select-none" : undefined}
+        >
+          <ProviderEnvironmentSection
+            environment={instance.environment ?? []}
+            onChange={updateEnvironment}
+          />
+        </SettingsSection>
+      ) : null}
 
       {driverOption !== undefined ? (
         <SettingsSection
@@ -956,14 +1128,17 @@ export function ProviderInstanceCard({
         >
           <div className="px-3 py-3 sm:px-4">
             <p className="mb-3 text-xs text-muted-foreground">
-              Favorites, visibility, and ordering are saved on this device. Custom models are saved
-              on the selected environment.
+              Favorites, visibility, and ordering are saved on this device.{" "}
+              {driverOption.modelsManagedByRuntime
+                ? "Available models are supplied by Meerkat provider connections."
+                : "Custom models are saved on the selected environment."}
             </p>
             <ProviderModelsSection
               instanceId={instanceId}
               driverKind={driverKind}
               models={modelsForDisplay}
               customModels={customModels}
+              modelsManagedByRuntime={driverOption.modelsManagedByRuntime ?? false}
               hiddenModels={hiddenModels}
               favoriteModels={favoriteModels}
               modelOrder={modelOrder}

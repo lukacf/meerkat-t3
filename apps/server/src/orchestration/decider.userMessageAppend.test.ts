@@ -5,10 +5,13 @@ import {
   EventId,
   MessageId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
+  type ThreadPreparedTurn,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 
 import { decideOrchestrationCommand } from "./decider.ts";
 import { createEmptyReadModel, projectEvent } from "./projector.ts";
@@ -132,6 +135,79 @@ it.layer(NodeServices.layer)("thread.message.user.append", (it) => {
         "thread.message-sent",
         "thread.turn-start-requested",
       ]);
+      expect(directEvents[1]?.payload).toMatchObject({ createdAt });
     }),
+  );
+
+  it.effect.each(["ready", "blocked"] as const)(
+    "timestamps %s prepared admission at execution time without changing the saved message",
+    (phase) =>
+      Effect.gen(function* () {
+        const admittedAt = "2026-08-24T10:05:00.000Z";
+        yield* TestClock.setTime(Date.parse(admittedAt));
+        const readModel = yield* readModelWithThread;
+        const command = {
+          ...turnStartCommand,
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+        };
+        const prepared: ThreadPreparedTurn = {
+          recoveryId: command.commandId,
+          projectId,
+          projectCwd: "/tmp/project",
+          expectedCwd: "/tmp/project-worktree",
+          providerIdentity: {
+            driverKind: ProviderDriverKind.make("codex"),
+            continuationKey: "test-codex",
+          },
+          command,
+          phase,
+          setup: "finished",
+          ...(phase === "blocked" ? { reason: "Connect the checkout account." } : {}),
+          createdAt,
+          updatedAt: "2026-08-24T10:01:00.000Z",
+        };
+        const set = yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.prepared-turn.set",
+            commandId: CommandId.make("command-prepare"),
+            threadId,
+            preparedTurn: prepared,
+            createdAt,
+          },
+          readModel,
+        });
+        let withPrepared = readModel;
+        for (const [index, event] of (Array.isArray(set) ? set : [set]).entries()) {
+          withPrepared = yield* projectEvent(withPrepared, { ...event, sequence: index + 3 });
+        }
+        const planned = yield* decideOrchestrationCommand({ command, readModel: withPrepared });
+        const events = Array.isArray(planned) ? planned : [planned];
+        expect(events).toHaveLength(1);
+        expect(events[0]).toMatchObject({
+          type: "thread.turn-start-requested",
+          commandId: command.commandId,
+          occurredAt: admittedAt,
+          payload: {
+            threadId,
+            messageId,
+            modelSelection: command.modelSelection,
+            createdAt: admittedAt,
+          },
+        });
+        expect(withPrepared.threads[0]?.preparedTurn?.command).toEqual(command);
+        expect(command.createdAt).toBe(createdAt);
+        const projected = yield* projectEvent(withPrepared, {
+          ...events[0]!,
+          sequence: withPrepared.snapshotSequence + 1,
+        });
+        expect(projected.threads[0]).toMatchObject({ updatedAt: admittedAt, preparedTurn: null });
+        expect(projected.threads[0]?.messages).toHaveLength(1);
+        expect(projected.threads[0]?.messages[0]).toMatchObject({
+          id: messageId,
+          text: command.message.text,
+          createdAt,
+          updatedAt: createdAt,
+        });
+      }),
   );
 });

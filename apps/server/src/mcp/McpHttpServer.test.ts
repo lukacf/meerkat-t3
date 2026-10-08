@@ -805,6 +805,12 @@ it.effect("registers annotated tools and preserves authenticated request context
         tabId,
       });
 
+      expect(status.structuredContent).toHaveProperty("hostConnectionId");
+      const statusText = status.content.find((content) => content.type === "text");
+      expect(statusText?.type === "text" ? decodeJsonText(statusText.text) : null).toHaveProperty(
+        "hostConnectionId",
+      );
+
       const malformed = yield* server
         .callTool({ name: "preview_click", arguments: { selector: "" } })
         .pipe(

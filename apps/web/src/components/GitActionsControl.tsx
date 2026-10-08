@@ -1,5 +1,9 @@
 import { useAtomValue } from "@effect/atom-react";
-import { type ScopedThreadRef } from "@t3tools/contracts";
+import {
+  isProviderAvailable,
+  type SourceControlPublishPendingResult,
+  type ScopedThreadRef,
+} from "@t3tools/contracts";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
@@ -7,6 +11,7 @@ import {
 import type {
   GitActionProgressEvent,
   GitRunStackedActionResult,
+  GitRunStackedActionInput,
   GitStackedAction,
   SourceControlCloneProtocol,
   SourceControlProviderDiscoveryItem,
@@ -27,6 +32,7 @@ import {
   useState,
 } from "react";
 import { flushSync } from "react-dom";
+import { usePublishRepositoryRecovery } from "./publishRepositoryRecovery";
 import {
   CheckIcon,
   ChevronDownIcon,
@@ -53,13 +59,23 @@ import { cn } from "~/lib/utils";
 import {
   buildGitActionProgressStages,
   buildMenuItems,
+  canContinueOnFeatureBranch,
+  captureGitActionFollowupIntent,
+  captureGitActionIntent,
+  clearCommittedMessageDraft,
+  isGitActionIntentCurrent,
+  manualPrSubmissionBlocker,
+  type CommitMessageDrafts,
   type GitActionIconName,
   type GitActionMenuItem,
+  type GitActionIntent,
   type GitQuickAction,
   type DefaultBranchConfirmableAction,
   requiresDefaultBranchConfirmation,
   resolveDefaultBranchActionDialogCopy,
+  resolveGeneratedDraftAction,
   resolveLiveThreadBranchUpdate,
+  resolvePublishRepositoryEntry,
   resolveThreadBranchMetadataPatch,
   resolveQuickAction,
   resolveThreadBranchUpdate,
@@ -93,6 +109,7 @@ import { Popover, PopoverPopup, PopoverTrigger } from "~/components/ui/popover";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import { Textarea } from "~/components/ui/textarea";
 import { stackedThreadToast, toastManager, type ThreadToastData } from "~/components/ui/toast";
+import { showCreatedPullRequestLinkWarning } from "./createdPullRequestLinkToast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import { useOpenInPreferredEditor } from "~/editorPreferences";
 import {
@@ -115,9 +132,11 @@ import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import { getSourceControlPresentation } from "~/sourceControlPresentation";
 import { useOpenLink } from "~/browser/useOpenLink";
 import { useOpenPrLink } from "~/lib/openPullRequestLink";
+import { useGitAuthorSetup } from "./GitAuthorDialog";
 
 interface GitActionsControlProps {
   presentation?: "toolbar" | "menu";
+  environmentId?: ScopedThreadRef["environmentId"];
   gitCwd: string | null;
   activeThreadRef: ScopedThreadRef | null;
   draftId?: DraftId;
@@ -128,11 +147,12 @@ interface GitActionsControlProps {
   onOpenPullRequest?: ((number: number) => void) | undefined;
 }
 
-interface PendingDefaultBranchAction {
+interface PendingDefaultBranchAction extends GitActionIntent {
   action: DefaultBranchConfirmableAction;
   branchName: string;
   includesCommit: boolean;
   commitMessage?: string;
+  pullRequest?: GitRunStackedActionInput["pullRequest"];
   onConfirmed?: () => void;
   filePaths?: string[];
 }
@@ -159,12 +179,15 @@ interface ActiveGitActionProgress {
 interface RunGitActionWithToastInput {
   action: GitStackedAction;
   commitMessage?: string;
+  pullRequest?: GitRunStackedActionInput["pullRequest"];
   onConfirmed?: () => void;
   skipDefaultBranchPrompt?: boolean;
   statusOverride?: VcsStatusResult | null;
   featureBranch?: boolean;
   progressToastId?: GitActionToastId;
   filePaths?: string[];
+  authorVerifiedFor?: string;
+  intent?: GitActionIntent;
 }
 
 const GIT_STATUS_WINDOW_REFRESH_DEBOUNCE_MS = 250;
@@ -412,6 +435,11 @@ interface PublishRepositoryDialogProps {
   /** Thread the dialog was opened from, so the new repository can open beside it. */
   readonly threadRef: ScopedThreadRef | null;
   readonly gitCwd: string;
+  readonly recoveries: ReadonlyArray<SourceControlPublishPendingResult>;
+  readonly recoveryReadable: boolean;
+  readonly recoverySaveError: string | null;
+  readonly onResult: (result: SourceControlPublishRepositoryResult) => void;
+  readonly canCreate: () => boolean;
 }
 
 function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
@@ -431,13 +459,17 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
   const [publishVisibility, setPublishVisibility] =
     useState<SourceControlRepositoryVisibility>("private");
   const [publishRemoteName, setPublishRemoteName] = useState("origin");
-  const [publishProtocol, setPublishProtocol] = useState<SourceControlCloneProtocol>("ssh");
-  const [publishWizardStep, setPublishWizardStep] = useState(0);
-  const [publishAdvancedOpen, setPublishAdvancedOpen] = useState(false);
-  const [publishError, setPublishError] = useState<string | null>(null);
-  const [publishResult, setPublishResult] = useState<SourceControlPublishRepositoryResult | null>(
+  const [publishProtocolOverride, setPublishProtocol] = useState<SourceControlCloneProtocol | null>(
     null,
   );
+  const [requestedWizardStep, setPublishWizardStep] = useState(0);
+  const [publishAdvancedOpen, setPublishAdvancedOpen] = useState(false);
+  const [publishError, setPublishError] = useState<string | null>(null);
+  const [lastPublishResult, setPublishResult] =
+    useState<SourceControlPublishRepositoryResult | null>(null);
+  const publishResult = lastPublishResult ?? props.recoveries[0] ?? null;
+  const publishRecovery = publishResult && "resume" in publishResult ? publishResult : null;
+  const publishWizardStep = publishResult ? 2 : requestedWizardStep;
   const sourceControlScope = useMemo(
     () => ({
       environmentId: props.environmentId,
@@ -493,9 +525,14 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
     (option) => publishProviderReadiness[option.value].ready,
   )?.value;
   const publishProvider =
-    selectedPublishProvider !== null && publishProviderReadiness[selectedPublishProvider].ready
-      ? selectedPublishProvider
-      : (firstReadyPublishProvider ?? selectedPublishProvider ?? "github");
+    publishResult && isPublishProviderKind(publishResult.repository.provider)
+      ? publishResult.repository.provider
+      : selectedPublishProvider !== null && publishProviderReadiness[selectedPublishProvider].ready
+        ? selectedPublishProvider
+        : (firstReadyPublishProvider ?? selectedPublishProvider ?? "github");
+  const publishProtocol =
+    publishProtocolOverride ??
+    (publishProvider === "github" || publishProvider === "forgejo" ? "https" : "ssh");
   const selectedPublishProviderReadiness = publishProviderReadiness[publishProvider];
   const publishRepositoryPrefill = publishAccountByProvider[publishProvider]
     ? `${publishAccountByProvider[publishProvider]}/`
@@ -520,6 +557,8 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
   ] as const;
 
   const canSubmitPublishRepository = useMemo(() => {
+    if (publishRecovery) return props.environmentId !== null && !publishRepositoryAction.isPending;
+    if (!props.recoveryReadable || props.recoverySaveError !== null) return false;
     if (!selectedPublishProviderReadiness.ready) return false;
     if (publishRepositoryAction.isPending) return false;
     const repositoryParts = publishRepository.trim().split("/");
@@ -527,22 +566,32 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
     const rest = repositoryParts.slice(1);
     const name = rest.join("/").trim();
     return owner.length > 0 && name.length > 0;
-  }, [publishRepository, publishRepositoryAction.isPending, selectedPublishProviderReadiness]);
+  }, [
+    props.environmentId,
+    props.recoveryReadable,
+    props.recoverySaveError,
+    publishRecovery,
+    publishRepository,
+    publishRepositoryAction.isPending,
+    selectedPublishProviderReadiness,
+  ]);
 
   const submitPublishRepository = useCallback(() => {
     if (!canSubmitPublishRepository) {
       return;
     }
+    if (!publishRecovery && !props.canCreate()) return;
 
     setPublishError(null);
 
     void (async () => {
       const result = await publishRepositoryAction.run({
         provider: publishProvider,
-        repository: publishRepository.trim(),
+        repository: publishRecovery?.repository.nameWithOwner ?? publishRepository.trim(),
         visibility: publishVisibility,
         remoteName: publishRemoteName.trim() || "origin",
         protocol: publishProtocol,
+        ...(publishRecovery ? { resume: publishRecovery.resume } : {}),
       });
 
       if (result._tag === "Failure") {
@@ -554,6 +603,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
       }
 
       flushSync(() => {
+        props.onResult(result.value);
         setPublishResult(result.value);
         setPublishWizardStep(2);
       });
@@ -562,6 +612,9 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
     canSubmitPublishRepository,
     props.environmentId,
     props.gitCwd,
+    props.onResult,
+    props.canCreate,
+    publishRecovery,
     publishProtocol,
     publishProvider,
     publishRemoteName,
@@ -590,9 +643,10 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
   );
 
   const openSourceControlSettings = useCallback(() => {
+    if (props.environmentId === null) return;
     handleOpenChange(false);
-    void navigate({ to: "/settings/source-control" });
-  }, [handleOpenChange, navigate]);
+    void navigate({ to: "/settings/source-control", search: { machine: props.environmentId } });
+  }, [handleOpenChange, navigate, props.environmentId]);
 
   return (
     <Dialog open={props.open} onOpenChange={handleOpenChange}>
@@ -616,6 +670,29 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
         </WizardHeader>
 
         <WizardPanel>
+          {props.recoverySaveError ? (
+            <p role="alert" className="mb-3 text-xs text-warning">
+              {props.recoverySaveError}
+            </p>
+          ) : null}
+          {props.recoveries.length > 1 || (!publishRecovery && props.recoveries.length > 0) ? (
+            <div className="mb-3 flex flex-wrap gap-2">
+              {props.recoveries.map((recovery) => (
+                <Button
+                  key={`${recovery.repository.url}:${recovery.remoteName}`}
+                  variant="outline"
+                  size="sm"
+                  disabled={publishRepositoryAction.isPending}
+                  onClick={() => {
+                    setPublishResult(recovery);
+                    setPublishError(null);
+                  }}
+                >
+                  Finish {recovery.repository.nameWithOwner}
+                </Button>
+              ))}
+            </div>
+          ) : null}
           <div className={cn("space-y-2", publishWizardStep !== 0 && "hidden")}>
             <span id="publish-provider-cards-label" className="text-xs font-medium text-foreground">
               Provider
@@ -858,8 +935,17 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
             {publishResult ? (
               <>
                 <div className="flex flex-col items-center gap-2 py-1 text-center">
-                  <span className="grid size-8 place-items-center rounded-full bg-success/15 text-success">
-                    <CheckIcon className="size-4" aria-hidden />
+                  <span
+                    className={cn(
+                      "grid size-8 place-items-center rounded-full",
+                      publishRecovery ? "bg-warning/15 text-warning" : "bg-success/15 text-success",
+                    )}
+                  >
+                    {publishRecovery ? (
+                      <InfoIcon className="size-4" aria-hidden />
+                    ) : (
+                      <CheckIcon className="size-4" aria-hidden />
+                    )}
                   </span>
                   <h3 className="text-sm font-semibold text-foreground">
                     {publishResult.status === "pushed"
@@ -869,9 +955,25 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
                   <p className="max-w-xs text-pretty text-xs text-muted-foreground">
                     {publishResult.status === "pushed"
                       ? `${publishResult.branch} is now live on ${publishProviderLabel}.`
-                      : `Remote "${publishResult.remoteName}" is set up. Make a commit and push it to share your code.`}
+                      : publishResult.status === "remote_added"
+                        ? `Remote "${publishResult.remoteName}" is set up. Make a commit and push it to share your code.`
+                        : publishRecovery?.detail}
                   </p>
                 </div>
+                {publishRecovery ? (
+                  <div className="space-y-1 text-xs text-muted-foreground">
+                    <p>Finish in this checkout. The existing repository will be reused.</p>
+                    <p className="break-all font-mono">{publishRecovery.resume.cwd}</p>
+                    <p className="break-all font-mono">
+                      {publishRecovery.remoteName}: {publishRecovery.remoteUrl}
+                    </p>
+                  </div>
+                ) : null}
+                {publishError ? (
+                  <p role="alert" className="text-xs text-destructive">
+                    {publishError}
+                  </p>
+                ) : null}
                 <div className="flex items-center gap-2 rounded-lg border border-input bg-muted/40 px-3 py-2 dark:border-transparent dark:bg-white/[0.035]">
                   <currentPublishProvider.Icon className="size-3.5 shrink-0 text-muted-foreground" />
                   <span className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
@@ -899,7 +1001,28 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
 
         <WizardFooter>
           {publishWizardStep === 2 ? (
-            <Button onClick={() => handleOpenChange(false)}>Done</Button>
+            <>
+              <Button
+                variant={publishRecovery ? "outline" : "default"}
+                disabled={publishRepositoryAction.isPending}
+                onClick={() => handleOpenChange(false)}
+              >
+                {publishRecovery ? "Close" : "Done"}
+              </Button>
+              {publishRecovery ? (
+                <Button disabled={!canSubmitPublishRepository} onClick={submitPublishRepository}>
+                  {publishRepositoryAction.isPending ? (
+                    <>
+                      <Spinner size="sm" aria-hidden /> Finishing...
+                    </>
+                  ) : publishRecovery.status === "remote_pending" ? (
+                    "Retry connection"
+                  ) : (
+                    "Retry push"
+                  )}
+                </Button>
+              ) : null}
+            </>
           ) : (
             <>
               <Button
@@ -944,6 +1067,7 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
 
 export default function GitActionsControl({
   presentation = "toolbar",
+  environmentId,
   gitCwd,
   activeThreadRef,
   draftId,
@@ -953,8 +1077,21 @@ export default function GitActionsControl({
     threadEnvironment.updateMetadata,
     "thread branch metadata update",
   );
-  const activeEnvironmentId = activeThreadRef?.environmentId ?? null;
+  const activeEnvironmentId = activeThreadRef?.environmentId ?? environmentId ?? null;
+  const publishRecoveryKey = `t3code:publish-recovery:v1:${JSON.stringify([activeEnvironmentId, gitCwd])}`;
+  const publishRecovery = usePublishRepositoryRecovery({
+    environmentId: activeEnvironmentId,
+    cwd: gitCwd ?? "",
+  });
   const serverConfig = useAtomValue(serverEnvironment.configValueAtom(activeEnvironmentId));
+  const requiresManualCommitMessage =
+    serverConfig !== null &&
+    !serverConfig.providers.some(
+      (provider) =>
+        provider.enabled &&
+        isProviderAvailable(provider) &&
+        provider.supportsTextGeneration !== false,
+    );
   const openInPreferredEditor = useOpenInPreferredEditor(
     activeEnvironmentId,
     serverConfig?.availableEditors ?? [],
@@ -975,7 +1112,16 @@ export default function GitActionsControl({
   const activeServerThread = useThreadShell(activeThreadRef);
   const setDraftThreadContext = useComposerDraftStore((store) => store.setDraftThreadContext);
   const [isCommitDialogOpen, setIsCommitDialogOpen] = useState(false);
-  const [dialogCommitMessage, setDialogCommitMessage] = useState("");
+  const [commitMessageDrafts, setCommitMessageDrafts] = useState<CommitMessageDrafts>({});
+  const commitDraftScopeKey = JSON.stringify([activeEnvironmentId, gitCwd]);
+  const dialogCommitMessage = commitMessageDrafts[commitDraftScopeKey] ?? "";
+  const isCommitMessageMissing = requiresManualCommitMessage && !dialogCommitMessage.trim();
+  const setDialogCommitMessage = (message: string) =>
+    setCommitMessageDrafts((current) => ({ ...current, [commitDraftScopeKey]: message }));
+  const [isManualPrDialogOpen, setIsManualPrDialogOpen] = useState(false);
+  const [manualPrTitle, setManualPrTitle] = useState("");
+  const [manualPrBody, setManualPrBody] = useState("");
+  const [manualPrDraft, setManualPrDraft] = useState(true);
   const [excludedFiles, setExcludedFiles] = useState<ReadonlySet<string>>(new Set());
   const [isEditingFiles, setIsEditingFiles] = useState(false);
   const [isPublishDialogOpen, setIsPublishDialogOpen] = useState(false);
@@ -986,6 +1132,30 @@ export default function GitActionsControl({
     () => ({ environmentId: activeEnvironmentId, cwd: gitCwd }),
     [activeEnvironmentId, gitCwd],
   );
+  const actionOwner = JSON.stringify([
+    activeEnvironmentId,
+    gitCwd,
+    activeThreadRef?.threadId ?? null,
+    draftId ?? null,
+  ]);
+  const authorSetupEnabled = serverConfig?.environment.capabilities.gitIdentity === true;
+  const authorSetup = useGitAuthorSetup({
+    environmentId: activeEnvironmentId,
+    cwd: gitCwd,
+    serverLabel: serverConfig?.environment.label ?? "Selected server",
+    enabled: authorSetupEnabled,
+    contextKey: actionOwner,
+    onActionError: (cause) => {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Action failed",
+          description: cause instanceof Error ? cause.message : "An error occurred.",
+          ...(threadToastData !== undefined ? { data: threadToastData } : {}),
+        }),
+      );
+    },
+  });
   let runGitActionWithToast: (input: RunGitActionWithToastInput) => Promise<void>;
 
   const updateActiveProgressToast = useCallback(() => {
@@ -1081,6 +1251,7 @@ export default function GitActionsControl({
   const isRepo = gitStatus?.isRepo ?? true;
   const hasPrimaryRemote = gitStatus?.hasPrimaryRemote ?? false;
   const gitStatusForActions = gitStatus;
+  const manualPrBlocker = manualPrSubmissionBlocker(gitStatusForActions);
 
   const allFiles = gitStatusForActions?.workingTree.files ?? [];
   const selectedFiles = allFiles.filter((f) => !excludedFiles.has(f.path));
@@ -1090,10 +1261,11 @@ export default function GitActionsControl({
   const initAction = useVcsInitAction(sourceControlScope);
   const runImmediateGitAction = useGitStackedAction(sourceControlScope);
   const pullAction = useVcsPullAction(sourceControlScope);
-  const isGitActionRunning = useSourceControlActionRunning(
+  const isSourceControlRunning = useSourceControlActionRunning(
     sourceControlScope,
     RUNNING_SOURCE_CONTROL_ACTIONS,
   );
+  const isGitActionRunning = isSourceControlRunning || authorSetup.pending;
   const isSelectingWorktreeBase =
     !activeServerThread &&
     activeDraftThread?.envMode === "worktree" &&
@@ -1138,6 +1310,7 @@ export default function GitActionsControl({
   const quickActionDisabledReason = quickAction.disabled
     ? (quickAction.hint ?? "This action is currently unavailable.")
     : null;
+  const generatedDraftAction = resolveGeneratedDraftAction(gitStatusForActions, isGitActionRunning);
   const pendingDefaultBranchActionCopy = pendingDefaultBranchAction
     ? resolveDefaultBranchActionDialogCopy({
         action: pendingDefaultBranchAction.action,
@@ -1146,6 +1319,26 @@ export default function GitActionsControl({
         terminology: changeRequestTerminology,
       })
     : null;
+  const canContinuePendingOnFeatureBranch =
+    pendingDefaultBranchAction !== null &&
+    canContinueOnFeatureBranch(
+      pendingDefaultBranchAction.action,
+      pendingDefaultBranchAction.includesCommit,
+    );
+
+  useEffect(() => {
+    if (
+      pendingDefaultBranchAction &&
+      !isGitActionIntentCurrent(pendingDefaultBranchAction, actionOwner, gitStatusForActions)
+    ) {
+      setPendingDefaultBranchAction(null);
+      toastManager.add({
+        type: "info",
+        title: "Repository changed",
+        description: "Review the selected checkout and branch, then choose the Git action again.",
+      });
+    }
+  }, [pendingDefaultBranchAction, actionOwner, gitStatusForActions]);
 
   useEffect(() => {
     const interval = window.setInterval(() => {
@@ -1227,21 +1420,55 @@ export default function GitActionsControl({
     async ({
       action,
       commitMessage,
+      pullRequest,
       onConfirmed,
       skipDefaultBranchPrompt = false,
       statusOverride,
       featureBranch = false,
       progressToastId,
       filePaths,
+      authorVerifiedFor,
+      intent: capturedIntent,
     }: RunGitActionWithToastInput) => {
+      if (authorVerifiedFor !== undefined && authorVerifiedFor !== actionOwner) return;
+      const submittedCommitDraftScope = commitDraftScopeKey;
       const actionStatus = statusOverride ?? gitStatusForActions;
-      const actionBranch = actionStatus?.refName ?? null;
+      if (
+        capturedIntent &&
+        !isGitActionIntentCurrent(capturedIntent, actionOwner, gitStatusForActions)
+      ) {
+        toastManager.add({
+          type: "info",
+          title: "Review the current repository",
+          description:
+            "The checkout or branch changed, or its status is unavailable. Choose the Git action again.",
+          data: threadToastData,
+        });
+        return;
+      }
+      const intent =
+        capturedIntent ??
+        captureGitActionIntent({
+          action,
+          owner: actionOwner,
+          status: actionStatus,
+          featureBranch,
+          ...(filePaths ? { filePaths } : {}),
+        });
+      if (!intent) {
+        toastManager.add({
+          type: "info",
+          title: "No files selected for commit",
+          description: "Review the current changes and select files before committing.",
+          data: threadToastData,
+        });
+        return;
+      }
+      action = intent.action;
+      filePaths = intent.filePaths;
+      const actionBranch = intent.branchName;
       const actionIsDefaultBranch = featureBranch ? false : isDefaultRef;
-      const actionCanCommit =
-        action === "commit" || action === "commit_push" || action === "commit_push_pr";
-      const includesCommit =
-        actionCanCommit &&
-        (action === "commit" || !!actionStatus?.hasWorkingTreeChanges || featureBranch);
+      const includesCommit = intent.includesCommit;
       if (
         !skipDefaultBranchPrompt &&
         requiresDefaultBranchConfirmation(action, actionIsDefaultBranch) &&
@@ -1256,13 +1483,34 @@ export default function GitActionsControl({
           return;
         }
         setPendingDefaultBranchAction({
+          ...intent,
           action,
           branchName: actionBranch,
           includesCommit,
           ...(commitMessage ? { commitMessage } : {}),
+          ...(pullRequest ? { pullRequest } : {}),
           ...(onConfirmed ? { onConfirmed } : {}),
           ...(filePaths ? { filePaths } : {}),
         });
+        return;
+      }
+      if (includesCommit && authorSetupEnabled && authorVerifiedFor !== actionOwner) {
+        const owner = actionOwner;
+        await authorSetup.runAfterAuthor(() =>
+          runGitActionWithToast({
+            action,
+            ...(commitMessage ? { commitMessage } : {}),
+            ...(pullRequest ? { pullRequest } : {}),
+            ...(onConfirmed ? { onConfirmed } : {}),
+            skipDefaultBranchPrompt,
+            ...(statusOverride !== undefined ? { statusOverride } : {}),
+            featureBranch,
+            ...(progressToastId !== undefined ? { progressToastId } : {}),
+            ...(filePaths ? { filePaths } : {}),
+            authorVerifiedFor: owner,
+            intent,
+          }),
+        );
         return;
       }
       onConfirmed?.();
@@ -1278,6 +1526,8 @@ export default function GitActionsControl({
           (!actionStatus?.hasUpstream || (actionStatus?.aheadCount ?? 0) > 0),
       });
       const scopedToastData = threadToastData ? { ...threadToastData } : undefined;
+      const submittedThreadRef =
+        activeServerThread && activeThreadRef ? { ...activeThreadRef } : null;
       const actionId = randomUUID();
       const resolvedProgressToastId =
         progressToastId ??
@@ -1370,7 +1620,9 @@ export default function GitActionsControl({
       const result = await runImmediateGitAction.run({
         actionId,
         action,
+        ...(intent.branchName !== undefined ? { expectedBranch: intent.branchName } : {}),
         ...(commitMessage ? { commitMessage } : {}),
+        ...(pullRequest ? { pullRequest } : {}),
         ...(featureBranch ? { featureBranch } : {}),
         ...(filePaths ? { filePaths } : {}),
         // A pull request the action opens is linked to the thread it ran beside. Drafts
@@ -1400,6 +1652,16 @@ export default function GitActionsControl({
       }
 
       const actionResult = result.value;
+      if (commitMessage) {
+        setCommitMessageDrafts((current) =>
+          clearCommittedMessageDraft(
+            current,
+            submittedCommitDraftScope,
+            commitMessage,
+            actionResult.commit.status,
+          ),
+        );
+      }
       syncThreadBranchAfterGitAction(actionResult);
       const closeResultToast = () => {
         toastManager.close(resolvedProgressToastId);
@@ -1411,15 +1673,19 @@ export default function GitActionsControl({
         onClick: (event: MouseEvent<HTMLButtonElement>) => void;
       } | null = null;
       if (toastCta.kind === "run_action") {
-        toastActionProps = {
-          children: toastCta.label,
-          onClick: () => {
-            closeResultToast();
-            void runGitActionWithToast({
-              action: toastCta.action.kind,
-            });
-          },
-        };
+        const followupIntent = captureGitActionFollowupIntent(intent, actionResult);
+        if (followupIntent) {
+          toastActionProps = {
+            children: toastCta.label,
+            onClick: () => {
+              closeResultToast();
+              void runGitActionWithToast({
+                action: followupIntent.action,
+                intent: followupIntent,
+              });
+            },
+          };
+        }
       } else if (toastCta.kind === "open_pr") {
         toastActionProps = {
           children: toastCta.label,
@@ -1428,6 +1694,29 @@ export default function GitActionsControl({
             openPrLink(event, toastCta.url);
           },
         };
+      }
+
+      const prLinkStatus = actionResult.pr.linkStatus;
+      if (prLinkStatus === "pending" || prLinkStatus === "not_saved") {
+        const prUrl = actionResult.pr.url ?? (toastCta.kind === "open_pr" ? toastCta.url : null);
+        showCreatedPullRequestLinkWarning({
+          toastId: resolvedProgressToastId,
+          status: prLinkStatus,
+          threadRef: submittedThreadRef,
+          prUrl,
+          prNumber: actionResult.pr.number,
+          ...(toastCta.kind === "open_pr"
+            ? {
+                actionProps: {
+                  children: toastCta.label,
+                  onClick: (event: MouseEvent<HTMLButtonElement>) =>
+                    openPrLink(event, toastCta.url, submittedThreadRef ?? undefined),
+                },
+              }
+            : {}),
+          ...(scopedToastData !== undefined ? { data: scopedToastData } : {}),
+        });
+        return;
       }
 
       const successToastData = {
@@ -1461,44 +1750,49 @@ export default function GitActionsControl({
 
   const continuePendingDefaultBranchAction = () => {
     if (!pendingDefaultBranchAction) return;
-    const { action, commitMessage, onConfirmed, filePaths } = pendingDefaultBranchAction;
+    const { action, commitMessage, pullRequest, onConfirmed, filePaths } =
+      pendingDefaultBranchAction;
     setPendingDefaultBranchAction(null);
     void runGitActionWithToast({
       action,
       ...(commitMessage ? { commitMessage } : {}),
+      ...(pullRequest ? { pullRequest } : {}),
       ...(onConfirmed ? { onConfirmed } : {}),
       ...(filePaths ? { filePaths } : {}),
       skipDefaultBranchPrompt: true,
+      intent: pendingDefaultBranchAction,
     });
   };
 
   const checkoutFeatureBranchAndContinuePendingAction = () => {
-    if (!pendingDefaultBranchAction) return;
-    const { action, commitMessage, onConfirmed, filePaths } = pendingDefaultBranchAction;
+    if (!pendingDefaultBranchAction || !canContinuePendingOnFeatureBranch) return;
+    const { action, commitMessage, pullRequest, onConfirmed, filePaths } =
+      pendingDefaultBranchAction;
     setPendingDefaultBranchAction(null);
     void runGitActionWithToast({
       action,
       ...(commitMessage ? { commitMessage } : {}),
+      ...(pullRequest ? { pullRequest } : {}),
       ...(onConfirmed ? { onConfirmed } : {}),
       ...(filePaths ? { filePaths } : {}),
       featureBranch: true,
       skipDefaultBranchPrompt: true,
+      intent: pendingDefaultBranchAction,
     });
   };
 
   const runDialogActionOnNewBranch = () => {
-    if (!isCommitDialogOpen) return;
+    if (!isCommitDialogOpen || isCommitMessageMissing) return;
     const commitMessage = dialogCommitMessage.trim();
 
     setIsCommitDialogOpen(false);
-    setDialogCommitMessage("");
     setExcludedFiles(new Set());
     setIsEditingFiles(false);
 
     void runGitActionWithToast({
       action: "commit",
       ...(commitMessage ? { commitMessage } : {}),
-      ...(!allSelected ? { filePaths: selectedFiles.map((f) => f.path) } : {}),
+      filePaths: selectedFiles.map((f) => f.path),
       featureBranch: true,
       skipDefaultBranchPrompt: true,
     });
@@ -1562,6 +1856,12 @@ export default function GitActionsControl({
       });
       return;
     }
+    if (quickAction.action === "commit" && requiresManualCommitMessage) {
+      setExcludedFiles(new Set());
+      setIsEditingFiles(false);
+      setIsCommitDialogOpen(true);
+      return;
+    }
     if (quickAction.action) {
       void runGitActionWithToast({ action: quickAction.action });
     }
@@ -1587,16 +1887,15 @@ export default function GitActionsControl({
   };
 
   const runDialogAction = () => {
-    if (!isCommitDialogOpen) return;
+    if (!isCommitDialogOpen || isCommitMessageMissing) return;
     const commitMessage = dialogCommitMessage.trim();
     setIsCommitDialogOpen(false);
-    setDialogCommitMessage("");
     setExcludedFiles(new Set());
     setIsEditingFiles(false);
     void runGitActionWithToast({
       action: "commit",
       ...(commitMessage ? { commitMessage } : {}),
-      ...(!allSelected ? { filePaths: selectedFiles.map((f) => f.path) } : {}),
+      filePaths: selectedFiles.map((f) => f.path),
     });
   };
 
@@ -1630,7 +1929,25 @@ export default function GitActionsControl({
     [gitCwd, openInPreferredEditor, threadToastData],
   );
 
-  const canPublishRepository = isRepo && gitStatusForActions !== null && !hasPrimaryRemote;
+  const publishEntry = resolvePublishRepositoryEntry({
+    environmentId: activeEnvironmentId,
+    cwd: gitCwd,
+    gitStatus: gitStatusForActions,
+    pendingRecoveryCount: publishRecovery.pending.length,
+    recoveryReadable: publishRecovery.readable,
+  });
+  const publishMenuItem = publishEntry ? (
+    <MenuItem
+      density={presentation === "menu" ? "touch" : "default"}
+      disabled={isGitActionRunning}
+      onClick={() => setIsPublishDialogOpen(true)}
+    >
+      <CloudUploadIcon />
+      <MenuItemLabel>
+        {publishEntry === "resume" ? "Finish publishing..." : "Publish repository..."}
+      </MenuItemLabel>
+    </MenuItem>
+  ) : null;
 
   const initializeGit = () => {
     void (async () => {
@@ -1651,6 +1968,16 @@ export default function GitActionsControl({
   };
   const gitItems = (
     <>
+      {authorSetupEnabled ? (
+        <MenuItem
+          density={presentation === "menu" ? "touch" : "default"}
+          disabled={isGitActionRunning}
+          onClick={() => void authorSetup.open()}
+        >
+          <GitCommitIcon />
+          <MenuItemLabel>Commit author...</MenuItemLabel>
+        </MenuItem>
+      ) : null}
       {gitActionMenuItems.map((item) => {
         const disabledReason = getMenuActionDisabledReason({
           item,
@@ -1707,18 +2034,32 @@ export default function GitActionsControl({
           </MenuItem>
         );
       })}
-      {canPublishRepository ? (
+      {generatedDraftAction && (
+        <MenuItem
+          density={presentation === "menu" ? "touch" : "default"}
+          disabled={generatedDraftAction.disabled}
+          onClick={() => {
+            void runGitActionWithToast({
+              action: generatedDraftAction.action,
+              pullRequest: { draft: true },
+            });
+          }}
+        >
+          <SourceControlIcon className="size-4" />
+          <MenuItemLabel>{generatedDraftAction.label}</MenuItemLabel>
+        </MenuItem>
+      )}
+      {hasPrimaryRemote && gitStatusForActions?.refName && (
         <MenuItem
           density={presentation === "menu" ? "touch" : "default"}
           disabled={isGitActionRunning}
-          onClick={() => {
-            setIsPublishDialogOpen(true);
-          }}
+          onClick={() => setIsManualPrDialogOpen(true)}
         >
-          <CloudUploadIcon />
-          <MenuItemLabel>Publish repository...</MenuItemLabel>
+          <SourceControlIcon className="size-4" />
+          <MenuItemLabel>Write {changeRequestTerminology.singular}...</MenuItemLabel>
         </MenuItem>
-      ) : null}
+      )}
+      {publishMenuItem}
       {gitStatusForActions?.refName === null && (
         <p className="px-2 py-1.5 text-xs text-warning">
           Detached HEAD: create and check out a branch to enable push and pull request actions.
@@ -1739,7 +2080,22 @@ export default function GitActionsControl({
 
   return (
     <>
-      {presentation === "menu" ? (
+      {authorSetup.dialog}
+      {!isRepo && publishEntry === "resume" ? (
+        presentation === "menu" ? (
+          publishMenuItem
+        ) : (
+          <Button
+            variant="outline"
+            size="xs"
+            disabled={isGitActionRunning}
+            onClick={() => setIsPublishDialogOpen(true)}
+          >
+            <CloudUploadIcon className="size-3.5" aria-hidden />
+            Finish publishing...
+          </Button>
+        )
+      ) : presentation === "menu" ? (
         !isRepo ? (
           <MenuItem
             density={presentation === "menu" ? "touch" : "default"}
@@ -1849,7 +2205,6 @@ export default function GitActionsControl({
         onOpenChange={(open) => {
           if (!open) {
             setIsCommitDialogOpen(false);
-            setDialogCommitMessage("");
             setExcludedFiles(new Set());
             setIsEditingFiles(false);
           }
@@ -1858,7 +2213,11 @@ export default function GitActionsControl({
         <DialogPopup>
           <DialogHeader>
             <DialogTitle>{COMMIT_DIALOG_TITLE}</DialogTitle>
-            <DialogDescription>{COMMIT_DIALOG_DESCRIPTION}</DialogDescription>
+            <DialogDescription>
+              {requiresManualCommitMessage
+                ? "Review your changes and enter a commit message. No writing provider is available."
+                : COMMIT_DIALOG_DESCRIPTION}
+            </DialogDescription>
           </DialogHeader>
           <DialogPanel>
             <div className="space-y-3 rounded-xl bg-zinc-25 p-3 text-sm ring-1 ring-black/5 dark:bg-white/[0.035] dark:ring-white/5">
@@ -1977,11 +2336,18 @@ export default function GitActionsControl({
               </div>
             </div>
             <div className="space-y-1">
-              <p className="text-sm font-medium">Commit message (optional)</p>
+              <p className="text-sm font-medium">
+                {requiresManualCommitMessage ? "Commit message" : "Commit message (optional)"}
+              </p>
               <Textarea
                 value={dialogCommitMessage}
                 onChange={(event) => setDialogCommitMessage(event.target.value)}
-                placeholder="Leave empty to auto-generate"
+                placeholder={
+                  requiresManualCommitMessage
+                    ? "Write a commit message"
+                    : "Leave empty to auto-generate"
+                }
+                required={requiresManualCommitMessage}
                 size="sm"
               />
             </div>
@@ -1992,7 +2358,6 @@ export default function GitActionsControl({
               size="sm"
               onClick={() => {
                 setIsCommitDialogOpen(false);
-                setDialogCommitMessage("");
                 setExcludedFiles(new Set());
                 setIsEditingFiles(false);
               }}
@@ -2002,24 +2367,107 @@ export default function GitActionsControl({
             <Button
               variant="outline"
               size="sm"
-              disabled={noneSelected}
+              disabled={noneSelected || isCommitMessageMissing}
               onClick={runDialogActionOnNewBranch}
             >
               Commit on new branch
             </Button>
-            <Button size="sm" disabled={noneSelected} onClick={runDialogAction}>
+            <Button
+              size="sm"
+              disabled={noneSelected || isCommitMessageMissing}
+              onClick={runDialogAction}
+            >
               Commit
             </Button>
           </DialogFooter>
         </DialogPopup>
       </Dialog>
 
+      <Dialog open={isManualPrDialogOpen} onOpenChange={setIsManualPrDialogOpen}>
+        <DialogPopup>
+          <DialogHeader>
+            <DialogTitle>Write {changeRequestTerminology.singular}</DialogTitle>
+            <DialogDescription>
+              Use your own title and description. No writing model is called.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogPanel>
+            {manualPrBlocker && (
+              <p role="status" className="text-sm text-warning">
+                {manualPrBlocker}
+              </p>
+            )}
+            <label className="grid gap-1 text-sm font-medium">
+              Title
+              <Input
+                value={manualPrTitle}
+                maxLength={256}
+                onChange={(event) => setManualPrTitle(event.target.value)}
+                autoFocus
+              />
+            </label>
+            <label className="grid gap-1 text-sm font-medium">
+              Description
+              <Textarea
+                value={manualPrBody}
+                maxLength={65536}
+                onChange={(event) => setManualPrBody(event.target.value)}
+                rows={8}
+              />
+            </label>
+            {gitStatusForActions?.sourceControlProvider?.kind === "github" && (
+              <label className="flex items-center gap-2 text-sm">
+                <Checkbox
+                  checked={manualPrDraft}
+                  onCheckedChange={(checked) => setManualPrDraft(checked === true)}
+                />
+                Create as draft
+              </label>
+            )}
+            <p className="text-sm text-muted-foreground">
+              This requires a clean checkout. Committed changes will be pushed if needed.
+            </p>
+          </DialogPanel>
+          <DialogFooter variant="bare">
+            <Button variant="outline" size="sm" onClick={() => setIsManualPrDialogOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              disabled={!manualPrTitle.trim() || isGitActionRunning || manualPrBlocker !== null}
+              onClick={() => {
+                if (manualPrBlocker) return;
+                setIsManualPrDialogOpen(false);
+                void runGitActionWithToast({
+                  action: "create_pr",
+                  pullRequest: {
+                    title: manualPrTitle.trim(),
+                    body: manualPrBody,
+                    ...(gitStatusForActions?.sourceControlProvider?.kind === "github"
+                      ? { draft: manualPrDraft }
+                      : {}),
+                  },
+                });
+              }}
+            >
+              Create {changeRequestTerminology.singular}
+            </Button>
+          </DialogFooter>
+        </DialogPopup>
+      </Dialog>
+
       <PublishRepositoryDialog
+        key={publishRecoveryKey}
         open={isPublishDialogOpen}
         onOpenChange={setIsPublishDialogOpen}
         environmentId={activeEnvironmentId}
         threadRef={activeThreadRef}
         gitCwd={gitCwd}
+        recoveries={publishRecovery.pending}
+        recoveryReadable={publishRecovery.readable}
+        recoverySaveError={publishRecovery.error}
+        onResult={publishRecovery.record}
+        canCreate={publishRecovery.canCreate}
       />
 
       <Dialog
@@ -2044,7 +2492,7 @@ export default function GitActionsControl({
               size="sm"
               onClick={() => setPendingDefaultBranchAction(null)}
             >
-              Abort
+              Cancel
             </Button>
             <Button
               className="w-full max-w-full sm:w-auto"
@@ -2054,13 +2502,15 @@ export default function GitActionsControl({
             >
               {pendingDefaultBranchActionCopy?.continueLabel ?? "Continue"}
             </Button>
-            <Button
-              className="w-full max-w-full sm:w-auto"
-              size="sm-multiline"
-              onClick={checkoutFeatureBranchAndContinuePendingAction}
-            >
-              Check out feature branch & continue
-            </Button>
+            {canContinuePendingOnFeatureBranch && (
+              <Button
+                className="w-full max-w-full sm:w-auto"
+                size="sm-multiline"
+                onClick={checkoutFeatureBranchAndContinuePendingAction}
+              >
+                Check out feature branch & continue
+              </Button>
+            )}
           </DialogFooter>
         </DialogPopup>
       </Dialog>

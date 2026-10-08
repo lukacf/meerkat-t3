@@ -5,6 +5,12 @@ export const runtimeModeConfig: Record<
   RuntimeMode,
   { label: string; description: string; icon: LucideIcon }
 > = {
+  "read-only": {
+    label: "Read-only",
+    description:
+      "Read and plan. Commands, edits and external actions are blocked. Choose before starting a Meerkat conversation.",
+    icon: LockIcon,
+  },
   "approval-required": {
     label: "Supervised",
     description: "Ask before commands and file changes.",
@@ -28,3 +34,9 @@ export const runtimeModeConfig: Record<
 };
 
 export const runtimeModeOptions = Object.keys(runtimeModeConfig) as RuntimeMode[];
+
+export function runtimeModeDescription(mode: RuntimeMode, meerkat = false): string {
+  return meerkat && mode === "approval-required"
+    ? "Ask before every tool call, including reads. Applies to this thread and its workers."
+    : runtimeModeConfig[mode].description;
+}

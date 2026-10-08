@@ -18,6 +18,7 @@ import {
 import * as ServerConfig from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 
 export class ReviewService extends Context.Service<
   ReviewService,
@@ -38,6 +39,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const vcsRegistry = yield* VcsDriverRegistry.VcsDriverRegistry;
   const git = yield* GitVcsDriver.GitVcsDriver;
+  const projects = yield* ProjectionSnapshotQuery;
 
   const canonicalizePath = (value: string) => {
     const resolvedPath = path.resolve(value);
@@ -60,7 +62,10 @@ export const make = Effect.gen(function* () {
 
   const isWithinRoot = (candidate: string, root: string) => {
     const relative = path.relative(root, candidate);
-    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+    return (
+      relative === "" ||
+      (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative))
+    );
   };
 
   const assertWorkspaceBoundCwd = Effect.fn("ReviewService.assertWorkspaceBoundCwd")(function* (
@@ -75,6 +80,27 @@ export const make = Effect.gen(function* () {
 
     if (isWithinRoot(candidate, workspaceRoot) || isWithinRoot(candidate, worktreesRoot)) {
       return;
+    }
+
+    // Projects can be opened outside the server's launch directory. Read the
+    // current registered roots so newly added or removed projects take effect.
+    const registeredRoots = yield* projects.getReviewWorkspaceRoots().pipe(
+      Effect.mapError(
+        (cause) =>
+          new VcsRepositoryDetectionError({
+            operation,
+            cwd,
+            detail: "Failed to read registered workspaces while validating the review workspace.",
+            cause,
+          }),
+      ),
+    );
+    for (const root of registeredRoots) {
+      // An unavailable saved project must not block another project's review.
+      const canonicalRoot = yield* canonicalizePath(root).pipe(
+        Effect.catch(() => Effect.succeed(null)),
+      );
+      if (canonicalRoot !== null && isWithinRoot(candidate, canonicalRoot)) return;
     }
 
     return yield* new VcsRepositoryDetectionError({

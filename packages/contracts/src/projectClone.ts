@@ -9,10 +9,9 @@ import {
 
 /**
  * Live progress of a repository clone that backs a freshly added project. The
- * server keeps this in memory only: a finished clone is dropped after a short
- * grace period, a failed one stays until it is retried or the project is
- * removed, and a server restart forgets in-flight clones (the project keeps
- * its empty workspace root and can be removed like any other project).
+ * server keeps progress in memory and unresolved clone intent durably. A
+ * finished clone is dropped after a short grace period; unfinished clones
+ * remain blocked after restart until retried or the project is removed.
  */
 /** Producers clamp free text to these before publishing so encoding never fails. */
 export const PROJECT_CLONE_DETAIL_MAX_LENGTH = 200;

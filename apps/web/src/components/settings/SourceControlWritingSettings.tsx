@@ -15,6 +15,11 @@ import {
   useUpdateScopedSettings,
 } from "./useScopedSettings";
 import { useScopedModelDisabledReason } from "./useScopedModelAvailability";
+import { useSettingsProviderReadiness } from "./useSettingsProviderReadiness";
+import {
+  preserveSettingsNativeModelSelection,
+  settingsModelUnavailableLabel,
+} from "./settingsProviderReadiness";
 import { useSettingsScope } from "./SettingsScopeContext";
 import {
   applyProviderInstanceSettings,
@@ -27,6 +32,7 @@ import {
 } from "../../modelSelection";
 import { EMPTY_SERVER_PROVIDERS } from "../../state/server";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
+import { TraitsPicker } from "../chat/TraitsPicker";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
 import { Textarea } from "../ui/textarea";
@@ -61,12 +67,19 @@ export function SourceControlWritingSettingsSection() {
   const settings = useScopedSettings();
   const updateSettings = useUpdateScopedSettings();
   const navigate = useNavigate();
-  const { environment, connectedEnvironments, targets } = useSettingsScope();
+  const { environment, search, connectedEnvironments, targets } = useSettingsScope();
   // The representative supplies the provider list; a model choice is checked
   // against every target before it fans out.
   const environmentId = environment?.environmentId ?? null;
   const hasServerTargets = connectedEnvironments.length > 0;
-  const serverProviders = environment?.serverConfig?.providers ?? EMPTY_SERVER_PROVIDERS;
+  const {
+    providers: serverProviders,
+    pendingInstanceIds,
+    pendingMessage,
+  } = useSettingsProviderReadiness(
+    environmentId,
+    environment?.serverConfig?.providers ?? EMPTY_SERVER_PROVIDERS,
+  );
   // The writing style is one object; each control only cares about its own field.
   const styleFieldMixed = (field: keyof ServerSettings["sourceControlWritingStyle"]) => {
     const first = targets[0];
@@ -99,30 +112,45 @@ export function SourceControlWritingSettingsSection() {
   );
   const defaultModelSelection = resolveAppModelSelectionState(settings, textGenerationProviders);
   const usesDedicatedModel = settings.sourceControlWriterModelSelection !== null;
-  const activeSelection = resolveAppModelSelectionState(
-    {
-      ...settings,
-      textGenerationModelSelection: resolveSourceControlWriterModelSelection(
-        settings,
-        textGenerationProviders,
-      ),
-    },
+  const activeSelection = preserveSettingsNativeModelSelection(
     textGenerationProviders,
+    settings.sourceControlWriterModelSelection,
+    resolveAppModelSelectionState(
+      {
+        ...settings,
+        textGenerationModelSelection: resolveSourceControlWriterModelSelection(
+          settings,
+          textGenerationProviders,
+        ),
+      },
+      textGenerationProviders,
+    ),
+  );
+  const unavailableModelLabel = settingsModelUnavailableLabel(
+    textGenerationProviders,
+    activeSelection,
   );
   const instanceEntries = sortProviderInstanceEntries(
     applyProviderInstanceSettings(deriveProviderInstanceEntries(textGenerationProviders), settings),
   );
-  const canEnableDedicatedModel = instanceEntries.some(
+  const writerModelDisabledReason = useScopedModelDisabledReason(settings, instanceEntries);
+  const writerInstanceEntry = instanceEntries.find(
+    (entry) => entry.instanceId === activeSelection.instanceId,
+  );
+  const hasWriterProvider = instanceEntries.some(
     (entry) =>
       entry.instanceId === defaultModelSelection.instanceId && entry.enabled && entry.isAvailable,
   );
+  const canEnableDedicatedModel =
+    hasWriterProvider &&
+    Boolean(defaultModelSelection.model) &&
+    !writerModelDisabledReason(defaultModelSelection.instanceId, defaultModelSelection.model);
   const modelOptionsByInstance = getCustomModelOptionsByInstance(
     settings,
     textGenerationProviders,
     activeSelection.instanceId,
     activeSelection.model,
   );
-  const writerModelDisabledReason = useScopedModelDisabledReason(settings, instanceEntries);
 
   return (
     <SettingsSection id="source-control-text-generation" title="Text generation">
@@ -284,7 +312,7 @@ export function SourceControlWritingSettingsSection() {
         serverScoped
         settingKeys={["sourceControlWriterModelSelection"]}
         {...searchableSetting("source-control-writer-model")}
-        description="Model for source control text and branch or bookmark names. Off uses the environment's text generation model."
+        description="Model and reasoning for source control text and branch or bookmark names. Off uses the text generation settings for this scope."
         control={
           !hasServerTargets ? (
             <span className="text-sm text-muted-foreground">
@@ -292,12 +320,14 @@ export function SourceControlWritingSettingsSection() {
             </span>
           ) : (
             <div className="flex flex-wrap items-center justify-end gap-2">
-              {usesDedicatedModel && !canEnableDedicatedModel ? (
+              {usesDedicatedModel && !hasWriterProvider ? (
                 <span className="text-sm text-muted-foreground">
-                  No text generation providers available.
+                  {pendingInstanceIds.size > 0
+                    ? pendingMessage
+                    : "No text generation providers available."}
                 </span>
               ) : null}
-              {usesDedicatedModel && canEnableDedicatedModel ? (
+              {usesDedicatedModel && hasWriterProvider ? (
                 <ProviderModelPicker
                   activeInstanceId={activeSelection.instanceId}
                   model={activeSelection.model}
@@ -306,13 +336,17 @@ export function SourceControlWritingSettingsSection() {
                   modelOptionsByInstance={modelOptionsByInstance}
                   triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
                   triggerAriaLabel="Source control writer model"
-                  {...(mixedWriterModel ? { triggerLabel: "Mixed" } : {})}
+                  {...(mixedWriterModel
+                    ? { triggerLabel: "Mixed" }
+                    : unavailableModelLabel
+                      ? { triggerLabel: unavailableModelLabel }
+                      : {})}
                   {...(environmentId
                     ? {
                         onOpenProviderSetup: (instanceId: ProviderInstanceId) => {
                           void navigate({
                             to: "/settings/providers",
-                            search: { environmentId, instanceId },
+                            search: { ...search, environmentId, instanceId },
                           });
                         },
                       }
@@ -334,10 +368,62 @@ export function SourceControlWritingSettingsSection() {
                   }}
                 />
               ) : null}
+              {usesDedicatedModel &&
+              hasWriterProvider &&
+              writerInstanceEntry &&
+              !mixedWriterModel &&
+              !unavailableModelLabel ? (
+                <TraitsPicker
+                  provider={writerInstanceEntry.driverKind}
+                  models={writerInstanceEntry.models}
+                  model={activeSelection.model}
+                  modelOptions={activeSelection.options}
+                  prompt=""
+                  onPromptChange={() => {}}
+                  allowPromptInjectedEffort={false}
+                  planModeEnabled={settings.planModeEnabled}
+                  triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                  onModelOptionsChange={(nextOptions) => {
+                    const reason = writerModelDisabledReason(
+                      activeSelection.instanceId,
+                      activeSelection.model,
+                    );
+                    if (reason) {
+                      toastManager.add({
+                        type: "error",
+                        title: "Source control writer model not saved",
+                        description: reason,
+                      });
+                      return;
+                    }
+                    updateSettings({
+                      sourceControlWriterModelSelection: createModelSelection(
+                        activeSelection.instanceId,
+                        activeSelection.model,
+                        nextOptions,
+                      ),
+                    });
+                  }}
+                />
+              ) : null}
               <Switch
                 checked={usesDedicatedModel}
                 disabled={!usesDedicatedModel && !canEnableDedicatedModel}
-                onCheckedChange={(checked) =>
+                onCheckedChange={(checked) => {
+                  if (checked) {
+                    const reason = writerModelDisabledReason(
+                      defaultModelSelection.instanceId,
+                      defaultModelSelection.model,
+                    );
+                    if (reason) {
+                      toastManager.add({
+                        type: "error",
+                        title: "Source control writer model not saved",
+                        description: reason,
+                      });
+                      return;
+                    }
+                  }
                   updateSettings({
                     sourceControlWriterModelSelection: checked
                       ? createModelSelection(
@@ -346,8 +432,8 @@ export function SourceControlWritingSettingsSection() {
                           defaultModelSelection.options,
                         )
                       : null,
-                  })
-                }
+                  });
+                }}
                 aria-label="Use a separate source control writer model"
               />
             </div>

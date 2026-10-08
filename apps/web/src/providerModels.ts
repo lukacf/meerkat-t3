@@ -8,7 +8,12 @@ import {
   type ServerProvider,
   type ServerProviderModel,
 } from "@t3tools/contracts";
-import { createModelCapabilities, resolveSelectableModel } from "@t3tools/shared/model";
+import {
+  createModelCapabilities,
+  getProviderModelControlCapabilities,
+  resolveSelectableModel,
+} from "@t3tools/shared/model";
+import { modelCredentialRequirement } from "./modelCredentials";
 
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -60,7 +65,10 @@ export function getProviderModelCapabilities(
 ): ModelCapabilities {
   const slug = resolveSelectableModel(provider, model, models);
   const selectedModel = models.find((candidate) => candidate.slug === slug);
-  const caps = selectedModel?.capabilities ?? EMPTY_CAPABILITIES;
+  const caps = getProviderModelControlCapabilities(
+    provider,
+    selectedModel?.capabilities ?? EMPTY_CAPABILITIES,
+  );
   if (planModeEnabled) {
     return caps;
   }
@@ -96,7 +104,9 @@ export function getDefaultServerModel(
   providers: ReadonlyArray<ServerProvider>,
   provider: ProviderDriverKind,
 ): string {
-  const models = getProviderModels(providers, provider);
+  const models = getProviderModels(providers, provider).filter(
+    (model) => !modelCredentialRequirement(model),
+  );
   return (
     models.find((model) => model.isDefault && !model.isCustom)?.slug ??
     models.find((model) => !model.isCustom)?.slug ??

@@ -3,6 +3,7 @@ import { Command, GlobalFlag } from "effect/unstable/cli";
 
 import { ServerConfig, type StartupPresentation } from "../config.ts";
 import { runServer } from "../server.ts";
+import { withDesktopParentLifetime } from "../desktopParentLifetime.ts";
 import { type CliServerFlags, resolveServerConfig, sharedServerCommandFlags } from "./config.ts";
 
 export const runServerCommand = (
@@ -15,7 +16,10 @@ export const runServerCommand = (
   Effect.gen(function* () {
     const logLevel = yield* GlobalFlag.LogLevel;
     const config = yield* resolveServerConfig(flags, logLevel, options);
-    return yield* runServer.pipe(Effect.provideService(ServerConfig, config));
+    return yield* withDesktopParentLifetime(
+      config.desktopParentLifetimeFd,
+      runServer.pipe(Effect.provideService(ServerConfig, config)),
+    );
   });
 
 export const startCommand = Command.make("start", { ...sharedServerCommandFlags }).pipe(

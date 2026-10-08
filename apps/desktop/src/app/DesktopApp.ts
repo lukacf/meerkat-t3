@@ -1,5 +1,4 @@
 import * as Cause from "effect/Cause";
-import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -16,6 +15,7 @@ import * as DesktopAppActivation from "./DesktopAppActivation.ts";
 import * as DesktopAppIdentity from "./DesktopAppIdentity.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopApplicationMenu from "../window/DesktopApplicationMenu.ts";
+import * as DesktopDiagnostics from "../diagnostics/DesktopDiagnostics.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
@@ -107,7 +107,7 @@ const resolveDesktopBackendPort = Effect.fn("resolveDesktopBackendPort")(functio
 });
 
 const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupError")(function* (
-  stage: string,
+  stage: "when-ready" | "bootstrap",
   error: unknown,
 ): Effect.fn.Return<
   void,
@@ -116,11 +116,14 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
   | DesktopState.DesktopState
   | ElectronApp.ElectronApp
   | ElectronDialog.ElectronDialog
+  | DesktopDiagnostics.DesktopDiagnostics
 > {
   const shutdown = yield* DesktopShutdown.DesktopShutdown;
   const state = yield* DesktopState.DesktopState;
   const electronApp = yield* ElectronApp.ElectronApp;
   const electronDialog = yield* ElectronDialog.ElectronDialog;
+  const diagnostics = yield* DesktopDiagnostics.DesktopDiagnostics;
+  yield* diagnostics.recordStartupFailure(stage);
   const message = error instanceof Error ? error.message : String(error);
   const detail =
     error instanceof Error && typeof error.stack === "string" ? `\n${error.stack}` : "";
@@ -131,29 +134,27 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
   });
   const wasQuitting = yield* Ref.getAndSet(state.quitting, true);
   if (!wasQuitting) {
-    yield* electronDialog.showErrorBox(
-      "T3 Code failed to start",
-      `Stage: ${stage}\n${message}${detail}`,
-    );
+    if (stage === "bootstrap") yield* diagnostics.offerStartupReport;
+    else
+      yield* electronDialog.showErrorBox(
+        "Meerkat T3 failed to start",
+        "The desktop could not initialize. Contact the person who provided this build with its version and your macOS version.",
+      );
   }
   yield* shutdown.request;
   yield* electronApp.quit;
 });
 
-const fatalStartupCause = <E>(stage: string, cause: Cause.Cause<E>) =>
+const fatalStartupCause = <E>(stage: "when-ready" | "bootstrap", cause: Cause.Cause<E>) =>
   handleFatalStartupError(stage, Cause.pretty(cause)).pipe(Effect.andThen(Effect.failCause(cause)));
 
 export const stopAllPoolInstances = Effect.fn("desktop.app.stopAllPoolInstances")(
   function* (): Effect.fn.Return<void, never, DesktopBackendPool.DesktopBackendPool> {
-    // Stop every backend in the pool with a timeout to guarantee the quit
-    // path makes progress even if a backend hangs during teardown.
+    // The manager owns bounded graceful shutdown and escalation. Do not quit
+    // Electron early while its backends are still closing native providers.
     const pool = yield* DesktopBackendPool.DesktopBackendPool;
     const instances = yield* pool.list;
-    yield* Effect.forEach(
-      instances,
-      (instance) => instance.stop({ timeout: Duration.seconds(5) }),
-      { concurrency: "unbounded" },
-    );
+    yield* Effect.forEach(instances, (instance) => instance.stop(), { concurrency: "unbounded" });
   },
 );
 
@@ -313,7 +314,7 @@ const startup = Effect.gen(function* () {
 
   yield* electronApp.whenReady.pipe(
     Effect.withSpan("desktop.electron.whenReady"),
-    Effect.catchCause((cause) => fatalStartupCause("whenReady", cause)),
+    Effect.catchCause((cause) => fatalStartupCause("when-ready", cause)),
   );
   yield* logStartupInfo("app ready");
   if (environment.platform === "linux") {

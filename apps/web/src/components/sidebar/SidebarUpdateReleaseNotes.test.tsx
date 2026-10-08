@@ -1,6 +1,6 @@
 import type { DesktopUpdateState } from "@t3tools/contracts";
 import { isValidElement, type MouseEvent, type ReactElement, type ReactNode } from "react";
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const testState = vi.hoisted(() => ({
   addToast: vi.fn(),
@@ -8,6 +8,12 @@ const testState = vi.hoisted(() => ({
 
 vi.mock("../ui/toast", () => ({
   toastManager: { add: testState.addToast },
+}));
+
+vi.mock("@tanstack/react-router", () => ({
+  Link: ({ to, search, children }: { to: string; search: { topic: string }; children: ReactNode }) => (
+    <a href={`${to}?topic=${search.topic}`}>{children}</a>
+  ),
 }));
 
 import { SidebarUpdateReleaseNotes } from "./SidebarUpdateReleaseNotes";
@@ -72,6 +78,20 @@ function renderNotes(state: DesktopUpdateState, openExternal = vi.fn().mockResol
 describe("SidebarUpdateReleaseNotes", () => {
   beforeEach(() => {
     testState.addToast.mockReset();
+    vi.stubEnv("VITE_MEERKAT_RELEASE_REPOSITORY", "example/meerkat");
+  });
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("links to bundled update guidance when no release repository is configured", () => {
+    vi.stubEnv("VITE_MEERKAT_RELEASE_REPOSITORY", "");
+    const anchors = collectAnchors(renderNotes({
+      ...baseState,
+      releaseNotes: [{ version: "0.0.36-nightly.3", items: ["Change 3"], totalItems: 2 }],
+      omittedReleaseCount: 1,
+    }));
+    expect(anchors.map(({ props }) => props.href)).toEqual(["/help?topic=updates"]);
+    expect(textContent(anchors[0]?.props.children)).toBe("How to update this prototype");
   });
 
   it("links each preview to its exact release and labels hidden changes", () => {
@@ -87,9 +107,9 @@ describe("SidebarUpdateReleaseNotes", () => {
     );
 
     expect(anchors.map(({ props }) => props.href)).toEqual([
-      "https://github.com/pingdotgg/t3code/releases/tag/v0.0.36-nightly.3",
-      "https://github.com/pingdotgg/t3code/releases/tag/v0.0.36-nightly.2",
-      "https://github.com/pingdotgg/t3code/releases/tag/v0.0.36-nightly.1",
+      "https://github.com/example/meerkat/releases/tag/v0.0.36-nightly.3",
+      "https://github.com/example/meerkat/releases/tag/v0.0.36-nightly.2",
+      "https://github.com/example/meerkat/releases/tag/v0.0.36-nightly.1",
     ]);
     expect(anchors.map(({ props }) => textContent(props.children))).toEqual([
       "View release on GitHub",
@@ -107,7 +127,7 @@ describe("SidebarUpdateReleaseNotes", () => {
       }),
     );
 
-    expect(anchors.at(-1)?.props.href).toBe("https://github.com/pingdotgg/t3code/releases");
+    expect(anchors.at(-1)?.props.href).toBe("https://github.com/example/meerkat/releases");
     expect(textContent(anchors.at(-1)?.props.children)).toBe("1 older release on GitHub");
   });
 
@@ -141,7 +161,7 @@ describe("SidebarUpdateReleaseNotes", () => {
     expect(preventDefault).toHaveBeenCalledOnce();
     await vi.waitFor(() => {
       expect(openExternal).toHaveBeenCalledWith(
-        "https://github.com/pingdotgg/t3code/releases/tag/v0.0.36-nightly.3",
+        "https://github.com/example/meerkat/releases/tag/v0.0.36-nightly.3",
       );
       expect(testState.addToast).toHaveBeenCalledWith({
         type: "error",

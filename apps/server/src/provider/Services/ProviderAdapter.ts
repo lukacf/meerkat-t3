@@ -9,6 +9,7 @@
  */
 import type {
   ApprovalRequestId,
+  EventId,
   ProviderApprovalDecision,
   ProviderDriverKind,
   ProviderUserInputAnswers,
@@ -72,6 +73,21 @@ export interface ProviderAdapterShape<TError> {
   readonly capabilities: ProviderAdapterCapabilities;
 
   /**
+   * Observe durable output without starting a session or loading a runtime.
+   * Implementations must make repeated registration of the same binding safe.
+   */
+  readonly observeSession?: (input: {
+    readonly threadId: ThreadId;
+    readonly resumeCursor: unknown;
+  }) => Effect.Effect<void, TError>;
+
+  /** Confirm that replayed output has reached durable orchestration state. */
+  readonly acknowledgeEvent?: (eventId: EventId) => Effect.Effect<void>;
+
+  /** Remove passive observation when the owning thread has been deleted. */
+  readonly stopObservingSession?: (threadId: ThreadId) => Effect.Effect<void>;
+
+  /**
    * Start a provider-backed session.
    */
   readonly startSession: (
@@ -115,6 +131,24 @@ export interface ProviderAdapterShape<TError> {
    * Stop one provider session.
    */
   readonly stopSession: (threadId: ThreadId) => Effect.Effect<void, TError>;
+
+  /** Fence native admission while an exact recovery updates its saved session mapping. */
+  readonly withSessionRecovery?: <A, E, R>(
+    threadId: ThreadId,
+    runId: string,
+    effect: Effect.Effect<A, E, R>,
+  ) => Effect.Effect<A, E | TError, R>;
+
+  /** Reattach the original known operation without replaying its prompt. */
+  readonly reconnectSession?: (
+    input: ProviderSessionStartInput & { readonly expectedRunId: string },
+  ) => Effect.Effect<ProviderSession, TError>;
+
+  /** Release only the exact context after independently acknowledged native recovery. */
+  readonly releaseRecoveredSession?: (
+    threadId: ThreadId,
+    runId: string,
+  ) => Effect.Effect<void, TError>;
 
   /**
    * List currently active provider sessions for this adapter.

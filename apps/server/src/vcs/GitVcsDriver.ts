@@ -141,6 +141,11 @@ export interface CreateWorktreeProgress {
 }
 
 export interface CreateWorktreeOptions {
+  /**
+   * Records or validates the absolute destination before Git creates the
+   * directory or branch. Failure prevents creation; this does not claim ownership.
+   */
+  readonly beforeWorktreeCreate?: (path: string) => Effect.Effect<void, GitCommandError>;
   readonly progress?: CreateWorktreeProgress;
   /**
    * The project-over-environment `worktreeSubmodules` setting. Null (or

@@ -31,6 +31,7 @@ import {
   ProjectId,
   ThreadLinkedPullRequest,
   ThreadTitleState,
+  ThreadPreparedTurn,
   ThreadId,
   ThreadPullRequestSnapshot,
   ThreadPullRequestStack,
@@ -128,6 +129,7 @@ const ProjectionThreadPullRequestDbRowSchema = ProjectionThreadPullRequest.mapFi
 );
 const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
   Struct.assign({
+    preparedTurn: Schema.NullOr(Schema.fromJsonString(ThreadPreparedTurn)),
     modelSelection: Schema.fromJsonString(ModelSelection),
     titleState: Schema.NullOr(Schema.fromJsonString(ThreadTitleState)),
     linkedPullRequest: Schema.NullOr(Schema.fromJsonString(ThreadLinkedPullRequest)),
@@ -568,6 +570,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           title_state_json AS "titleState",
+          prepared_turn_json AS "preparedTurn",
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
@@ -610,6 +613,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           title_state_json AS "titleState",
+          prepared_turn_json AS "preparedTurn",
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
@@ -684,6 +688,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           title_state_json AS "titleState",
+          prepared_turn_json AS "preparedTurn",
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
@@ -737,6 +742,27 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         FROM projection_thread_messages
         ORDER BY thread_id ASC, created_at ASC, message_id ASC
       `,
+  });
+
+  // Command snapshots normally omit history. A pending prepared turn needs its
+  // one persisted message to verify an exact retry after restart.
+  const listPreparedTurnMessageRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionThreadMessageDbRowSchema,
+    execute: () => sql`
+      SELECT messages.message_id AS "messageId", messages.thread_id AS "threadId",
+        messages.turn_id AS "turnId", messages.role, messages.text,
+        messages.attachments_json AS "attachments", messages.context_json AS "context",
+        messages.is_streaming AS "isStreaming", messages.created_at AS "createdAt",
+        messages.updated_at AS "updatedAt"
+      FROM projection_threads AS threads
+      INNER JOIN projection_thread_messages AS messages
+        ON messages.thread_id = threads.thread_id
+        AND messages.message_id = json_extract(threads.prepared_turn_json, '$.command.message.messageId')
+      WHERE threads.deleted_at IS NULL AND threads.archived_at IS NULL
+        AND threads.prepared_turn_json IS NOT NULL
+        AND json_extract(threads.prepared_turn_json, '$.phase') != 'released'
+    `,
   });
 
   const listThreadProposedPlanRows = SqlSchema.findAll({
@@ -1250,6 +1276,7 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
           project_id AS "projectId",
           title,
           title_state_json AS "titleState",
+          prepared_turn_json AS "preparedTurn",
           model_selection_json AS "modelSelection",
           runtime_mode AS "runtimeMode",
           interaction_mode AS "interactionMode",
@@ -1712,7 +1739,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
             'thread.activity-appended',
             'thread.turn-diff-completed',
             'thread.reverted',
-            'thread.session-set'
+            'thread.session-set',
+            'thread.prepared-turn-changed',
+            'thread.turn-start-requested'
           )
       `,
   });
@@ -2319,6 +2348,7 @@ pending_approval_requests AS (
               }));
 
               const threads: ReadonlyArray<OrchestrationThread> = threadRows.map((row) => ({
+                preparedTurn: row.preparedTurn,
                 id: row.threadId,
                 projectId: row.projectId,
                 title: row.title,
@@ -2398,6 +2428,14 @@ pending_approval_requests AS (
               ),
             ),
           ),
+          listPreparedTurnMessageRows(undefined).pipe(
+            Effect.mapError(
+              toPersistenceSqlOrDecodeError(
+                "ProjectionSnapshotQuery.getCommandReadModel:listPreparedMessages:query",
+                "ProjectionSnapshotQuery.getCommandReadModel:listPreparedMessages:decodeRows",
+              ),
+            ),
+          ),
           listThreadProposedPlanRows(undefined).pipe(
             Effect.mapError(
               toPersistenceSqlOrDecodeError(
@@ -2445,6 +2483,7 @@ pending_approval_requests AS (
           ([
             projectRows,
             threadRows,
+            preparedMessageRows,
             proposedPlanRows,
             pullRequestRows,
             sessionRows,
@@ -2452,6 +2491,22 @@ pending_approval_requests AS (
             stateRows,
           ]) =>
             Effect.gen(function* () {
+              const preparedMessagesByThread = new Map<string, OrchestrationMessage[]>();
+              for (const row of preparedMessageRows) {
+                preparedMessagesByThread.set(row.threadId, [
+                  {
+                    id: row.messageId,
+                    role: row.role,
+                    text: row.text,
+                    turnId: row.turnId,
+                    streaming: row.isStreaming === 1,
+                    createdAt: row.createdAt,
+                    updatedAt: row.updatedAt,
+                    ...(row.attachments !== null ? { attachments: row.attachments } : {}),
+                    ...(row.context !== null ? { context: row.context } : {}),
+                  },
+                ]);
+              }
               const linkedThreadIds = new Set(pullRequestRows.map((row) => row.threadId));
               const linkedProjectIds = new Set(
                 threadRows
@@ -2565,6 +2620,7 @@ pending_approval_requests AS (
                   continue;
                 }
                 threads.push({
+                  preparedTurn: row.preparedTurn,
                   id: row.threadId,
                   projectId: row.projectId,
                   title: row.title,
@@ -2595,7 +2651,7 @@ pending_approval_requests AS (
                   titleRegeneration: mapTitleRegeneration(row),
                   titleState: row.titleState,
                   deletedAt: row.deletedAt,
-                  messages: [],
+                  messages: preparedMessagesByThread.get(row.threadId) ?? [],
                   proposedPlans: proposedPlansByThread.get(row.threadId) ?? [],
                   activities: [],
                   checkpoints: [],
@@ -3047,6 +3103,20 @@ pending_approval_requests AS (
               ),
         ),
       );
+
+  const getReviewWorkspaceRoots: ProjectionSnapshotQueryShape["getReviewWorkspaceRoots"] = () =>
+    sql<{ readonly workspace_root: string }>`
+      SELECT workspace_root FROM projection_projects WHERE deleted_at IS NULL
+      UNION
+      SELECT t.worktree_path AS workspace_root FROM projection_threads t
+      JOIN projection_projects p ON p.project_id = t.project_id
+      WHERE t.deleted_at IS NULL AND p.deleted_at IS NULL AND t.worktree_path IS NOT NULL
+    `.pipe(
+      Effect.mapError(
+        toPersistenceSqlError("ProjectionSnapshotQuery.getReviewWorkspaceRoots:query"),
+      ),
+      Effect.map((rows) => rows.map((row) => row.workspace_root)),
+    );
 
   const getProjectShells: ProjectionSnapshotQueryShape["getProjectShells"] = (projectIds) => {
     if (projectIds?.length === 0) return Effect.succeed([]);
@@ -3542,6 +3612,7 @@ pending_approval_requests AS (
       }
 
       const thread = {
+        preparedTurn: threadRow.value.preparedTurn,
         id: threadRow.value.threadId,
         projectId: threadRow.value.projectId,
         title: threadRow.value.title,
@@ -3787,6 +3858,7 @@ pending_approval_requests AS (
     getActiveProjectByWorkspaceRoot,
     getProjectShellById,
     getProjectShells,
+    getReviewWorkspaceRoots,
     getFirstActiveThreadIdByProjectId,
     getImportedAgentSessionSources,
     getThreadCheckpointContext,

@@ -7,6 +7,7 @@ import {
   type ServerSettings as ServerSettingsValue,
   type ModelSelection,
   type OrchestrationProjectShell,
+  type ThreadPreparedTurn,
   ProjectId,
   ProviderInstanceId,
   ThreadId,
@@ -15,6 +16,7 @@ import {
   WorktreeSetupSnapshot,
   worktreeSetupActivityId,
 } from "@t3tools/contracts";
+import { restoreReviewHeld } from "./restoreReview.ts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Cause from "effect/Cause";
 import * as Console from "effect/Console";
@@ -403,6 +405,7 @@ const toServerUpdateThreadContinuationError = (cause: unknown) =>
     : new ServerUpdateThreadContinuationError({ cause });
 
 export const markRunningProviderSessionsForContinuation = Effect.gen(function* () {
+  if (yield* restoreReviewHeld) return [];
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
   const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
   const { threads } = yield* query.getCommandReadModel();
@@ -479,6 +482,8 @@ const clearProviderSessionContinuationMarkers = (threadIds: ReadonlyArray<Thread
   }).pipe(Effect.mapError(toServerUpdateThreadContinuationError));
 
 export const reconcileProviderSessions = Effect.gen(function* () {
+  // Preserve the original continuation markers and session state for review.
+  if (yield* restoreReviewHeld) return;
   const crypto = yield* Crypto.Crypto;
   const directory = yield* ProviderSessionDirectory.ProviderSessionDirectory;
   const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
@@ -746,12 +751,75 @@ export const reconcileProviderSessions = Effect.gen(function* () {
 
 const decodeWorktreeSetupSnapshot = Schema.decodeUnknownOption(WorktreeSetupSnapshot);
 
+/** A cold process retires bootstrap ownership without inferring checkout or setup completion. */
+export const reconcilePreparedTurns = Effect.gen(function* () {
+  if (yield* restoreReviewHeld) return;
+  const crypto = yield* Crypto.Crypto;
+  const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
+  const query = yield* ProjectionSnapshotQuery.ProjectionSnapshotQuery;
+  const model = yield* query.getCommandReadModel();
+  const interruptedAt = DateTime.formatIso(yield* DateTime.now);
+  for (const thread of model.threads) {
+    const saved = thread.preparedTurn;
+    if (
+      !saved ||
+      saved.phase === "released" ||
+      thread.deletedAt !== null ||
+      thread.archivedAt !== null ||
+      thread.latestTurn !== null ||
+      thread.session?.activeTurnId != null
+    )
+      continue;
+    let preparedTurn: ThreadPreparedTurn;
+    if (saved.phase === "preparing") {
+      const reason =
+        "The server restarted before checkout preparation was confirmed. Your message is saved; review the interrupted checkout before continuing.";
+      if (saved.reason === reason) continue;
+      preparedTurn = { ...saved, reason, updatedAt: interruptedAt };
+    } else if (saved.phase === "ready") {
+      preparedTurn = {
+        ...saved,
+        phase: "blocked",
+        updatedAt: interruptedAt,
+        reason:
+          saved.setup === "not_started" || saved.setup === "sync_running"
+            ? "The server restarted before setup finished. Your message is saved. Explicitly continue without rerunning setup, or edit the pending message."
+            : "The server restarted before the saved message was sent. Review and retry the pending message, or edit it.",
+      };
+    } else continue;
+    yield* orchestrationEngine
+      .dispatch({
+        type: "thread.prepared-turn.set",
+        commandId: CommandId.make(yield* crypto.randomUUIDv4),
+        threadId: thread.id,
+        preparedTurn,
+        createdAt: interruptedAt,
+      })
+      .pipe(
+        Effect.catchCauseIf(
+          (cause) => !Cause.hasInterrupts(cause),
+          (cause) =>
+            Effect.logWarning("failed to reconcile interrupted prepared turn", {
+              threadId: thread.id,
+              cause,
+            }),
+        ),
+      );
+  }
+}).pipe(
+  Effect.catchCauseIf(
+    (cause) => !Cause.hasInterrupts(cause),
+    (cause) => Effect.logWarning("prepared turn startup reconciliation failed", { cause }),
+  ),
+);
+
 /**
  * A worktree bootstrap records its setup snapshot on the thread while it runs
  * and settles it when it finishes. The bootstrap itself lives only in memory,
  * so a process exit mid-setup leaves a `running` record with nobody to finish
- * it. Before the turn started that also strands the persisted user message, so
- * the setup is marked failed and the user is told to send again. After the
+ * it. Before the turn started the setup is marked failed; a typed prepared
+ * message remains available for explicit recovery. Older records without that
+ * saved command still need the user to send again. After the
  * handoff only an async setup script was still running; its stage is marked
  * failed and the setup settles as done, like any other script failure.
  */
@@ -762,6 +830,19 @@ export const reconcileWorktreeSetups = Effect.gen(function* () {
   // The command read model carries no activity bodies; read the setup
   // records directly, live threads only.
   const recordedSetups = yield* query.listActivitiesByKind(WORKTREE_SETUP_ACTIVITY_KIND);
+  const model = yield* query.getCommandReadModel();
+  const pendingPreparedThreadIds = new Set(
+    model.threads
+      .filter(
+        (thread) =>
+          thread.deletedAt === null &&
+          thread.archivedAt === null &&
+          thread.latestTurn === null &&
+          thread.preparedTurn &&
+          thread.preparedTurn.phase !== "released",
+      )
+      .map((thread) => thread.id),
+  );
   const interruptedAt = DateTime.formatIso(yield* DateTime.now);
 
   for (const recorded of recordedSetups) {
@@ -779,7 +860,9 @@ export const reconcileWorktreeSetups = Effect.gen(function* () {
       endedAt: interruptedAt,
       error: turnStarted
         ? null
-        : "The server restarted before the worktree setup finished. Send the message again.",
+        : pendingPreparedThreadIds.has(threadId)
+          ? "The server restarted before the worktree setup finished. Your pending message is saved in this thread; review it before continuing."
+          : "The server restarted before the worktree setup finished. Send the message again.",
       stages: snapshot.value.stages.map((stage) =>
         stage.status === "running" || stage.status === "pending"
           ? {
@@ -838,6 +921,7 @@ export const autoPullProjects = Effect.fn("autoPullProjects")(function* (
   projects: ReadonlyArray<OrchestrationProjectShell>,
   settings: ServerSettingsValue = DEFAULT_SERVER_SETTINGS,
 ) {
+  if (yield* restoreReviewHeld) return;
   const git = yield* GitVcsDriver.GitVcsDriver;
   const workspaceRoots = [
     ...new Set(
@@ -967,6 +1051,7 @@ export const make = (options?: StartupOptions) =>
       );
 
       yield* runStartupPhase("provider-sessions.reconcile", reconcileProviderSessions);
+      yield* runStartupPhase("prepared-turns.reconcile", reconcilePreparedTurns);
       yield* runStartupPhase("worktree-setups.reconcile", reconcileWorktreeSetups);
 
       yield* Effect.logDebug("startup phase: syncing clean projects");

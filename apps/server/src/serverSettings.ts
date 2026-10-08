@@ -23,13 +23,16 @@ import {
   type UsageLimitSourceConfig,
   ProviderDriverKind,
   ProviderInstanceId,
+  type ProviderSettingsIntent,
+  type ProviderSettingsConflictError,
   resolveProviderInstanceEnabled,
   ServerSettings,
   ServerSettingsError,
   type ServerSettingsPatch,
 } from "@t3tools/contracts";
 import * as Cache from "effect/Cache";
-import * as Cause from "effect/Cause";
+import * as Config from "effect/Config";
+import { configureMeerkatProfile } from "@t3tools/shared/meerkatProfile";
 import * as Context from "effect/Context";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -50,15 +53,23 @@ import * as SqlClient from "effect/unstable/sql/SqlClient";
 import { writeFileStringAtomically } from "./atomicWrite.ts";
 import * as ServerConfig from "./config.ts";
 import { type DeepPartial, deepMerge } from "@t3tools/shared/Struct";
-import { fromJsonStringPretty, fromLenientJson } from "@t3tools/shared/schemaJson";
+import {
+  formatSchemaError,
+  fromJsonStringPretty,
+  fromLenientJson,
+} from "@t3tools/shared/schemaJson";
 import {
   applyServerSettingsPatch,
   deriveLegacyProjectOverrides,
   isModelSelectionProviderEnabled,
 } from "@t3tools/shared/serverSettings";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
+import { providerSettingsPatch } from "./providerSettingsIntent.ts";
 
-export { resolveSourceControlWriterModelSelection } from "@t3tools/shared/serverSettings";
+export {
+  resolveSourceControlWriterModelSelection,
+  resolveTextGenerationModelSelection,
+} from "@t3tools/shared/serverSettings";
 
 const encodeServerSettings = Schema.encodeEffect(ServerSettings);
 const encodeServerSettingsJson = Schema.encodeUnknownEffect(fromJsonStringPretty(ServerSettings));
@@ -206,6 +217,11 @@ export class ServerSettingsService extends Context.Service<
       patch: ServerSettingsPatch,
     ) => Effect.Effect<ServerSettings, ServerSettingsError>;
 
+    /** Compose a provider intent against current settings while holding the write lock. */
+    readonly updateProviderSettings: (
+      intent: ProviderSettingsIntent,
+    ) => Effect.Effect<ServerSettings, ServerSettingsError | ProviderSettingsConflictError>;
+
     /** Stream of settings change events. */
     readonly streamChanges: Stream.Stream<ServerSettings>;
 
@@ -236,18 +252,28 @@ const makeTest = (overrides: DeepPartial<ServerSettings> = {}) =>
         : {}),
     });
     const currentSettingsRef = yield* Ref.make<ServerSettings>(initialSettings);
+    const writeSemaphore = yield* Semaphore.make(1);
+    const updateWith = <E>(
+      compose: (current: ServerSettings) => Effect.Effect<ServerSettingsPatch | undefined, E>,
+    ) =>
+      writeSemaphore.withPermits(1)(
+        Effect.gen(function* () {
+          const current = yield* Ref.get(currentSettingsRef);
+          const patch = yield* compose(current);
+          if (patch === undefined) return resolveTextGenerationProvider(current);
+          const next = yield* normalizeServerSettings(applyServerSettingsPatch(current, patch));
+          yield* Ref.set(currentSettingsRef, next);
+          return resolveTextGenerationProvider(next);
+        }),
+      );
 
     return {
       start: Effect.void,
       ready: Effect.void,
       getSettings: Ref.get(currentSettingsRef).pipe(Effect.map(resolveTextGenerationProvider)),
-      updateSettings: (patch) =>
-        Ref.get(currentSettingsRef).pipe(
-          Effect.map((currentSettings) => applyServerSettingsPatch(currentSettings, patch)),
-          Effect.flatMap(normalizeServerSettings),
-          Effect.tap((nextSettings) => Ref.set(currentSettingsRef, nextSettings)),
-          Effect.map(resolveTextGenerationProvider),
-        ),
+      updateSettings: (patch) => updateWith(() => Effect.succeed(patch)),
+      updateProviderSettings: (intent) =>
+        updateWith((current) => providerSettingsPatch(current, intent)),
       streamChanges: Stream.empty,
       subscribeChanges: Effect.succeed(Stream.empty),
     } satisfies ServerSettingsService["Service"];
@@ -257,6 +283,7 @@ export const layerTest = (overrides: DeepPartial<ServerSettings> = {}) =>
   Layer.effect(ServerSettingsService, makeTest(overrides));
 
 const ServerSettingsJson = fromLenientJson(ServerSettings);
+const decodeServerSettingsValueExit = Schema.decodeUnknownExit(ServerSettings);
 const decodeServerSettingsJsonExit = Schema.decodeUnknownExit(ServerSettingsJson);
 const PersistedOptionalProviderSettings = Schema.Struct({
   providers: Schema.optionalKey(
@@ -493,7 +520,8 @@ function foldLegacyProjectSettings(
 }
 
 const make = Effect.gen(function* () {
-  const { settingsPath } = yield* ServerConfig.ServerConfig;
+  const { settingsPath, mode } = yield* ServerConfig.ServerConfig;
+  const packagedMeerkat = Option.isSome(yield* Config.option(Config.String("MEERKAT_RUNTIME_DIR")));
   const fs = yield* FileSystem.FileSystem;
   const pathService = yield* Path.Path;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
@@ -575,13 +603,24 @@ const make = Effect.gen(function* () {
         if (failure._tag === "Failure") {
           yield* Effect.logWarning("failed to parse settings.json, using defaults", {
             path: settingsPath,
-            issues: Cause.pretty(failure.cause),
-            cause: failure.cause,
+            issues: formatSchemaError(failure.cause),
           });
         }
       } else {
         settings = decoded.value;
       }
+    } else if (packagedMeerkat) {
+      const decoded = decodeServerSettingsValueExit(
+        configureMeerkatProfile({}, { desktop: mode === "desktop" }),
+      );
+      if (decoded._tag === "Failure")
+        return yield* new ServerSettingsError({
+          settingsPath,
+          operation: "normalize",
+          cause: decoded.cause,
+        });
+      settings = decoded.value;
+      yield* writeSettingsAtomically(settings);
     }
 
     const providerHistory = yield* sql<{
@@ -940,12 +979,21 @@ const make = Effect.gen(function* () {
     );
   };
 
-  const updateSettings = (
-    patch: ServerSettingsPatch,
-  ): Effect.Effect<ServerSettings, ServerSettingsError> =>
+  // Read, compose and commit share the same lock for every connected client and
+  // legacy settings writer. Composition uses stored secret references, not a
+  // redacted client snapshot or materialized credentials.
+  const updateSettingsWith = <E>(
+    compose: (current: ServerSettings) => Effect.Effect<ServerSettingsPatch | undefined, E>,
+  ): Effect.Effect<ServerSettings, ServerSettingsError | E> =>
     writeSemaphore.withPermits(1)(
       Effect.gen(function* () {
         const current = yield* getSettingsFromCache;
+        const patch = yield* compose(current);
+        if (patch === undefined) {
+          return resolveTextGenerationProvider(
+            yield* materializeProviderEnvironmentSecrets(current),
+          );
+        }
         const updated = applyServerSettingsPatch(current, patch);
         const persisted = yield* persistProviderEnvironmentSecrets(current, updated);
         const next = yield* normalizeServerSettings(persisted.settings);
@@ -966,14 +1014,21 @@ const make = Effect.gen(function* () {
               yield* rollbackSecretChanges;
               return yield* Effect.failCause(writeExit.cause);
             }
+            // A committed write must become the next caller's current state even
+            // when this caller is interrupted during filesystem persistence.
+            yield* Cache.set(settingsCache, cacheKey, next);
+            yield* emitChange(next);
             return materializedExit.value;
           }),
         );
-        yield* Cache.set(settingsCache, cacheKey, next);
-        yield* emitChange(next);
         return resolveTextGenerationProvider(materialized);
       }),
     );
+
+  const updateSettings = (patch: ServerSettingsPatch) =>
+    updateSettingsWith(() => Effect.succeed(patch));
+  const updateProviderSettings = (intent: ProviderSettingsIntent) =>
+    updateSettingsWith((current) => providerSettingsPatch(current, intent));
 
   const revalidateAndEmit = writeSemaphore.withPermits(1)(
     Effect.gen(function* () {
@@ -1051,6 +1106,7 @@ const make = Effect.gen(function* () {
       Effect.map(resolveTextGenerationProvider),
     ),
     updateSettings,
+    updateProviderSettings,
     get streamChanges() {
       return materializeChanges(Stream.fromPubSub(changesPubSub));
     },

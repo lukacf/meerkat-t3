@@ -3,6 +3,7 @@ import type {
   ServerProviderSkill,
   ServerProviderSlashCommand,
 } from "@t3tools/contracts";
+import { meerkatSkillHref, parseMeerkatSkillHref } from "@t3tools/shared/meerkatSkills";
 
 export type ProviderSkillSourceKind = "app" | "repo" | "project" | "personal" | "system" | "other";
 
@@ -29,12 +30,66 @@ export function formatProviderSkillDisplayName(
   return titleCaseWords(skill.name);
 }
 
+type SkillReferenceCandidate = Pick<ServerProviderSkill, "name" | "displayName"> &
+  Partial<Pick<ServerProviderSkill, "path" | "description" | "shortDescription">>;
+
+/** Native source identity must come from a selection link, never a bare name. */
+export function resolveProviderSkillReference<T extends SkillReferenceCandidate>(
+  skills: ReadonlyArray<T>,
+  name: string,
+  path?: string,
+): T | undefined {
+  const nativeKey = path ? parseMeerkatSkillHref(path) : null;
+  return skills.find((candidate) => {
+    if (nativeKey) {
+      const candidateKey = candidate.path ? parseMeerkatSkillHref(candidate.path) : null;
+      return (
+        candidateKey !== null && meerkatSkillHref(candidateKey) === meerkatSkillHref(nativeKey)
+      );
+    }
+    if (path) return candidate.path === path;
+    return candidate.name === name && !/^meerkat-skill:/iu.test(candidate.path ?? "");
+  });
+}
+
+export function providerSkillReferenceMeta(
+  skills: ReadonlyArray<SkillReferenceCandidate>,
+  name: string,
+  path?: string,
+): { label: string; description: string | null } {
+  const skill = resolveProviderSkillReference(skills, name, path);
+  if (skill)
+    return {
+      label: formatProviderSkillDisplayName(skill),
+      description: skill.shortDescription?.trim() || skill.description?.trim() || null,
+    };
+  const nativeKey = path ? parseMeerkatSkillHref(path) : null;
+  if (nativeKey)
+    return {
+      label: `${nativeKey.skill_name} (${nativeKey.source_uuid.slice(0, 8)})`,
+      description: null,
+    };
+  if (
+    !path &&
+    skills.some(
+      (candidate) => candidate.name === name && /^meerkat-skill:/iu.test(candidate.path ?? ""),
+    )
+  )
+    return {
+      label: `${formatProviderSkillDisplayName({ name })} (unselected)`,
+      description:
+        "This text does not select a native skill. Choose a source from the conversation skill menu.",
+    };
+  return { label: formatProviderSkillDisplayName({ name }), description: null };
+}
+
 export function dedupeProviderSkillsByName(
   skills: ReadonlyArray<ServerProviderSkill>,
 ): ServerProviderSkill[] {
   const seenNames = new Set<string>();
   return skills.filter((skill) => {
-    const normalizedName = skill.name.trim().toLowerCase();
+    const key = parseMeerkatSkillHref(skill.path);
+    const normalizedName = key ? meerkatSkillHref(key) : skill.name.trim().toLowerCase();
     if (seenNames.has(normalizedName)) {
       return false;
     }

@@ -7,7 +7,8 @@ import {
   OpenCodeSettings,
   ProviderDriverKind,
 } from "@t3tools/contracts";
-import type * as Schema from "effect/Schema";
+import * as Schema from "effect/Schema";
+import { BotIcon } from "lucide-react";
 import {
   AntigravityIcon,
   ClaudeAI,
@@ -33,6 +34,9 @@ export interface ProviderClientDefinition {
   readonly label: string;
   readonly icon: Icon;
   readonly settingsSchema: ProviderSettingsSchema;
+  readonly runtimeDescription?: string;
+  /** The runtime owns every catalog entry, including custom models. */
+  readonly modelsManagedByRuntime?: boolean;
   /**
    * Optional short label rendered as a `variant="warning"` badge next to
    * the instance title. Used to flag drivers that still ship under an
@@ -81,6 +85,16 @@ const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = [
     label: "Antigravity",
     icon: AntigravityIcon,
     settingsSchema: AntigravitySettings,
+  },
+  {
+    value: ProviderDriverKind.make("meerkat"),
+    label: "Meerkat",
+    icon: BotIcon,
+    // The native binary and state directory are resolved by the environment.
+    settingsSchema: Schema.Struct({}),
+    runtimeDescription:
+      "Uses the Meerkat runtime included with this app. No separate CLI installation is needed.",
+    modelsManagedByRuntime: true,
   },
 ];
 
