@@ -83,6 +83,18 @@ pnpm exec vp lint path/to/changed-file.ts
 pnpm exec vp fmt --check path/to/changed-file.ts
 ```
 
+The Ubuntu CI lane also compiles the inherited Linux browser-secret helper and
+tests it with synthetic keyring responses. To run these desktop tests on Ubuntu
+or Debian, install the compiler, package metadata tool, and libsecret headers:
+
+```sh
+sudo apt-get update
+sudo apt-get install --yes --no-install-recommends build-essential pkg-config libsecret-1-dev
+```
+
+These tests do not require a desktop keyring or provider credentials. Linux test
+coverage does not make Linux a supported preview distribution.
+
 Native tests use the repository wrapper so concurrent checkouts do not share a
 Cargo target directory:
 
