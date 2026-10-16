@@ -1,63 +1,84 @@
 # MeerkaT3
 
-A desktop development workspace for long-lived project specialists. MeerkaT3 studies your repository, proposes agents for its domains, and lets you connect them to work together within and across projects.
+**A [T3 Code](https://github.com/pingdotgg/t3code) fork powered by [Meerkat](https://github.com/lukacf/meerkat), built around long-lived project specialists and connected agents.**
 
-Your API specialist can coordinate a contract change with the client specialist in another repository. Each keeps its own responsibilities and conversation, working in its owning project's checkout. Task threads bring those specialists together for a particular change, with temporary workers when needed.
+Study a repository, prepare specialists for its domains, and keep working with those agents as the project evolves. A catalog specialist can coordinate an API change with a storefront specialist, with each working in its own checkout.
 
-## Start here
+![MeerkaT3 workspace with project specialists, a specialist conversation, and connected projects](docs/images/workspace.png)
 
-The current preview targets **Apple Silicon Macs running macOS 13 or later**. This repository contains the source; a public desktop download has not yet been published.
+_Actual MeerkaT3 interface with sample projects and [demonstration content](docs/images/README.md). The screenshots below use the same sample data._
 
-- **Evaluate the source:** follow [Build from source](docs/operations/development.md). Development requires the documented toolchain and native runtime build.
-- **Already have a preview build:** follow [Install MeerkaT3](docs/user/install.md), then the [first-project guide](docs/user/getting-started.md). The packaged app includes its agent runtime.
+**Source preview:** Apple Silicon Macs, macOS 13 or later. The current source uses Meerkat Core and Meta 0.9.1. A public desktop installer has not yet been published.
 
-Once the app is running:
+[Build from source](docs/operations/development.md) · [First project](docs/user/getting-started.md) · [User guide](docs/README.md) · [Report an issue](https://github.com/lukacf/meerkat-t3/issues)
 
-1. **Connect a model account** in Settings > Providers. Sign in or add an API key using the methods offered for your account. Available models depend on that account's access.
-2. **Open or create a project.** Start a repository study, review the proposed specialists and their assignments, and prepare the ones you need.
-3. **Connect the specialists.** Drag one agent onto another, or use Connections. Connections can cross projects on the same computer.
-4. **Give a specialist an objective.** Ask it to coordinate with the relevant peers, inspect the resulting changes, run your project's checks, and commit the work you want to keep.
+## What changes from T3 Code?
 
-The [user guide](docs/README.md#use-meerkat3) covers the complete workflow and is also available offline through **Help > MeerkaT3 Guide**.
+T3 supplies the workbench: conversations, files, terminal, Git worktrees, change review, and pull requests.
 
-## Work that stays with the project
+| Area                    | Original T3 Code                                                                                                                                                  | MeerkaT3                                                                                                                                            |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Agent runtime**       | Integrates multiple coding-agent harnesses, including Codex and Claude Code.                                                                                      | Uses one bundled Meerkat Core + Meta runtime for agent execution, state, and message delivery.                                                      |
+| **Project workflow**    | Organizes work into projects and task threads, with delegated subagents.                                                                                          | Adds long-lived specialists generated from the repository's domains, alongside task coordinators and temporary workers.                             |
+| **Collaboration**       | External agents can [operate threads through MCP](https://github.com/pingdotgg/t3code/blob/3b99fb2d2114f57c96bf92e4ed1c7ce5eaa67b1e/docs/user/outside-agents.md). | Explicit peer connections let specialists and coordinators communicate within and across project checkouts on the same computer.                    |
+| **Accounts and models** | Authentication and model choices depend on the selected agent integration.                                                                                        | In-app account setup uses Meerkat's native authentication and model catalog, including recommended and supported models available to your accounts. |
 
-| Concept            | Use it for                                                                                             |
-| ------------------ | ------------------------------------------------------------------------------------------------------ |
-| Project specialist | A durable responsibility in your repository, with its own instructions and conversation.               |
-| Peer connection    | Collaboration between specialists or task coordinators, within one project or across related projects. |
-| Task thread        | A focused change, with a coordinator and selected project specialists.                                 |
-| Worker             | A helper created for part of a task, alongside the project's long-lived specialists.                   |
+MeerkaT3 is maintained independently from the original T3 project.
 
-Repository studies propose domain ownership from your code rather than requiring a preset team. You review assignments before applying them and can refine them as the project changes. Connections allow agents to exchange messages; they do not merge histories or move an agent into another checkout.
+## Specialists that stay with your project
 
-The workspace includes conversations and images, steering and queued follow-ups, files, terminals, change review, Git worktrees, and pull request workflows. Read [Work with project specialists](docs/user/agents.md) for peering, permissions, and returning to saved work.
+Repository study proposes specialists for your code's domains. Review their assignments and choose which to prepare.
 
-## Preview scope
+![Project specialist proposal with domain responsibilities, recommended agents, and assignment selection](docs/images/project-specialists.png)
 
-The supported workflow is the local Mac desktop app. Windows, Linux, mobile clients, remote installation, and the original T3 hosted services are outside this preview. Retained upstream integrations are identified as reference material in the documentation.
+- **Project specialists** retain their instructions and conversations across tasks. Return to the same domain expert as the repository changes.
+- **Task threads** bring a coordinator and selected specialists together for a particular change.
+- **Workers** handle temporary pieces of a task, alongside the long-lived specialists.
 
-Model access is configured through accounts, with recommended and supported models shown for each connection. Model credits are not included. The runtime runs locally; hosted model requests send their context to the selected provider. See [Accounts](docs/user/accounts.md), [Permissions](docs/user/permission-modes.md), and [Data and privacy](docs/user/telemetry.md).
+Open specialists from the sidebar to assign work, steer a turn, or inspect results. See the [agent guide](docs/user/agents.md).
 
-Preview packages use ad-hoc signing without Apple notarization and are updated manually. Source publication does not establish a binary release or an automatic update channel. Published artifacts, when available, will be listed on [MeerkaT3 Releases](https://github.com/lukacf/meerkat-t3/releases) with their versions and checksums.
+## Connect agents across repositories
 
-## Built on Meerkat and T3 Code
+Drag an agent onto another agent, or use **Connections**, to establish a peer relationship. A backend specialist can coordinate with a client specialist in another project; a task coordinator can bring the relevant specialists into a change.
 
-[Meerkat Core](https://github.com/lukacf/meerkat) owns agent execution, model access, tools, and durable session state. Meerkat Meta, formerly MobKit, provides the application-facing coordination layer. This integration uses **Meerkat and Meta 0.9.1**. The desktop workspace builds on [T3 Code](https://github.com/pingdotgg/t3code).
+![Connections between project specialists in the catalog and storefront sample repositories](docs/images/agent-peering.png)
 
-MeerkaT3 uses the bundled Meerkat runtime for its agents. Connecting an OpenAI, Anthropic, Google, or Copilot account selects model access through that runtime; it does not require another coding-agent CLI.
+Each agent retains its own conversation and checkout. Connections enable communication without merging histories. [Permissions](docs/user/permission-modes.md) govern peer messaging.
 
-## Contribute and get help
+## Get started
 
-- [Documentation](docs/README.md) - user guides, development, and architecture.
+Follow [Build from source](docs/operations/development.md) for the pinned Node, pnpm, Rust, and Xcode prerequisites, then:
+
+```sh
+git clone https://github.com/lukacf/meerkat-t3.git
+cd meerkat-t3
+pnpm install --frozen-lockfile
+pnpm native:build
+pnpm dev:desktop
+```
+
+Once the app opens:
+
+1. **Connect a model account** in Settings > Providers. Sign in or add an API key using the methods offered for that account.
+2. **Open a project and study its repository.** Review the proposed domain specialists and prepare the ones you need.
+3. **Connect relevant peers** within the project or across related repositories.
+4. **Give a specialist an objective.** Inspect changes, run your project's checks, and commit the work you want to keep.
+
+The runtime is included; a separate coding-agent CLI is not needed. Model access depends on your accounts, and model credits are not included. Hosted model requests send context to the selected provider. See [Accounts](docs/user/accounts.md) and [Data and privacy](docs/user/telemetry.md).
+
+Windows, Linux, mobile, remote installation, and the original T3 hosted services are outside this preview. Preview packages use ad-hoc signing and manual updates. Future installers and checksums will appear on [Releases](https://github.com/lukacf/meerkat-t3/releases).
+
+## Documentation and contributing
+
+Browse the [documentation index](docs/README.md), or read user guides offline through **Help > MeerkaT3 Guide**.
+
 - [Contributing](CONTRIBUTING.md) - setup, focused checks, and change proposals.
-- [Code of conduct](CODE_OF_CONDUCT.md) - community expectations and reporting concerns.
-- [Troubleshooting](docs/user/troubleshooting.md) - interrupted work, recovery, and support reports.
-- [Issues](https://github.com/lukacf/meerkat-t3/issues) - reproducible bugs and feature proposals for this project.
-- [Security policy](SECURITY.md) - report a vulnerability privately.
+- [Architecture](docs/internals/overview.md) - the T3 workspace and Meerkat runtime boundary.
+- [Troubleshooting](docs/user/troubleshooting.md) - recovery and useful bug reports.
+- [Issues](https://github.com/lukacf/meerkat-t3/issues) - MeerkaT3 bugs and proposals.
+- [Security](SECURITY.md) - private vulnerability reporting.
+- [Code of conduct](CODE_OF_CONDUCT.md) - community expectations.
 
-For a bug, include the app version, macOS version, steps to reproduce, and what happened. Review attachments before sharing; do not post credentials, private conversations, or an app profile. Please report MeerkaT3 issues here, rather than to the original T3 maintainers.
+## Credits and license
 
-## License
-
-MeerkaT3 retains T3 Code's [MIT license and attribution](LICENSE). Bundled dependencies have their own licenses; the app includes [third-party notices](docs/user/open-source-licenses.md).
+MeerkaT3 builds on [T3 Code](https://github.com/pingdotgg/t3code) and preserves its [MIT license and attribution](LICENSE). [Meerkat Core](https://github.com/lukacf/meerkat) and Meerkat Meta, formerly MobKit, provide the agent runtime and coordination layer. Bundled dependencies retain their own licenses and [third-party notices](docs/user/open-source-licenses.md).
