@@ -3573,6 +3573,43 @@ for await (const line of readline.createInterface({input: process.stdin})) {
             .expect("persistence test thread");
     }
 
+    #[derive(Default)]
+    struct BootstrapOnlyLlm {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl meerkat::LlmClient for BootstrapOnlyLlm {
+        fn project_replay_messages(
+            &self,
+            messages: &[meerkat_core::Message],
+        ) -> Result<Vec<meerkat_core::Message>, meerkat::LlmError> {
+            Ok(messages.to_vec())
+        }
+
+        fn stream<'a>(
+            &'a self,
+            _: &'a meerkat::LlmRequest,
+        ) -> std::pin::Pin<
+            Box<
+                dyn futures_util::Stream<Item = Result<meerkat::LlmEvent, meerkat::LlmError>>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            panic!("legacy turn-driven bootstrap must not invoke a model")
+        }
+
+        fn provider(&self) -> meerkat_core::Provider {
+            meerkat_core::Provider::Other
+        }
+
+        async fn health_check(&self) -> Result<(), meerkat::LlmError> {
+            Ok(())
+        }
+    }
+
     #[test]
     fn legacy_autonomous_spec_bootstraps_with_turn_driven_member_projection() {
         std::thread::Builder::new()
@@ -3646,9 +3683,18 @@ for await (const line of readline.createInterface({input: process.stdin})) {
             ..original
         };
         let host_tools = HostToolTransport::new();
-        let runtime = bootstrap_local_runtime(restarted, Arc::clone(&host_tools))
-            .await
-            .expect("bootstrap legacy persisted mob");
+        // Bootstrap still exercises native migration and session authority,
+        // but must neither need machine credentials nor start inference.
+        let llm = Arc::new(BootstrapOnlyLlm::default());
+        let runtime = bootstrap_local_runtime_inner(
+            restarted,
+            Arc::clone(&host_tools),
+            Some(llm.clone()),
+            None,
+        )
+        .await
+        .expect("bootstrap legacy persisted mob");
+        assert_eq!(llm.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         let unified = runtime.runtime.as_ref().expect("local unified runtime");
 
         let status = mobkit_rpc(unified, "mobkit/status", json!({})).await
@@ -3739,7 +3785,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
         drop(runtime);
         drop(stores);
 
-        let resumed_runtime = bootstrap_local_runtime(
+        let resumed_runtime = bootstrap_local_runtime_inner(
             CreateMobInput {
                 mob_id: "domain-runtime".to_string(),
                 kind: "domain".to_string(),
@@ -3757,9 +3803,12 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                 config_state_root: state_root.clone(),
             },
             host_tools,
+            Some(llm.clone()),
+            None,
         )
         .await
         .expect("restart persisted desktop mob");
+        assert_eq!(llm.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
         let resumed_unified = resumed_runtime
             .runtime
             .as_ref()
@@ -3803,6 +3852,11 @@ for await (const line of readline.createInterface({input: process.stdin})) {
         ));
         let _ = resumed_unified.shutdown().await;
         drop(resumed_runtime);
+        assert_eq!(
+            llm.calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "neither initial nor restored turn-driven bootstrap may run inference"
+        );
         let _ = std::fs::remove_dir_all(&fixture);
     }
 }
