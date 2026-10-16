@@ -2711,9 +2711,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                             crate::native_execution_modes::ExecutionMode::FullAccess,
                             crate::native_execution_modes::ExecutionMode::ReadOnly,
                         ] {
-                            tokio::time::timeout(Duration::from_secs(60), proposal_mcp_runtime_proof(access_mode))
-                                .await
-                                .expect("proposal MCP proof timeout");
+                            proposal_mcp_runtime_proof(access_mode).await;
                         }
                     });
             })
@@ -2722,7 +2720,39 @@ for await (const line of readline.createInterface({input: process.stdin})) {
             .unwrap();
     }
 
+    async fn proposal_mcp_phase<T>(
+        access_mode: crate::native_execution_modes::ExecutionMode,
+        attempt: &str,
+        phase: &str,
+        budget: Duration,
+        operation: impl std::future::Future<Output = T>,
+    ) -> T {
+        let started = std::time::Instant::now();
+        eprintln!("proposal MCP {access_mode:?} {attempt} {phase}: started");
+        let result = tokio::time::timeout(budget, operation)
+            .await
+            .unwrap_or_else(|_| {
+                panic!(
+                    "proposal MCP {access_mode:?} {attempt} {phase} timed out after {}s",
+                    budget.as_secs()
+                )
+            });
+        eprintln!(
+            "proposal MCP {access_mode:?} {attempt} {phase}: completed in {:?}",
+            started.elapsed()
+        );
+        result
+    }
+
     async fn proposal_mcp_runtime_proof(access_mode: crate::native_execution_modes::ExecutionMode) {
+        // Let the 45s native bootstrap and 60s shutdown return their own
+        // diagnostics before a fixture deadline. Each initial/restored phase
+        // gets its own budget; elapsed setup cannot consume teardown's budget.
+        let bootstrap_budget = Duration::from_secs(45 + 15);
+        let teardown_budget = Duration::from_secs(60 + 15);
+        // Connection has separate 15s apply/readiness bounds. Allow additional
+        // time for catalog refresh or cleanup of the intentionally wrong server.
+        let readiness_budget = Duration::from_secs(60);
         let fixture =
             std::env::temp_dir().join(format!("meerkat-proposal-mcp-{}", uuid::Uuid::new_v4()));
         let project_path = fixture.join("project");
@@ -2730,9 +2760,15 @@ for await (const line of readline.createInterface({input: process.stdin})) {
         let server = fixture.join("proposal.mjs");
         std::fs::write(&server, PROPOSAL_MCP_FIXTURE).unwrap();
         let node = std::env::var("MEERKAT_NODE_PATH").unwrap_or_else(|_| "node".to_string());
-        let dispatcher = connect_project_agent_proposal_dispatcher(
-            node.clone(),
-            server.to_string_lossy().to_string(),
+        let dispatcher = proposal_mcp_phase(
+            access_mode,
+            "setup",
+            "MCP readiness",
+            readiness_budget,
+            connect_project_agent_proposal_dispatcher(
+                node.clone(),
+                server.to_string_lossy().to_string(),
+            ),
         )
         .await
         .unwrap();
@@ -2740,12 +2776,18 @@ for await (const line of readline.createInterface({input: process.stdin})) {
         assert_eq!(dispatcher.tool_mutation_class(PROJECT_AGENT_PROPOSAL_TOOL), meerkat_core::ToolMutationClass::ReadOnly);
         assert_eq!(dispatcher.tool_mutation_class("unrelated_tool"), meerkat_core::ToolMutationClass::Unknown);
 
-        let missing_command_error = connect_project_agent_proposal_dispatcher(
-            fixture
-                .join("missing-node-executable")
-                .to_string_lossy()
-                .to_string(),
-            server.to_string_lossy().to_string(),
+        let missing_command_error = proposal_mcp_phase(
+            access_mode,
+            "setup",
+            "missing executable rejection",
+            readiness_budget,
+            connect_project_agent_proposal_dispatcher(
+                fixture
+                    .join("missing-node-executable")
+                    .to_string_lossy()
+                    .to_string(),
+                server.to_string_lossy().to_string(),
+            ),
         )
         .await
         .err()
@@ -2763,9 +2805,15 @@ for await (const line of readline.createInterface({input: process.stdin})) {
         )
         .unwrap();
         assert!(
-            connect_project_agent_proposal_dispatcher(
-                node,
-                wrong_server.to_string_lossy().to_string()
+            proposal_mcp_phase(
+                access_mode,
+                "setup",
+                "unrelated catalog rejection",
+                readiness_budget,
+                connect_project_agent_proposal_dispatcher(
+                    node,
+                    wrong_server.to_string_lossy().to_string(),
+                ),
             )
             .await
             .is_err(),
@@ -2794,13 +2842,20 @@ for await (const line of readline.createInterface({input: process.stdin})) {
         let mut prior_session = None;
         let mut prior_peer_endpoint = None;
         for attempt in 0..2 {
+            let attempt_name = if attempt == 0 { "initial" } else { "restored" };
             let calls_before_bootstrap = llm.calls.load(std::sync::atomic::Ordering::SeqCst);
-            let runtime = bootstrap_local_runtime_with_proposal_dispatcher(
-                input.clone(),
-                Arc::clone(&host_tools),
-                Some(llm.clone()),
-                Some(Arc::clone(&dispatcher)),
-                None,
+            let runtime = proposal_mcp_phase(
+                access_mode,
+                attempt_name,
+                "bootstrap",
+                bootstrap_budget,
+                bootstrap_local_runtime_with_proposal_dispatcher(
+                    input.clone(),
+                    Arc::clone(&host_tools),
+                    Some(llm.clone()),
+                    Some(Arc::clone(&dispatcher)),
+                    None,
+                ),
             )
             .await
             .unwrap();
@@ -2811,68 +2866,96 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                 calls_before_bootstrap,
                 "materializing a restored coordinator must not run a model turn"
             );
-            let member_id = member_comms_id::mob_member_id("ingress");
-            let session = unified
-                .mob_handle()
-                .resolve_bridge_session_id(&member_id)
-                .await
-                .unwrap();
-            if let Some(prior) = prior_session.as_ref() {
-                assert_eq!(
-                    prior, &session,
-                    "restore must preserve the canonical member session"
-                );
-            }
             let service = unified.mob_runtime().session_service().unwrap();
-            let comms = SessionServiceCommsExt::comms_runtime(service.as_ref(), &session)
-                .await
-                .expect("the original member must have live comms before any new turn or topology operation");
-            let peer_endpoint = (
-                comms.peer_id().map(|id| id.to_string()),
-                comms.public_key(),
-            );
-            assert!(peer_endpoint.0.is_some() && peer_endpoint.1.is_some());
-            if let Some(prior) = prior_peer_endpoint.as_ref() {
-                assert_eq!(
-                    prior, &peer_endpoint,
-                    "restore must retain the peer identity and key"
-                );
-            }
-            prior_peer_endpoint = Some(peer_endpoint);
-            drop(comms);
-            let topology_peer = unified
-                .local_member_peer_info("ingress")
-                .await
-                .expect("the original coordinator must be addressable by public cross-mob topology before any new turn");
-            assert_eq!(
-                Some(&topology_peer.0),
-                prior_peer_endpoint.as_ref().and_then(|peer| peer.0.as_ref()),
-                "topology and the restored comms runtime must expose the same peer"
-            );
-            prior_session = Some(session);
-            let started = start_member_turn(
-                unified,
-                "ingress",
-                "Validate a proposal.",
-                meerkat_core::types::HandlingMode::Queue,
-                MemberTurnOptions::new(),
-                None,
+            let session = proposal_mcp_phase(
+                access_mode,
+                attempt_name,
+                "member identity and topology",
+                Duration::from_secs(15),
+                async {
+                    let member_id = member_comms_id::mob_member_id("ingress");
+                    let session = unified
+                        .mob_handle()
+                        .resolve_bridge_session_id(&member_id)
+                        .await
+                        .unwrap();
+                    if let Some(prior) = prior_session.as_ref() {
+                        assert_eq!(
+                            prior, &session,
+                            "restore must preserve the canonical member session"
+                        );
+                    }
+                    let comms = SessionServiceCommsExt::comms_runtime(service.as_ref(), &session)
+                        .await
+                        .expect("the original member must have live comms before any new turn or topology operation");
+                    let peer_endpoint = (
+                        comms.peer_id().map(|id| id.to_string()),
+                        comms.public_key(),
+                    );
+                    assert!(peer_endpoint.0.is_some() && peer_endpoint.1.is_some());
+                    if let Some(prior) = prior_peer_endpoint.as_ref() {
+                        assert_eq!(
+                            prior, &peer_endpoint,
+                            "restore must retain the peer identity and key"
+                        );
+                    }
+                    prior_peer_endpoint = Some(peer_endpoint);
+                    drop(comms);
+                    let topology_peer = unified
+                        .local_member_peer_info("ingress")
+                        .await
+                        .expect("the original coordinator must be addressable by public cross-mob topology before any new turn");
+                    assert_eq!(
+                        Some(&topology_peer.0),
+                        prior_peer_endpoint.as_ref().and_then(|peer| peer.0.as_ref()),
+                        "topology and the restored comms runtime must expose the same peer"
+                    );
+                    session
+                },
             )
-            .await
-            .unwrap();
-            started.turn.wait().await.unwrap();
-            assert_eq!(
-                llm.calls.load(std::sync::atomic::Ordering::SeqCst),
-                if attempt == 0 { 3 } else { 5 }
-            );
-            let registry = ProjectMobkitRegistry::new(Arc::clone(&host_tools));
-            registry
-                .mobs
-                .write()
-                .await
-                .insert(input.mob_id.clone(), Arc::new(runtime));
-            assert!(registry.remove(&input.mob_id).await.unwrap());
-            drop(registry);
+            .await;
+            prior_session = Some(session);
+            proposal_mcp_phase(
+                access_mode,
+                attempt_name,
+                "member turn",
+                Duration::from_secs(60),
+                async {
+                    let started = start_member_turn(
+                        unified,
+                        "ingress",
+                        "Validate a proposal.",
+                        meerkat_core::types::HandlingMode::Queue,
+                        MemberTurnOptions::new(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                    started.turn.wait().await.unwrap();
+                    assert_eq!(
+                        llm.calls.load(std::sync::atomic::Ordering::SeqCst),
+                        if attempt == 0 { 3 } else { 5 }
+                    );
+                },
+            )
+            .await;
+            proposal_mcp_phase(
+                access_mode,
+                attempt_name,
+                "teardown",
+                teardown_budget,
+                async {
+                    let registry = ProjectMobkitRegistry::new(Arc::clone(&host_tools));
+                    registry
+                        .mobs
+                        .write()
+                        .await
+                        .insert(input.mob_id.clone(), Arc::new(runtime));
+                    assert!(registry.remove(&input.mob_id).await.unwrap());
+                    drop(registry);
+                },
+            )
+            .await;
         }
         drop(dispatcher);
         std::fs::remove_dir_all(fixture).unwrap();
