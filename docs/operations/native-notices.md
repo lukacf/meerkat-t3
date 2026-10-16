@@ -188,7 +188,7 @@ provider credentials, or running app:
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3.12 -m unittest discover \
   -s scripts -p test_prepare_native_notice_inputs.py -v
-node --test scripts/collect-native-license-notices.test.mjs
+pnpm --dir scripts exec vp test run collect-native-license-notices.test.js
 ```
 
 Fixture success checks the generator/collector contract. Before a binary release,
