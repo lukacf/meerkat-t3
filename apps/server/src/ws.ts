@@ -1,5 +1,6 @@
 import { makeMeerkatWorkspaceCheckpoints } from "./provider/meerkat/MeerkatWorkspaceCheckpoints.ts";
 import { makeMeerkatUsageService } from "./provider/meerkat/MeerkatUsageService.ts";
+import { ensureNativeProviderSettingsIntent } from "./providerSettingsIntent.ts";
 import {
   makeProjectTerminalService,
   makeThreadTerminalLaunchResolver,
@@ -2861,13 +2862,20 @@ const makeWsRpcLayer = (
               // Only explicit catalog refreshes bypass T3's caches. Workspace
               // discovery and background status checks retain their timers.
               if (input.refreshModels) {
-                yield* modelManifest.forceRefresh;
-                const instances = yield* providerInstances.listInstances;
+                const instances = (yield* providerInstances.listInstances).filter(
+                  (instance) =>
+                    input.instanceId === undefined || input.instanceId === instance.instanceId,
+                );
+                // Native Meerkat discovery does not use the donor manifest.
+                if (
+                  instances.some(
+                    (instance) => instance.enabled && instance.driverKind !== "meerkat",
+                  )
+                ) {
+                  yield* modelManifest.forceRefresh;
+                }
                 yield* Effect.forEach(
-                  instances.filter(
-                    (instance) =>
-                      input.instanceId === undefined || input.instanceId === instance.instanceId,
-                  ),
+                  instances,
                   (instance) =>
                     Effect.gen(function* () {
                       yield* instance.invalidateCaches ?? Effect.void;
@@ -3307,8 +3315,8 @@ const makeWsRpcLayer = (
         [WS_METHODS.serverUpdateProviderSettings]: ({ intent }) =>
           observeRpcEffect(
             WS_METHODS.serverUpdateProviderSettings,
-            serverSettings
-              .updateProviderSettings(intent)
+            ensureNativeProviderSettingsIntent(intent)
+              .pipe(Effect.andThen(serverSettings.updateProviderSettings(intent)))
               .pipe(Effect.map(ServerSettings.redactServerSettingsForClient)),
             { "rpc.aggregate": "server" },
           ),

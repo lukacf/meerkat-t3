@@ -198,7 +198,7 @@ it("retains a failed edit and retries the same unchanged value on the exact envi
   });
   expect(commands.refresh).toHaveBeenCalledWith({ environmentId: remoteId, input: { instanceId } });
   expect(alerts()).toHaveLength(0);
-  expect(statusText()).toContain("first task will confirm model access");
+  expect(statusText()).toContain("first request will confirm model access");
 });
 
 it("replaces a failed key edit with its removal and retries only that removal, then only its check", async () => {

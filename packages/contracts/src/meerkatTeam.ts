@@ -108,6 +108,20 @@ export const MeerkatAgentReasoningObservation = Schema.Union([
 ]);
 export type MeerkatAgentReasoningObservation = typeof MeerkatAgentReasoningObservation.Type;
 
+/** Native account observation for the persisted session model and binding. */
+export const MeerkatAgentModelAuth = Schema.Struct({
+  state: Schema.Literals(["connected", "needs_auth", "reauth_required", "host_managed", "unknown"]),
+  source: Schema.Literals(["pinned", "default"]),
+  provider: TrimmedNonEmptyString,
+  realmId: Schema.optional(Schema.String),
+  bindingId: Schema.optional(Schema.String),
+  profileId: Schema.optional(Schema.String),
+  accountLabel: Schema.optional(Schema.String),
+  authMethod: Schema.optional(Schema.String),
+  backendKind: Schema.optional(Schema.String),
+});
+export type MeerkatAgentModelAuth = typeof MeerkatAgentModelAuth.Type;
+
 export const MeerkatAgentWork = Schema.Struct({
   status: Schema.Literals(["running", "idle", "unknown", "unloaded"]),
   observedAt: IsoDateTime,
@@ -132,6 +146,7 @@ export const MeerkatAgentWork = Schema.Struct({
   ),
   model: Schema.optional(Schema.String),
   modelProvider: Schema.optional(TrimmedNonEmptyString),
+  modelAuth: Schema.optional(MeerkatAgentModelAuth),
   reasoning: Schema.optional(MeerkatAgentReasoningObservation),
   objective: Schema.optional(Schema.String),
   outcome: Schema.optional(Schema.String),

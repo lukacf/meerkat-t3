@@ -171,7 +171,7 @@ mod tests {
         assert!(read_input(&path, &session, &key).unwrap().is_none());
         assert!(!path.exists());
         let store = Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(&path).unwrap());
-        let machine = MeerkatMachine::persistent_without_blobs(store);
+        let machine = MeerkatMachine::persistent_without_blobs(store).unwrap();
         machine.register_session(session.clone()).await.unwrap();
         let input = super::super::steer_input("Resume with this instruction".into(), key.clone());
         let input_id = input.id().clone();

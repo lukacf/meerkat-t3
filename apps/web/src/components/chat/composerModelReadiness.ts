@@ -38,8 +38,8 @@ export function resolveComposerPrimaryActionAvailability(input: {
         ? "Choose a project to send a message."
         : input.noProviderAvailable
           ? input.providerCatalogPending
-            ? "Checking available providers..."
-            : "The selected provider is unavailable. Check provider settings."
+            ? "Checking model access..."
+            : "Model access is unavailable. Check Settings > Providers."
           : null),
   };
 }
@@ -84,21 +84,26 @@ export function getComposerModelSendBlock(input: {
           !canCheckProviderWorkspaceReadiness(entry.snapshot)))
     ) {
       return {
-        reason: "The selected Meerkat provider is unavailable. Check provider settings.",
+        reason: "Model access is unavailable. Check Settings > Providers.",
         action: settingsAction,
       };
     }
     if (isNative && input.pendingWorkspaceInstanceIds?.has(selection.instanceId))
       return { reason: "Checking models for this workspace...", action: null };
     const credentialModel = isNative
-      ? selected
+      ? selected?.isUnavailable
+        ? undefined
+        : selected
       : entry?.models.find((model) => model.slug === selection.model);
-    if (modelCredentialRequirement(credentialModel)) {
+    const credentialBlock = modelCredentialRequirement(credentialModel, isNative);
+    if (credentialBlock) {
       return {
         reason:
           credentialModel?.credentialState === "reauth_required"
             ? "Reconnect this model account to send."
-            : "Connect a model account to send.",
+            : credentialModel?.credentialState === "needs_auth"
+              ? "Connect a model account to send."
+              : credentialBlock,
         accountSetup: { instanceId: selection.instanceId, model: selection.model },
         action: { ...settingsAction, label: "Connect model account" },
       };
@@ -106,8 +111,7 @@ export function getComposerModelSendBlock(input: {
     // Other drivers retain their own custom-model and startup validation rules.
     if (!isNative) continue;
     if (!input.catalogKnown) return { reason: "Checking available models...", action: null };
-    const modelHasCredentials =
-      selected?.credentialState === "connected" || selected?.credentialState === "host_managed";
+    const modelHasCredentials = selected?.credentialState === "connected";
     if (entry?.snapshot.supportsWorkspaceReadiness === true && entry.status === "error") {
       return {
         reason: "Could not check models for this workspace. Refresh the provider in Settings.",

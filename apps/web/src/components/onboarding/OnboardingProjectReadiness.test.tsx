@@ -225,7 +225,7 @@ it.each(["done", "removed"] as const)(
     await settleRead(1, repository);
     expect(text()).toContain("Git repository found");
     expect(text()).toContain("Commit author ready");
-    expect(button("Continue to first task")!.props.disabled).toBe(false);
+    expect(button("Continue to project agents")!.props.disabled).toBe(false);
     await act(async () => renderer!.update(view({ ...project })));
     await publishClones([]);
     expect(readCount).toBe(2);
@@ -247,7 +247,7 @@ it("replaces a pre-clone read still in flight when the completed clone first app
   await settleRead(1, repository);
   await oldRead;
   expect(text()).toContain("Git repository found");
-  expect(button("Continue to first task")!.props.disabled).toBe(false);
+  expect(button("Continue to project agents")!.props.disabled).toBe(false);
   expect(readCount).toBe(2);
 });
 
@@ -276,7 +276,7 @@ it("hides cached setup actions after a failed refresh and permits an explicit ch
   expect(continueButton().props.disabled).toBe(true);
   await settleRead(2, repository);
   expect(text()).toContain("Git repository found");
-  expect(button("Continue to first task")!.props.disabled).toBe(false);
+  expect(button("Continue to project agents")!.props.disabled).toBe(false);
 });
 
 it("keeps Git setup available on servers without clone tracking", async () => {
@@ -285,7 +285,7 @@ it("keeps Git setup available on servers without clone tracking", async () => {
   await requests[0]!.started.promise;
   await settleRead(0, repository);
   expect(mocks.clones).not.toHaveBeenCalled();
-  expect(button("Continue to first task")!.props.disabled).toBe(false);
+  expect(button("Continue to project agents")!.props.disabled).toBe(false);
   await act(async () => renderer!.update(view()));
   expect(readCount).toBe(1);
 });

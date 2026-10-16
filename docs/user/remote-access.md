@@ -1,6 +1,6 @@
 # Remote access
 
-This is an inherited reference for the original T3 product. Remote installation and these CLI commands are not supported setup steps for the Meerkat pilot. Use the [local Mac setup](getting-started.md). An existing compatible server must supply its own pairing link through its connection settings or operator.
+> **Inherited T3 reference.** This page describes the original T3 Code feature retained in the source. It is not part of the supported MeerkaT3 preview setup. Use [Installation](install.md) and [Providers and accounts](accounts.md) for MeerkaT3. Original T3 commands and downloads install a separate product.
 
 Connect a phone, browser, or another desktop app to T3 Code running on a different
 machine. That machine must stay running and reachable while you work.
@@ -18,7 +18,7 @@ t3 connect
 ```
 
 Follow the sign-in instructions. Setup offers a
-[background service](./background-service.md); if you decline it, start the
+[background service](https://github.com/pingdotgg/t3code/blob/main/docs/user/background-service.md); if you decline it, start the
 server with `t3 serve`. Saving your sign-in alone does not make the machine
 reachable.
 
@@ -128,7 +128,7 @@ or reuses a server there and opens the port forward for you. Projects, provider
 credentials, and agent work stay on the remote machine.
 
 The remote host must be Linux or an Apple Silicon Mac with `curl` or `wget`,
-`tar`, `sha256sum` or `shasum`, and [provider setup](./install.md#providers).
+`tar`, `sha256sum` or `shasum`, and [provider setup](https://github.com/pingdotgg/t3code/blob/main/docs/user/install.md#providers).
 The first launch downloads T3 Code's server to `~/.t3/runtime` on the host, so
 it takes longer than later ones.
 Provider CLIs must be on the `PATH` of a non-interactive login shell there;
@@ -143,7 +143,7 @@ the connection stops a server that T3 Code launched; a server that was already
 running is left alone.
 
 For Antigravity's Google callback on a remote host, see
-[remote sign-in](./providers-antigravity.md#sign-in-from-a-remote-device).
+[remote sign-in](https://github.com/pingdotgg/t3code/blob/main/docs/user/providers-antigravity.md#sign-in-from-a-remote-device).
 
 ## Manage or revoke access
 
@@ -168,7 +168,7 @@ usually runs five to ten minutes after the tunnel goes down.
 
 On a command-line host, `t3 connect unlink` disables exposure while retaining
 your login; `t3 connect logout` also clears that login. Background-service
-[removal](./background-service.md#manage-the-service) is separate.
+[removal](https://github.com/pingdotgg/t3code/blob/main/docs/user/background-service.md#manage-the-service) is separate.
 
 Treat pairing URLs and authorization codes as passwords. Do not include them in
 screenshots, logs, or bug reports.
@@ -178,7 +178,7 @@ screenshots, logs, or bug reports.
 Run `t3 connect status` on the host to inspect saved authorization and link
 configuration. It is not a live reachability check. If the environment appears
 offline, run `t3 service status` and read the displayed log. If it disappears
-when SSH closes, see [background-service troubleshooting](./background-service.md#troubleshooting).
+when SSH closes, see [background-service troubleshooting](https://github.com/pingdotgg/t3code/blob/main/docs/user/background-service.md#troubleshooting).
 
 | Error                                                     | Recovery                                                                                                                                    |
 | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -194,7 +194,7 @@ foreground server, stop it and run `t3 serve` again with your usual options.
 Include the diagnostic message and trace ID when reporting a persistent failure.
 
 For a connection that still fails after linking, check the date and time on both
-devices. For server version warnings, follow [Updating T3 Code](./updating.md).
+devices. For server version warnings, follow [Updating T3 Code](https://github.com/pingdotgg/t3code/blob/main/docs/user/updating.md).
 
 ## Using the Desktop App as a Remote Only
 

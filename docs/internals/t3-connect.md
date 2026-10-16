@@ -1,5 +1,10 @@
 # T3 Connect
 
+> Scope: this page is reference material for the inherited T3 Connect implementation. It is not a
+> supported MeerkaT3 preview service or release path. The supported local Mac stack
+> is described in [development](../operations/development.md) and
+> [distribution](../operations/meerkat-distribution.md).
+
 T3 Connect uses Clerk for cloud identity. The relay manages environment links,
 credentials for reaching environments, and managed tunnel allocations. After
 bootstrap, clients send application traffic through the environment's tunnel

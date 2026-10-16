@@ -102,7 +102,7 @@ beforeEach(() => {
   state.createHost.mockReset();
   state.resumeHost.mockReset();
   state.savedAttempt = null;
-  state.models = [{ slug: "review-model", isDefault: true }];
+  state.models = [{ slug: "review-model", isDefault: true, credentialState: "connected" }];
   state.grant.mockResolvedValue({ _tag: "Success", value: { enabled: true } });
   state.threads = [
     {
@@ -341,6 +341,23 @@ it("offers only exact-checkout hosts for a primary specialist without starting a
   );
   expect(state.grant).not.toHaveBeenCalled();
 });
+
+it.each([undefined, "unknown", "host_managed"] as const)(
+  "blocks a new browser handoff when native account access is %s",
+  async (credentialState) => {
+    state.models = [{ slug: "review-model", isDefault: true, credentialState }];
+    await act(async () => {
+      renderer = create(
+        <AgentBrowserControls scope={scope} {...context} currentModel="review-model" />,
+      );
+    });
+    expect(button("Create browser workspace").props.disabled).toBe(true);
+    expect(text()).toContain("Check this provider in Settings > Providers");
+    await act(async () => button("Create browser workspace").props.onClick());
+    expect(state.createHost).not.toHaveBeenCalled();
+    expect(state.grant).not.toHaveBeenCalled();
+  },
+);
 
 it("preserves a native raw model during browser handoff and blocks it if its account expires", async () => {
   state.models = [

@@ -82,10 +82,12 @@ function readInstanceCustomModels(
 
 export interface AppModelOption {
   credentialState?: ServerProviderModel["credentialState"];
+  catalogTier?: ServerProviderModel["catalogTier"];
   slug: string;
   name: string;
   shortName?: string;
   subProvider?: string;
+  accountLabel?: string;
   aliases?: ReadonlyArray<string>;
   badge?: "new";
   isCustom: boolean;
@@ -129,7 +131,9 @@ export function toAppModelOption(model: ServerProvider["models"][number]): AppMo
   };
   if (model.shortName) option.shortName = model.shortName;
   if (model.subProvider) option.subProvider = model.subProvider;
+  if (model.accountLabel) option.accountLabel = model.accountLabel;
   if (model.credentialState) option.credentialState = model.credentialState;
+  if (model.catalogTier) option.catalogTier = model.catalogTier;
   if (model.aliases) option.aliases = model.aliases;
   if (model.badge) option.badge = model.badge;
   if (model.isDefault) option.isDefault = true;
@@ -320,7 +324,13 @@ export function resolveAppModelSelectionForInstance(
     resolutionOptions?.preserveUnavailableSelection ? selectedModel : null,
   );
   const resolvedSelection = resolveSelectableModel(entry.driverKind, selectedModel, options);
-  if (resolvedSelection) {
+  if (
+    resolvedSelection &&
+    !modelCredentialRequirement(
+      options.find((option) => option.slug === resolvedSelection),
+      entry.driverKind === "meerkat",
+    )
+  ) {
     return resolvedSelection;
   }
   if (
@@ -338,7 +348,9 @@ export function resolveAppModelSelectionForInstance(
       return unavailableSelection;
     }
   }
-  const usableOptions = options.filter((option) => !modelCredentialRequirement(option));
+  const usableOptions = options.filter(
+    (option) => !modelCredentialRequirement(option, entry.driverKind === "meerkat"),
+  );
   return usableOptions.find((option) => option.isDefault)?.slug ?? usableOptions[0]?.slug ?? null;
 }
 

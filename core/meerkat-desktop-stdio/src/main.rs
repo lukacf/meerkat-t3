@@ -47,9 +47,9 @@ fn main() -> Result<()> {
         .thread_stack_size(16 * 1024 * 1024)
         .build()?;
     let result = runtime.block_on(async_main());
-    // SIGTERM can leave Tokio's uncancellable blocking stdin read waiting on
-    // an open parent pipe. Native cleanup and stdout have already drained in
-    // async_main; do not wait for another byte before exiting the process.
+    // Successful async_main completion means native cleanup and stdout drained.
+    // On failure, stdin or a request may still be blocked in synchronous I/O.
+    // Do not let runtime destruction turn a bounded failure into an endless wait.
     runtime.shutdown_background();
     result
 }
@@ -179,24 +179,20 @@ async fn async_main() -> Result<()> {
     // Keep output forwarding alive until the runtime drains and the admitted
     // RPC tasks have settled. EOF and termination signals use the same path.
     let deadline = tokio::time::Instant::now() + MeerkatGateway::shutdown_horizon();
-    let cleanup = tokio::time::timeout_at(deadline, async {
-        let failures = gateway.shutdown().await;
-        while requests.join_next().await.is_some() {}
-        failures
-    })
-    .await;
-    let mut failures = match cleanup {
-        Ok(failures) => failures,
-        Err(_) => {
-            requests.abort_all();
-            while requests.join_next().await.is_some() {}
-            vec!["Native shutdown exceeded its published horizon".to_string()]
-        }
-    };
+    let mut failures = finish_native_cleanup(
+        gateway.shutdown(),
+        gateway.drain_storage_observers(),
+        gateway.settle_credential_mutations(deadline),
+        &mut requests,
+        deadline,
+    ).await;
     host_tool_task.abort();
-    let _ = host_tool_task.await;
-    // All admitted producers have settled. Drain the bridge's already-published
-    // terminal events before queuing the shutdown receipt on the same writer.
+    if tokio::time::timeout_at(deadline, host_tool_task).await.is_err() {
+        failures.push("Host-tool bridge exceeded the shutdown deadline".to_string());
+    }
+    // On success, all admitted producers have settled. After a deadline failure,
+    // a blocked task may retain an output sender. Attempt the terminal-event and
+    // receipt drain within the same deadline, without promising receipt delivery.
     let _ = drain_events.send(());
     if let Err(error) = finish_output_task(event_task, deadline).await {
         failures.push(format!("Event bridge could not drain: {error}"));
@@ -221,6 +217,42 @@ async fn async_main() -> Result<()> {
         "Native runtime cleanup did not complete"
     );
     Ok(())
+}
+
+async fn finish_native_cleanup(
+    shutdown: impl std::future::Future<Output = Vec<String>>,
+    drain_observers: impl std::future::Future<Output = Vec<String>>,
+    settle_credentials: impl std::future::Future<Output = Vec<String>>,
+    requests: &mut tokio::task::JoinSet<()>,
+    deadline: tokio::time::Instant,
+) -> Vec<String> {
+    match tokio::time::timeout_at(deadline, async {
+        let mut failures = shutdown.await;
+        while let Some(result) = requests.join_next().await {
+            if let Err(error) = result {
+                failures.push(format!("An admitted request failed during shutdown: {error}"));
+            }
+        }
+        // Requests can hold the last runtime/store clones. Only observe stores
+        // after they have joined, under the same process shutdown deadline.
+        if failures.is_empty() {
+            failures.extend(drain_observers.await);
+            // Observer refusals do not reopen request admission. Credential
+            // work still has to settle, and every phase shares this deadline.
+            failures.extend(settle_credentials.await);
+        }
+        failures
+    })
+    .await
+    {
+        Ok(failures) => failures,
+        Err(_) => {
+            // Abort only requests cancellation. A task blocked inside its poll
+            // cannot observe it yet, so joining here could exceed the deadline.
+            requests.abort_all();
+            vec!["Native shutdown exceeded its published horizon".to_string()]
+        }
+    }
 }
 
 async fn write_output<W: io::AsyncWrite + Unpin>(
@@ -535,6 +567,209 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+    }
+
+    #[tokio::test]
+    async fn native_cleanup_drains_admitted_requests_before_success() {
+        use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+        struct RequestGuard(Arc<AtomicBool>);
+        impl Drop for RequestGuard {
+            fn drop(&mut self) { self.0.store(true, Ordering::SeqCst); }
+        }
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = RequestGuard(Arc::clone(&dropped));
+        let mut requests = tokio::task::JoinSet::new();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let (settled, settlement) = tokio::sync::oneshot::channel();
+        requests.spawn(async move {
+            released.await.unwrap();
+            settled.send(()).unwrap();
+            drop(guard);
+        });
+        let failures = super::finish_native_cleanup(
+            async move {
+                release.send(()).unwrap();
+                Vec::new()
+            },
+            async move {
+                assert!(dropped.load(Ordering::SeqCst), "observer phase ran before request-owned handles dropped");
+                settlement.await.unwrap();
+                Vec::new()
+            },
+            async { Vec::new() },
+            &mut requests,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert!(failures.is_empty());
+        assert!(requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn native_cleanup_preserves_reported_failures() {
+        let mut requests = tokio::task::JoinSet::new();
+        let failures = super::finish_native_cleanup(
+            async { vec!["fixture cleanup failure".to_string()] },
+            async { panic!("Observer drain must not follow failed native shutdown") },
+            async { Vec::new() },
+            &mut requests,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await;
+        assert_eq!(failures, ["fixture cleanup failure"]);
+    }
+
+    #[tokio::test]
+    async fn native_cleanup_preserves_observer_failures() {
+        let mut requests = tokio::task::JoinSet::new();
+        let failures = super::finish_native_cleanup(
+            async { Vec::new() },
+            async { vec!["mob observer still held".into()] },
+            async { Vec::new() },
+            &mut requests,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        ).await;
+        assert_eq!(failures, ["mob observer still held"]);
+    }
+
+    #[tokio::test]
+    async fn native_cleanup_settles_credentials_after_observers_and_preserves_pending() {
+        use std::sync::{Arc, Mutex};
+        let phases = Arc::new(Mutex::new(Vec::new()));
+        let native_phases = Arc::clone(&phases);
+        let observer_phases = Arc::clone(&phases);
+        let credential_phases = Arc::clone(&phases);
+        let mut requests = tokio::task::JoinSet::new();
+        let failures = super::finish_native_cleanup(
+            async move {
+                native_phases.lock().unwrap().push("native");
+                Vec::new()
+            },
+            async move {
+                observer_phases.lock().unwrap().push("observers");
+                vec!["observer refusal".into()]
+            },
+            async move {
+                credential_phases.lock().unwrap().push("credentials");
+                vec!["credential work remains pending".into()]
+            },
+            &mut requests,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        ).await;
+        assert_eq!(*phases.lock().unwrap(), ["native", "observers", "credentials"]);
+        assert_eq!(failures, ["observer refusal", "credential work remains pending"]);
+    }
+
+    #[tokio::test]
+    async fn native_cleanup_bounds_pending_credential_work_with_the_original_deadline() {
+        let mut requests = tokio::task::JoinSet::new();
+        let failures = super::finish_native_cleanup(
+            async { Vec::new() },
+            async { Vec::new() },
+            std::future::pending(),
+            &mut requests,
+            tokio::time::Instant::now(),
+        ).await;
+        assert_eq!(failures, ["Native shutdown exceeded its published horizon"]);
+    }
+
+    #[tokio::test]
+    async fn native_cleanup_does_not_drain_after_request_panic() {
+        let mut requests = tokio::task::JoinSet::new();
+        requests.spawn(async { panic!("fixture admitted request panic") });
+        let failures = super::finish_native_cleanup(
+            async { Vec::new() },
+            async { panic!("Observer drain must not follow a failed request") },
+            async { Vec::new() },
+            &mut requests,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        ).await;
+        assert_eq!(failures.len(), 1);
+        assert!(failures[0].contains("An admitted request failed during shutdown"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn blocked_request_poll_cannot_extend_cleanup_or_output_deadline() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{Arc, Condvar, Mutex};
+        use std::time::Duration;
+
+        let blocked = Arc::new((Mutex::new(false), Condvar::new()));
+        let request_blocked = blocked.clone();
+        let (entered, entry) = tokio::sync::oneshot::channel();
+        let (output, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let writer = tokio::spawn(super::write_output(tokio::io::sink(), receiver));
+        let mut requests = tokio::task::JoinSet::new();
+        requests.spawn(async move {
+            let (released, wake) = &*request_blocked;
+            let mut released = released.lock().unwrap();
+            entered.send(()).unwrap();
+            // Deliberately block inside poll, as a synchronous OS call does.
+            // pending().await would yield and therefore miss this regression.
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+            drop(released);
+            drop(output);
+        });
+
+        let watchdog_fired = Arc::new(AtomicBool::new(false));
+        let watchdog_flag = watchdog_fired.clone();
+        let watchdog_blocked = blocked.clone();
+        let watchdog = std::thread::spawn(move || {
+            let (released, wake) = &*watchdog_blocked;
+            let (mut released, _) = wake
+                .wait_timeout_while(released.lock().unwrap(), Duration::from_secs(3), |done| !*done)
+                .unwrap();
+            if !*released {
+                // A broken implementation must fail the assertion, not hang
+                // the whole test runtime waiting for this worker to finish.
+                watchdog_flag.store(true, Ordering::SeqCst);
+                *released = true;
+                wake.notify_all();
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), entry)
+            .await
+            .expect("request entered its blocking poll")
+            .unwrap();
+
+        let started = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(40);
+        let failures = super::finish_native_cleanup(
+            async { Vec::new() },
+            async { panic!("Observer drain must not follow an unjoined request") },
+            async { Vec::new() },
+            &mut requests,
+            deadline,
+        )
+            .await;
+        let returned_while_blocked = !*blocked.0.lock().unwrap();
+        // The still-blocked request owns the sender. An expired deadline must
+        // bound output closure too; a shutdown receipt is not guaranteed here.
+        let output_result = super::finish_output_task(writer, deadline).await;
+        let elapsed = started.elapsed();
+
+        // Release and join before assertions, including on a regression that
+        // needed the watchdog. Abort cannot clean up a synchronous poll alone.
+        {
+            let (released, wake) = &*blocked;
+            *released.lock().unwrap() = true;
+            wake.notify_all();
+        }
+        watchdog.join().unwrap();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while requests.join_next().await.is_some() {}
+        })
+        .await
+        .expect("released request task joins");
+
+        assert!(returned_while_blocked, "cleanup waited for the blocked poll");
+        assert!(!watchdog_fired.load(Ordering::SeqCst));
+        assert!(elapsed < Duration::from_secs(1), "elapsed: {elapsed:?}");
+        assert_eq!(failures, ["Native shutdown exceeded its published horizon"]);
+        assert_eq!(output_result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert!(requests.is_empty());
     }
 
     #[tokio::test]

@@ -294,7 +294,7 @@ it.effect(
       for (const [name, digest] of Object.entries(before.files))
         if (name !== "userdata/settings.json") expect(configured[name], name).toBe(digest);
       const migrated = yield* runMigrations().pipe(Effect.provide(h.database));
-      expect(migrated.map(([id]) => id)).toEqual([60, 61, 62, 63, 64]);
+      expect(migrated.map(([id]) => id)).toEqual([60, 61, 62, 63, 64, 65, 66, 67, 68, 69]);
       const afterRows = h.readRows();
       for (const name of selectedTables) {
         expect(afterRows[name]?.length).toBe(before.rows[name]?.length);

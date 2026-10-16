@@ -137,7 +137,7 @@ const handleFatalStartupError = Effect.fn("desktop.startup.handleFatalStartupErr
     if (stage === "bootstrap") yield* diagnostics.offerStartupReport;
     else
       yield* electronDialog.showErrorBox(
-        "Meerkat T3 failed to start",
+        "MeerkaT3 failed to start",
         "The desktop could not initialize. Contact the person who provided this build with its version and your macOS version.",
       );
   }

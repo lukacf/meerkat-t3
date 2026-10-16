@@ -261,7 +261,7 @@ function getAutoUpdateDisabledReason(args: {
   hasUpdateFeedConfig: boolean;
 }): string | null {
   if (!args.hasUpdateFeedConfig) {
-    return "Automatic updates are not available because no valid Meerkat update feed is configured. Ask your prototype distributor for the next build.";
+    return "Automatic updates are not configured. Install updates manually from https://github.com/lukacf/meerkat-t3/releases.";
   }
   if (args.isDevelopment || !args.isPackaged) {
     return "Automatic updates are only available in packaged production builds.";

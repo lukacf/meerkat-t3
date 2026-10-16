@@ -69,14 +69,14 @@ export function ProjectAgentModelFields({
             </SelectValue>
           </SelectTrigger>
           <SelectPopup>
-            {modelsWithCredentialsFirst(provider?.models ?? []).map((entry) => (
+            {modelsWithCredentialsFirst(provider?.models ?? [], true).map((entry) => (
               <SelectItem
                 key={entry.slug}
                 value={entry.slug}
-                disabled={Boolean(modelCredentialRequirement(entry))}
+                disabled={Boolean(modelCredentialRequirement(entry, true))}
               >
                 {entry.name}
-                {modelCredentialRequirement(entry) ? " (connect account)" : ""}
+                {modelCredentialRequirement(entry, true) ? " (connect account)" : ""}
               </SelectItem>
             ))}
           </SelectPopup>
@@ -98,18 +98,19 @@ export function ProjectAgentModelFields({
             </Link>
           </p>
         ) : null}
-        {!checkingModels && provider?.models.some((entry) => modelCredentialRequirement(entry)) && (
-          <p className="text-xs text-muted-foreground">
-            Some models need another account.{" "}
-            <Link
-              to="/settings/providers"
-              search={{ environmentId, instanceId: provider.instanceId }}
-            >
-              Connect in Providers
-            </Link>
-            .
-          </p>
-        )}
+        {!checkingModels &&
+          provider?.models.some((entry) => modelCredentialRequirement(entry, true)) && (
+            <p className="text-xs text-muted-foreground">
+              Some models need another account.{" "}
+              <Link
+                to="/settings/providers"
+                search={{ environmentId, instanceId: provider.instanceId }}
+              >
+                Connect in Providers
+              </Link>
+              .
+            </p>
+          )}
       </div>
       {(reasoning.descriptor || reasoning.unavailable) && (
         <div className="space-y-2 sm:col-span-2">
@@ -117,7 +118,10 @@ export function ProjectAgentModelFields({
           <Select
             value={reasoning.value}
             disabled={
-              disabled || !model || checkingModels || Boolean(modelCredentialRequirement(model))
+              disabled ||
+              !model ||
+              checkingModels ||
+              Boolean(modelCredentialRequirement(model, true))
             }
             onValueChange={(value) => {
               if (value === "default") onOptionsChange([]);

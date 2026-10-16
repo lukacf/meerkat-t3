@@ -4,7 +4,7 @@ import { useState } from "react";
 import { NoProjectsHero } from "../components/NoProjectsHero";
 import { FirstRunRecovery } from "../components/onboarding/FirstRunGate";
 import { WelcomeWizard } from "../components/onboarding/WelcomeWizard";
-import { useClientSettingsHydrationStatus } from "../hooks/useSettings";
+import { getClientSettings, useClientSettingsHydrationStatus } from "../hooks/useSettings";
 
 /** Onboarding overlays the workspace. Visiting /welcome reopens setup. */
 export const Route = createFileRoute("/welcome")({
@@ -45,7 +45,10 @@ function WelcomeRouteView() {
           onDone={async (projectRef) => {
             if (projectRef) {
               await navigate({
-                to: "/$environmentId/projects/$projectId/start",
+                to:
+                  getClientSettings().onboardingProgress?.step === "first-task"
+                    ? "/$environmentId/projects/$projectId/start"
+                    : "/$environmentId/projects/$projectId/agents/propose",
                 params: projectRef,
                 replace: true,
               });

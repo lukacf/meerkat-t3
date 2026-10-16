@@ -15,9 +15,7 @@ export function resolveDesktopAppDataDirectory(input: {
       )
     : input.platform === "darwin"
       ? input.joinPath(input.homeDirectory, "Library", "Application Support")
-      : Option.getOrElse(input.xdgConfigHome, () =>
-          input.joinPath(input.homeDirectory, ".config"),
-        );
+      : Option.getOrElse(input.xdgConfigHome, () => input.joinPath(input.homeDirectory, ".config"));
 }
 
 export function resolveDesktopUserDataDirectoryName(isDevelopment: boolean): string {

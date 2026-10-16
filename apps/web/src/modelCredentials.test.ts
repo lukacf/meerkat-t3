@@ -6,6 +6,30 @@ import {
 } from "./modelCredentials";
 
 describe("model credential readiness", () => {
+  it("directs reconnect to the account serving the model instead of its protocol family", () => {
+    expect(
+      modelCredentialRequirement(
+        {
+          credentialState: "reauth_required",
+          subProvider: "gemini",
+          accountLabel: "GitHub Copilot · King",
+        },
+        true,
+      ),
+    ).toBe("Reconnect GitHub Copilot · King in Settings > Providers.");
+  });
+
+  it.each([undefined, "unknown", "host_managed"] as const)(
+    "requires positive native account access for %s credentials",
+    (credentialState) => {
+      expect(
+        modelCredentialRequirement({ credentialState, subProvider: "OpenAI" }, true),
+      ).toContain("Check OpenAI");
+    },
+  );
+  it("enables native models only after their account is detected", () => {
+    expect(modelCredentialRequirement({ credentialState: "connected" }, true)).toBeNull();
+  });
   it("checks the current native model when no override was selected without guessing an ambiguous binding", () => {
     const models = [
       {

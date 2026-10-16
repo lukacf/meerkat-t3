@@ -102,7 +102,7 @@ export function getProviderSummary(
     if (provider.driver === "meerkat") {
       return {
         headline: authLabel ? `Credentials detected · ${authLabel}` : "Credentials detected",
-        detail: provider.message ?? "Your first task will confirm access to the selected model.",
+        detail: provider.message ?? "Your first request will confirm access to the selected model.",
       };
     }
     return {

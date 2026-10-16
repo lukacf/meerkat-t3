@@ -1,26 +1,42 @@
-# Accounts and billing
+# Providers and accounts
 
-## Choose the account that will run your model
+## Connect a model account
 
-Meerkat is the agent runtime bundled with the app. The model comes from the provider you connect, such as OpenAI, Anthropic, or Google. The self-service prototype path uses that provider's API key.
+Open **Settings > Providers** on the computer that will run your projects. You can connect an account before creating a project. First-run setup uses the same account controls.
 
-A subscription to a provider's chat app and access to its API are different products. Use an API account with billing or quota and access to the model you select. Model requests are billed by that provider. Meerkat T3 does not include model credits. The source-control account used to clone or publish code is separate again.
+Choose your provider and an authentication method:
 
-## Get an API key
+- **OpenAI:** sign in with ChatGPT or add an OpenAI API key.
+- **Anthropic:** sign in with Claude or add an Anthropic API key.
+- **Google:** sign in with Google Code Assist or add a Gemini API key.
+- **GitHub Copilot:** follow the device sign-in instructions.
+- **Azure OpenAI:** add the API key, endpoint and deployment name.
+- **Amazon Bedrock:** add a bearer token, endpoint and model or inference profile.
+- **Microsoft Foundry:** add an API key, endpoint and Claude deployment name.
 
-Choose the provider whose models you want to use:
+Follow the browser or device instructions for sign-in. For API access, enter credentials in the provider form and save them there. Never paste credentials into a conversation or bug report. Only methods supported by this build are offered.
 
-- **OpenAI:** Sign in to the [OpenAI API keys page](https://platform.openai.com/api-keys) and create a key for your API project. [API billing](https://help.openai.com/en/articles/9039756-managing-billing-for-chatgpt-and-the-api-platform) is separate from your ChatGPT subscription.
-- **Anthropic:** Open [Claude Console API keys](https://platform.claude.com/settings/keys), choose **Create key**, and scope it to the workspace you will use. Set up API billing in the Console; a [paid Claude chat plan does not include API access](https://support.claude.com/en/articles/9876003-i-have-a-paid-claude-subscription-pro-max-team-or-enterprise-plans-why-do-i-have-to-pay-separately-to-use-the-claude-api-and-console).
-- **Gemini:** Open [Google AI Studio API keys](https://aistudio.google.com/api-keys) and create a key in the Google Cloud project you want to use. Check that project's model access and quota. Some models have a limited free tier; paid access uses the project's [Gemini API billing](https://ai.google.dev/gemini-api/docs/billing).
+API requests use the API account's billing and quota. Browser sign-in uses the connected service's account and access rules; it does not convert a chat subscription into a general API key. This app does not include model credits. GitHub access for repositories is configured separately from model access.
 
-Copy the key, then return to Meerkat T3. If your organization manages API access, ask its administrator for access to the appropriate project or workspace.
+## Accounts and defaults
 
-In **Settings > Providers**, select Meerkat on the computer running your project, open **Credentials**, choose your provider, and enter the API key. Click outside the field or press Tab to save it. Keys are masked in the interface. Never paste a key into a conversation or a bug report. Configure only the account you intend to use, then choose one of its models.
+You can keep more than one account, such as personal and work accounts. Give each a recognizable name and choose the default account for its provider. New projects inherit accounts configured for this computer. Account links from a project or conversation preserve that project's configuration, including a specific checkout when applicable.
 
-For Azure OpenAI, select **Prefer Azure OpenAI** and enter a matching **Preferred Azure endpoint** and **Preferred Azure API key**. The fields save separately when you leave each field, so check that both values belong together before continuing.
+Review the selected computer and account before changing credentials. A project-specific account can take precedence over the computer's default. Open Providers from the affected conversation when you need to change the account used by that checkout.
 
-To remove the Azure preference, remove both preferred fields. Existing credentials on the computer or in **Project Connections** can still apply; removing the preference does not sign out those accounts.
+**Remove account** removes that account's saved configuration and credentials from this device, including its model connections. Agents and conversations remain saved. It does not revoke your account at the provider or remove credentials supplied elsewhere on the computer. Accounts managed outside the app may need to be changed at their source instead.
+
+## Connection status and models
+
+After signing in, return to the app and wait for the account result. Finishing the provider's browser page alone does not confirm that the app received the credentials. API-key accounts show **Key saved**; browser accounts show **Connected** when credentials are available.
+
+Recommended models are the suggested starting choices for that connection. Expand supported models to see the other choices. The list depends on your account and connection method: a ChatGPT sign-in and an OpenAI API key can offer different models, and Copilot uses its own account's model access. A catalog-supported model is not a promise of entitlement, quota, or a successful request.
+
+**Not verified** means the app has account configuration but has not confirmed usable credentials. Choose **Check account** when offered; this may ask the operating system to allow access to saved credentials. Reconnect if the check reports that sign-in is required. An unverified configuration does not count as a connected account.
+
+If a Copilot account is connected but its models have not been verified, **Check account** also refreshes that account's model discovery. Use the model-list refresh action after other account changes. If no models appear, keep the reported error and follow [Troubleshooting](troubleshooting.md#my-saved-model-or-account-is-unavailable).
+
+For an expired or revoked credential, reconnect or save a replacement for the same account. For quota, model access, endpoint, or network errors, correct the reported problem and retry the original task. Send a small non-sensitive message to confirm the complete path after configuration.
 
 ## Model and reasoning
 
@@ -30,21 +46,9 @@ For an existing project agent, **Use current agent model** keeps its saved model
 
 Prompt caching follows the model backend's automatic policy; there is no cache switch to configure. Support and cache hits vary by provider and request, so a saving is not guaranteed.
 
-## Model access and errors
-
-A catalog entry means the model is known, not that your account has access. If another provider's model asks for credentials, connect that provider or switch back to your connected account. If a saved draft names a model or reasoning level that is no longer offered, choose a supported model and level, or **Model default** for reasoning. Your saved choice is not proof of continuing access.
-
-After saving credentials, the app checks that the runtime detects them. This does not verify the key with the model provider. Send a small non-sensitive message to confirm the complete path. If it fails, use **Open provider settings** on the error to review the same account and computer, then retry. Setup also keeps **Manage credentials** available after detection. If saving or checking fails, use the displayed **Retry save** or **Retry check** before continuing.
-
-For a removed, expired, or revoked key, save a working replacement in that account's settings, refresh its status, and return to the original task. Quota, model access, and network errors need their own correction. Removing a saved key may expose credentials already configured on the computer; it does not necessarily sign out that provider. Connections configured by your pilot contact may use a separate account, so check **Project Connections** if changing the general key has no effect.
-
-## Browser sign-in
-
-The prototype can use browser sign-in when its distributor has already configured a supported OAuth profile. **Project Connections** shows Sign in only for those profiles. An unconfigured profile cannot be created by clicking Sign in. If you only have a chat subscription, ask the distributor whether it is supported; do not assume the API-key field accepts a subscription login.
-
 ## GitHub repositories
 
-Git and GitHub CLI are separate tools; the prototype does not install them. On a fresh Mac:
+Git and GitHub CLI are separate tools; the preview does not install them. On a fresh Mac:
 
 1. Install [Git](https://git-scm.com/downloads) and [GitHub CLI](https://cli.github.com/) 2.81.0 or newer. Open Terminal and check `git --version` and `gh --version`.
 2. Run `gh auth login --hostname github.com` in Terminal. Choose HTTPS for the clone path described here and follow the sign-in prompts using an account that can access your repository.
@@ -56,8 +60,8 @@ Existing Git credential helpers keep their current behavior. If GitHub is connec
 
 ## Several agents can make several requests
 
-A coordinator, project specialists, and workers can each use the provider account. Preparing a recommended team can start a separate repository study for each selected specialist. Start with one or two agents and inspect activity before adding more.
+Project specialists, task coordinators, and workers can each use the provider account. Preparing a proposed team starts a separate repository study for each selected specialist. Review the proposed assignments and select the smallest team that covers the domains you need. Inspect activity and provider usage as you add or connect specialists.
 
-In **Usage**, load a Meerkat lifetime-token snapshot to see recorded coordinator, specialist, and worker tokens in the selected connection's current storage. Retained sessions are included even after their agents have been unloaded. Missing measurements remain unknown, and an incomplete storage read produces no total. Cache tokens are included in input tokens; reasoning tokens are included in output tokens.
+In **Usage**, load a lifetime-token snapshot to see recorded coordinator, specialist, and worker tokens in the selected connection's current storage. Retained sessions are included even after their agents have been unloaded. Missing measurements remain unknown, and an incomplete storage read produces no total. Cache tokens are included in input tokens; reasoning tokens are included in output tokens.
 
 These snapshots exclude auxiliary generation, such as titles, and previous storage locations. They are not part of the period charts or dollar estimates. Connections that share storage can overlap, so their snapshots are not added together. Do not read an empty chart or a zero there as zero spend. Use your model provider's billing/usage view for account totals; estimates and missing prices in this app are not a spending limit.

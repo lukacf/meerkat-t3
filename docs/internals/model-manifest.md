@@ -1,27 +1,30 @@
-# Model manifest
+# Model catalog
 
-The [bundled manifest](../../apps/server/src/provider/model-manifest.json) allows
-offline startup; fetching it from `main` lets model metadata change between
-releases. Failed fetches or invalid data preserve the last usable manifest.
-Remote data must pass both catalog-reference validation and the owning provider's
-adapter validation before replacing the cache.
+The active MeerkaT3 model picker is a projection of the Meerkat native catalog and
+its account state. Authentication comes first: a backend's static model metadata
+does not establish that the current environment has an account able to use it.
 
-A newer bundle outranks the cached remote manifest by `updatedAt`, so a release can
-correct model data before the next successful fetch. Bump `updatedAt` whenever the
-file changes. Fetch time cannot establish which copy contains the newer edit.
+The [native catalog projection](../../apps/server/src/provider/Drivers/MeerkatDriver.ts)
+retains provider-qualified identity, recommended/supported classification, and
+credential availability. Model labels are presentation only; dispatch must retain
+the exact qualified model and account binding. A Claude model reached through
+Copilot is not an invitation to manufacture the same model under every backend.
 
-Generic catalog data describes presentation and capabilities. Each provider owns
-its adapter schema and dispatch mappings. Claude uses the manifest for its entire
-built-in catalog. Adding a model with an existing capability profile is a JSON
-edit; a new profile is needed only for a new capability combination. Codex still
-gets its model list from its app server.
+Account sign-in, explicit checks, default changes, and removal invalidate affected
+catalogs. An authoritative empty catalog clears stale availability. An unavailable
+native runtime must not cause the picker to silently switch to a legacy provider's
+model list. Saved conversations may still show their previous model while sending
+is unavailable.
 
-`currentModels.claudeAgent` is the current-model classification overlay for
-releases that predate catalog discovery; it does not add models to their catalogs.
-Catalog-aware releases use `providers.claudeAgent.models[].status` instead.
-Codex uses `currentModels.codex` as a legacy-classification overlay for discovered
-models.
+[Model options](../../apps/server/src/provider/meerkat/MeerkatModelOptions.ts) derive
+reasoning choices from native capability data. Unsupported choices are rejected
+before dispatch. Prompt caching is automatically configured where supported; it
+is not a separate user preference.
 
-Model data is schema-validated configuration. Tests should cover resolver, cache,
-and adapter semantics with synthetic model names, so adding a model never requires
-tests that repeat the configuration.
+The inherited `model-manifest.json` remains input to legacy adapters and metadata
+code. It is not the source of account access or the active Meerkat model catalog.
+Do not edit it to work around a native auth or catalog integration failure.
+
+Tests should use synthetic model identities and exercise projection, account
+changes, and native dispatch. Repeating today's model list in a test turns ordinary
+catalog updates into unrelated test maintenance.

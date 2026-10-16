@@ -998,19 +998,22 @@ describe("resumable onboarding settings", () => {
   it("keeps legacy installations compatible without inventing setup progress", () => {
     expect(decodeClientSettings({}).onboardingProgress).toBeNull();
   });
-  it("round-trips the chosen computer, project and first task independently of completion", () => {
-    const onboardingProgress = {
-      step: "first-task",
-      environmentIds: ["computer"],
-      startedAt: "2026-10-04T10:00:00.000Z",
-      projectRef: { environmentId: "computer", projectId: "project" },
-      threadId: "thread",
-    };
-    const settings = decodeClientSettings({ onboardingProgress });
-    expect(settings.onboardingCompletedAt).toBeNull();
-    expect(encodeClientSettings(settings).onboardingProgress).toEqual(onboardingProgress);
-    expect(decodeClientSettingsPatch({ onboardingProgress })).toEqual({ onboardingProgress });
-  });
+  it.each(["first-task", "project-agents"])(
+    "round-trips the chosen computer, project and saved %s independently of completion",
+    (step) => {
+      const onboardingProgress = {
+        step,
+        environmentIds: ["computer"],
+        startedAt: "2026-10-04T10:00:00.000Z",
+        projectRef: { environmentId: "computer", projectId: "project" },
+        threadId: "thread",
+      };
+      const settings = decodeClientSettings({ onboardingProgress });
+      expect(settings.onboardingCompletedAt).toBeNull();
+      expect(encodeClientSettings(settings).onboardingProgress).toEqual(onboardingProgress);
+      expect(decodeClientSettingsPatch({ onboardingProgress })).toEqual({ onboardingProgress });
+    },
+  );
   it("rejects progress with an unknown stage or unscoped project", () => {
     const progress = {
       step: "projects",
@@ -1068,4 +1071,23 @@ describe("provider settings intents", () => {
     expect(() => decode({ kind: "edit", instanceId: "custom", changes: {} })).toThrow();
     expect(() => decode({ kind: "resetDefault", driver: "meerkat" })).toThrow();
   });
+});
+
+it("preserves optional onboarding resume metadata while older saved records omit it", () => {
+  const progress = {
+    step: "projects",
+    resumeStep: "project-agents",
+    environmentIds: ["remote"],
+    startedAt: "2026-10-08T12:00:00.000Z",
+    projectRef: { environmentId: "remote", projectId: "project" },
+    threadId: "setup",
+  };
+  expect(
+    encodeClientSettings(decodeClientSettings({ onboardingProgress: progress })).onboardingProgress,
+  ).toEqual(progress);
+  expect(decodeClientSettingsPatch({ onboardingProgress: progress })).toEqual({
+    onboardingProgress: progress,
+  });
+  const { resumeStep: _resume, ...legacy } = progress;
+  expect(decodeClientSettings({ onboardingProgress: legacy }).onboardingProgress).toEqual(legacy);
 });

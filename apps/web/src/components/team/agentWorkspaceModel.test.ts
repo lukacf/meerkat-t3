@@ -94,13 +94,13 @@ describe("native workspace model selection", () => {
     );
   });
 
-  it("keeps unknown and host-managed models usable without inventing credential failures", () => {
+  it("requires detected credentials before using unknown or host-managed models", () => {
     for (const state of [undefined, "unknown", "host_managed"] as const) {
       const { credentialState: _, ...base } = model("custom:ready");
       const current = { ...base, ...(state ? { credentialState: state } : {}) };
       expect(resolveAgentWorkspaceModel([current], "ready")).toEqual({
-        model: current,
-        blockedReason: null,
+        model: undefined,
+        blockedReason: expect.stringContaining("Check this provider"),
       });
     }
   });

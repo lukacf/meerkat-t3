@@ -1,0 +1,6 @@
+objc2@0.6.4
+
+The exact upstream root LICENSE.md declares this crate to be MIT licensed and explicitly links the included canonical MIT terms.
+The accompanying canonical MIT terms are reproduced from the Open Source Initiative.
+Its generic YEAR and COPYRIGHT HOLDER placeholders are preserved exactly. They are not an attribution to any person or company.
+No copyright holder or year has been inferred or added. Existing source declarations and caveats are preserved separately.

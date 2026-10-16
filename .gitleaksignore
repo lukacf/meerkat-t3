@@ -1,0 +1,233 @@
+# Reviewed historical Gitleaks findings only.
+# Each fingerprint identifies one immutable commit, path, rule, and line.
+# Do not add path-wide exclusions: new or changed credentials must still fail CI.
+# The inherited donor fixtures include synthetic TLS keys, example credentials,
+# public OAuth identifiers, keyboard shortcuts, and non-secret type names.
+# MeerkaT3 fixtures add UUID idempotency keys, not authentication credentials.
+# Before adding a fingerprint, inspect the exact source and document why it is
+# not a secret. Never baseline an actual credential, even after rotation.
+
+# Non-secret UUID idempotency key in deterministic UI fixture.
+ead4229eb958071db0e3f8c2c40f41ca707b3165:apps/web/src/components/team/nativeAssistantOccurrence.chronology.fixture.json:generic-api-key:176
+
+# Non-secret UUID idempotency key in deterministic UI fixture.
+ead4229eb958071db0e3f8c2c40f41ca707b3165:apps/web/src/components/team/nativeToolActivity.question.fixture.json:generic-api-key:38
+
+# Non-secret UUID idempotency key in deterministic UI fixture.
+ead4229eb958071db0e3f8c2c40f41ca707b3165:apps/web/src/components/team/nativeToolActivity.question.fixture.json:generic-api-key:81
+
+# Non-secret UUID idempotency key in deterministic UI fixture.
+ead4229eb958071db0e3f8c2c40f41ca707b3165:apps/web/src/components/team/nativeToolActivity.question.fixture.json:generic-api-key:134
+
+# Public OAuth client identifier, not credential.
+e3c85ead63c3a69f9be5dbb873b3d87c9b76b43f:.repos/alchemy-effect/packages/alchemy/src/Cloudflare/Auth/OAuthClient.ts:generic-api-key:9
+
+# Deterministic public donor test/example value or type identifier.
+e3c85ead63c3a69f9be5dbb873b3d87c9b76b43f:.repos/alchemy-effect/packages/alchemy/test/Auth/fixtures/v0-home/credentials/work/cf-stored.json:generic-api-key:3
+
+# Deterministic public donor test/example value or type identifier.
+e3c85ead63c3a69f9be5dbb873b3d87c9b76b43f:.repos/alchemy-effect/packages/alchemy/test/Auth/Migration.test.ts:generic-api-key:106
+
+# Deterministic public donor test/example value or type identifier.
+e3c85ead63c3a69f9be5dbb873b3d87c9b76b43f:.repos/alchemy-effect/packages/alchemy/test/Docker/Docker.test.ts:generic-api-key:301
+
+# Public donor documentation/example constant or type identifier.
+e3c85ead63c3a69f9be5dbb873b3d87c9b76b43f:.repos/alchemy-effect/website/src/content/docs/cli/profile.mdx:generic-api-key:190
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+e3c85ead63c3a69f9be5dbb873b3d87c9b76b43f:.repos/effect-smol/packages/platform/deno/test/fixtures/tls/key.pem:private-key:1
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+e3c85ead63c3a69f9be5dbb873b3d87c9b76b43f:.repos/effect-smol/packages/platform/node/test/fixtures/tls/key.pem:private-key:1
+
+# Keyboard shortcut literal, not credential.
+719a76ca1dbf5490f1aa33ffb9966301e02be9a9:packages/shared/src/keybindings.ts:generic-api-key:43
+
+# Keyboard shortcut literal, not credential.
+9130d932f4ddb8abab595b7d12553b46a11c7b22:packages/shared/src/keybindings.ts:generic-api-key:54
+
+# Keyboard shortcut literal, not credential.
+9130d932f4ddb8abab595b7d12553b46a11c7b22:packages/shared/src/keybindings.ts:generic-api-key:55
+
+# Public donor documentation/example constant or type identifier.
+9d345fa957cf22806171c8037432eec8d9ed496d:.repos/alchemy-effect/examples/cloudflare-dev/src/EffectWorker.ts:generic-api-key:25
+
+# Public donor documentation/example constant or type identifier.
+9d345fa957cf22806171c8037432eec8d9ed496d:.repos/alchemy-effect/packages/alchemy/src/Cloudflare/Workers/SecretKey.ts:generic-api-key:149
+
+# Deterministic public donor test/example value or type identifier.
+9d345fa957cf22806171c8037432eec8d9ed496d:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/Workers/fixtures/secret-key/worker.ts:generic-api-key:9
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+9d345fa957cf22806171c8037432eec8d9ed496d:.repos/alchemy-effect/packages/alchemy/test/Fly/Certificate.test.ts:private-key:53
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+9d345fa957cf22806171c8037432eec8d9ed496d:.repos/alchemy-effect/packages/alchemy/test/Fly/Certificate.test.ts:private-key:105
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+9d345fa957cf22806171c8037432eec8d9ed496d:.repos/alchemy-effect/packages/alchemy/test/Fly/Certificate.test.ts:private-key:157
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+9d345fa957cf22806171c8037432eec8d9ed496d:.repos/alchemy-effect/packages/alchemy/test/Hetzner/Certificate.test.ts:private-key:55
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+9d345fa957cf22806171c8037432eec8d9ed496d:.repos/alchemy-effect/packages/alchemy/test/Hetzner/Certificate.test.ts:private-key:106
+
+# Deterministic public donor test/example value or type identifier.
+9d345fa957cf22806171c8037432eec8d9ed496d:.repos/alchemy-effect/packages/cloudflare-runtime/src/core/test/bindings/SecretKey.test.ts:generic-api-key:8
+
+# Deterministic public donor test/example value or type identifier.
+9d345fa957cf22806171c8037432eec8d9ed496d:.repos/alchemy-effect/packages/cloudflare-runtime/src/core/test/Docker.test.ts:generic-api-key:65
+
+# Deterministic public donor test/example value or type identifier.
+9d345fa957cf22806171c8037432eec8d9ed496d:.repos/alchemy-effect/packages/cloudflare-runtime/src/vite/test/websockets.test.ts:generic-api-key:108
+
+# Deterministic public donor test/example value or type identifier.
+458f5029882d6da3f2279893d6c9fffaf7748b5c:.repos/effect-smol/packages/platform/bun/test/BunHttpServer.test.ts:generic-api-key:39
+
+# Deterministic public donor test/example value or type identifier.
+458f5029882d6da3f2279893d6c9fffaf7748b5c:.repos/effect-smol/packages/platform/node/test/NodeHttpServer.test.ts:generic-api-key:914
+
+# Package version identifier, not credential.
+f2d5fc91e3030e5c3956fdadc13e1eaa25bcabe3:pnpm-workspace.yaml:generic-api-key:29
+
+# Deterministic public donor test/example value or type identifier.
+931e91527c285c49d8482328877c93c8c684591a:apps/server/src/httpResponseErrorGuard.test.ts:generic-api-key:61
+
+# Donor public Clerk publishable identifier and OAuth client identifier.
+4a07c1ca9d9033ef35161a1ffbea44d0418ca2bf:.env.example:generic-api-key:9
+
+# Donor public Clerk publishable identifier and OAuth client identifier.
+4a07c1ca9d9033ef35161a1ffbea44d0418ca2bf:.env.example:generic-api-key:11
+
+# Public donor documentation/example constant or type identifier.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/src/AWS/ACMPCA/CertificateAuthority.ts:generic-api-key:238
+
+# Public donor documentation/example constant or type identifier.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/src/AWS/WAFv2/APIKeys.ts:generic-api-key:62
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/AWS/ACM/fixtures/import-cert.ts:private-key:29
+
+# Deterministic public donor test/example value or type identifier.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/AWS/Amplify/Branch.test.ts:generic-api-key:19
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/AWS/ECS/ServiceDomain.test.ts:private-key:45
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/AWS/ELBv2/fixtures/certs.ts:private-key:35
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/AWS/ELBv2/fixtures/certs.ts:private-key:89
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/AWS/ELBv2/fixtures/certs.ts:private-key:143
+
+# Deterministic public donor test/example value or type identifier.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/AWS/PaymentCryptography/handler.ts:generic-api-key:77
+
+# Deterministic public donor test/example value or type identifier.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/AWS/PaymentCryptography/handler.ts:generic-api-key:90
+
+# Deterministic public donor test/example value or type identifier.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/AWS/PaymentCryptography/handler.ts:generic-api-key:104
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/CustomCertificate/fixtures/key2.pem:private-key:1
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/CustomCertificate/fixtures/key1.pem:private-key:1
+
+# Deterministic public donor test/example value or type identifier.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/Dns/ZoneTransferTsig.test.ts:generic-api-key:20
+
+# Deterministic public donor test/example value or type identifier.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/Dns/ZoneTransferTsig.test.ts:generic-api-key:22
+
+# Deterministic public donor test/example value or type identifier.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/Dns/ZoneTransferPeer.test.ts:generic-api-key:20
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/MtlsCertificate/fixtures/certs.ts:private-key:86
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:37
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:90
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:143
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:196
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:249
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:302
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:362
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:415
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Cloudflare/OriginTlsClientAuth/fixtures/certs.ts:private-key:468
+
+# Deterministic public donor test/example value or type identifier.
+108e01746c585d98703df5fe76cb6c213ecb6b8f:.repos/alchemy-effect/packages/alchemy/test/Output.test.ts:generic-api-key:851
+
+# Deterministic public donor test/example value or type identifier.
+08993a5ec8fbe5c55a2a4fa8f5fb37f870e87cf6:packages/effect-codex-app-server/src/protocol.test.ts:generic-api-key:117
+
+# Deterministic public donor test/example value or type identifier.
+08993a5ec8fbe5c55a2a4fa8f5fb37f870e87cf6:packages/effect-codex-app-server/src/protocol.test.ts:generic-api-key:121
+
+# Deterministic public donor test/example value or type identifier.
+7a820abfddbf77166d16614bb9bcabe8fcd2c829:apps/server/src/cloud/CliTokenManager.test.ts:generic-api-key:22
+
+# Deterministic public donor test/example value or type identifier.
+e95b57dc268471c882f734546fdcd92e9a833e45:apps/mobile/src/features/cloud/linkEnvironment.test.ts:generic-api-key:58
+
+# Deterministic public donor test/example value or type identifier.
+5ae77c0d63ece1a3e3fa5a70bc7717aa7c342756:apps/server/src/cloud/publicConfig.test.ts:generic-api-key:48
+
+# Deterministic public donor test/example value or type identifier.
+5ae77c0d63ece1a3e3fa5a70bc7717aa7c342756:apps/server/src/cloud/publicConfig.test.ts:generic-api-key:65
+
+# Deterministic public donor test/example value or type identifier.
+5ae77c0d63ece1a3e3fa5a70bc7717aa7c342756:apps/server/src/cloud/publicConfig.test.ts:generic-api-key:69
+
+# Public donor documentation/example constant or type identifier.
+bd851c0203f4318b8222566ef87009a189cdf1f5:.repos/alchemy-effect/examples/cloudflare-dev/src/NotifyWorkflow.ts:generic-api-key:11
+
+# Deterministic public donor test/example value or type identifier.
+bd851c0203f4318b8222566ef87009a189cdf1f5:.repos/alchemy-effect/examples/cloudflare-dev/test/integ.test.ts:generic-api-key:70
+
+# Public OAuth client identifier, not credential.
+bd851c0203f4318b8222566ef87009a189cdf1f5:.repos/alchemy-effect/packages/alchemy/src/Cloudflare/Auth/AuthProvider.ts:generic-api-key:705
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+bd851c0203f4318b8222566ef87009a189cdf1f5:.repos/alchemy-effect/packages/alchemy/test/AWS/IAM/fixtures.ts:private-key:19
+
+# Inherited public donor TLS/signing test fixture, no personal credential.
+bd851c0203f4318b8222566ef87009a189cdf1f5:.repos/alchemy-effect/packages/alchemy/test/KeyPair.test.ts:private-key:19
+
+# Public donor documentation/example constant or type identifier.
+e3f14058847dbd36695277aab941fefa94e21e5f:.repos/effect-smol/packages/effect/src/Config.ts:generic-api-key:1301
+
+# Documentation example numeric placeholder.
+e3f14058847dbd36695277aab941fefa94e21e5f:.repos/effect-smol/packages/effect/HTTPAPI.md:curl-auth-header:1039
+
+# Deterministic public donor test/example value or type identifier.
+e3f14058847dbd36695277aab941fefa94e21e5f:.repos/effect-smol/packages/effect/test/unstable/eventlog/EventLogIdentityDerivation.test.ts:generic-api-key:6
+
+# Public donor documentation/example constant or type identifier.
+e3f14058847dbd36695277aab941fefa94e21e5f:.repos/effect-smol/cookbooks/schedule.md:generic-api-key:21154
+
+# Pairing token alphabet, not token.
+b7559c467803f923e59a287c112b4c92b96e15c7:apps/server/src/auth/Layers/BootstrapCredentialService.ts:generic-api-key:33

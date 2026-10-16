@@ -1,5 +1,7 @@
 # Files in question answers
 
+> **Inherited T3 reference.** This page describes the original T3 Code feature retained in the source. It is not part of the supported MeerkaT3 preview setup. Use [Installation](install.md) and [Providers and accounts](accounts.md) for MeerkaT3. Original T3 commands and downloads install a separate product.
+
 When an agent asks a question that accepts a custom answer, use **Attach files** or paste an image into the answer field. On mobile, use the attachment button to choose photos or files. You can send a file by itself, with a selected option, or with a typed answer.
 
 Each question keeps its own attachments as you move between questions. Your normal prompt draft stays separate. Wait for uploads to finish before submitting; retry or remove any failed upload. A failed response keeps the draft available to try again.

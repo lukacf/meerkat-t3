@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vp test run"
+    "test": "vp test run --exclude '**/*.test.mjs' && node --test *.test.mjs"
   },
   "dependencies": {
     "@effect/platform-node": "catalog:",

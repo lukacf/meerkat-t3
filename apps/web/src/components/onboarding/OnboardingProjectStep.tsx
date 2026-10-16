@@ -351,8 +351,8 @@ export function OnboardingProjectStep({
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Choose your first project</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          A project is a folder of files. Start with a task in one conversation; add specialist
-          agents when you need them.
+          Choose a repository for your long-lived specialists. Meerkat can study its domains and
+          propose agents that work together across tasks and projects.
         </p>
       </div>
       {environmentIds.length > 1 ? (

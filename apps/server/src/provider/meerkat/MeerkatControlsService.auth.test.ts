@@ -6,6 +6,8 @@ import {
   ProviderInstanceId,
   ThreadId,
   type MeerkatAuthFlow,
+  type MeerkatAuthConnection,
+  type MeerkatAuthMethod,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -25,7 +27,19 @@ const instanceId = ProviderInstanceId.make("project-auth-instance");
 const projectId = ProjectId.make("project-b");
 const threadId = ThreadId.make("account-thread");
 const threadTarget = { threadId, expectedCwd: "/worktrees/thread-b" };
-const threadScope = { projectId, instanceId, threadTarget };
+const accountIdentity = { realmId: "project-b-realm", bindingId: "work", profileId: "work" };
+const threadScope = { projectId, instanceId, threadTarget, ...accountIdentity };
+const browserMethod: MeerkatAuthMethod = {
+  id: "openai-chatgpt",
+  provider: "openai",
+  displayName: "ChatGPT",
+  authMethod: "managed_chatgpt_oauth",
+  backendKind: "openai",
+  flow: "browser",
+  callback: { redirectHost: "localhost", path: "/auth/callback", ports: [0] },
+  description: "Fixture browser sign-in",
+  fields: [],
+};
 const deferred = <A>() => {
   let resolve!: (value: A) => void;
   const promise = new Promise<A>((resolvePromise) => {
@@ -37,6 +51,13 @@ const harness = Effect.fnUntraced(function* (
   options: {
     liveFlows?: boolean;
     beforeNativeRequest?: (method: string, params: Record<string, unknown>) => Promise<void>;
+    connections?: ReadonlyArray<MeerkatAuthConnection>;
+    methods?: ReadonlyArray<MeerkatAuthMethod>;
+    configureError?: string;
+    actionReceipt?: unknown;
+    defaultActivation?: MeerkatAuthFlow["defaultActivation"];
+    credentialsSaved?: boolean;
+    configureState?: MeerkatAuthConnection["state"];
   } = {},
 ) {
   const sql = yield* SqlClient.SqlClient;
@@ -78,8 +99,10 @@ const harness = Effect.fnUntraced(function* (
         await options.beforeNativeRequest?.(method, params);
         if (method === "auth.v1.status")
           return {
-            connections: [
+            methods: options.methods ?? [browserMethod],
+            connections: options.connections ?? [
               {
+                ...accountIdentity,
                 provider: "openai",
                 displayName: "OpenAI",
                 realmId,
@@ -88,18 +111,44 @@ const harness = Effect.fnUntraced(function* (
                 source: "oauth",
                 state: "connected",
                 supportsInteractiveLogin: true,
+                supportsRemoval: true,
+                authMethod: browserMethod.authMethod,
+                backendKind: browserMethod.backendKind,
               },
             ],
           };
+        if (method === "auth.v1.configure") {
+          if (options.configureError) throw new Error(options.configureError);
+          return {
+            ...(options.defaultActivation ? { defaultActivation: options.defaultActivation } : {}),
+            ...(options.credentialsSaved !== undefined
+              ? { credentialsSaved: options.credentialsSaved }
+              : {}),
+            connection: {
+              provider: "openai",
+              displayName: "OpenAI",
+              ...accountIdentity,
+              source: "managed_store",
+              state: options.configureState ?? "connected",
+              supportsInteractiveLogin: false,
+              authMethod: "api_key",
+              editable: true,
+            },
+          };
+        }
+        if (method === "auth.v1.delete") return options.actionReceipt ?? { deleted: true };
+        if (method === "auth.v1.check") return options.actionReceipt;
+        if (method === "auth.v1.default") return options.actionReceipt ?? { updated: true };
         if (method === "auth.v1.logout") {
           if (failLogout) throw new Error("Native logout failed.");
-          return {};
+          return options.actionReceipt ?? { cleared: true };
         }
         if (method === "auth.v1.loginStart") {
           redirectUri = String(params.redirectUri);
           return { authorizeUrl: "https://auth.example/start", state: "native-state" };
         }
-        if (method === "auth.v1.loginComplete") return {};
+        if (method === "auth.v1.loginComplete")
+          return options.defaultActivation ? { defaultActivation: options.defaultActivation } : {};
         throw new Error(`Unexpected native method: ${method}`);
       },
     },
@@ -158,9 +207,9 @@ const harness = Effect.fnUntraced(function* (
               if (failRefresh) throw new Error("Projection unavailable");
               return [];
             }),
-          refreshInstance: (id) =>
+          refreshInstance: (id, options) =>
             Effect.sync(() => {
-              refreshes.push({ operation: "default", instanceId: id });
+              refreshes.push({ operation: "default", instanceId: id, ...options });
               return [];
             }),
         }),
@@ -204,6 +253,107 @@ const harness = Effect.fnUntraced(function* (
 });
 
 describe("Meerkat project account projection refresh", () => {
+  const savedAccount: MeerkatAuthConnection = {
+    ...accountIdentity,
+    provider: "openai",
+    displayName: "ChatGPT",
+    source: "managed_store",
+    state: "unknown",
+    credentialObservation: "not_observed",
+    supportsInteractiveLogin: true,
+    editable: true,
+  };
+  it.effect(
+    "checks a saved account only on explicit request and refreshes its exact checkout",
+    () =>
+      Effect.gen(function* () {
+        const checked = {
+          ...savedAccount,
+          state: "connected" as const,
+          credentialObservation: null,
+        };
+        const h = yield* harness({
+          connections: [savedAccount],
+          actionReceipt: { checked: true, connection: checked },
+        });
+        const overview = yield* h.service.authStatus(threadScope);
+        expect(overview.connections[0]?.credentialObservation).toBe("not_observed");
+        expect(h.calls.map(({ method }) => method)).toEqual(["auth.v1.status"]);
+        const result = yield* h.service.authAction(
+          { ...threadScope, provider: "openai", action: "check" },
+          "owner",
+        );
+        expect(result).toMatchObject({ status: "connected", flowId: null, connection: checked });
+        expect(h.calls.at(-1)).toEqual({
+          method: "auth.v1.check",
+          params: {
+            provider: "openai",
+            ...accountIdentity,
+            projectPath: threadTarget.expectedCwd,
+            stateRoot: h.expectedThreadRoot,
+          },
+        });
+        expect(h.calls.map(({ method }) => method)).toEqual([
+          "auth.v1.status",
+          "auth.v1.status",
+          "auth.v1.check",
+        ]);
+        expect(h.refreshes).toEqual([
+          { operation: "workspace", instanceId, cwd: threadTarget.expectedCwd, invalidate: true },
+          { operation: "default", instanceId },
+        ]);
+        expect(h.flowScopes).toEqual([]);
+      }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
+  it.effect("keeps an unverified credential check unknown without starting OAuth", () =>
+    Effect.gen(function* () {
+      const h = yield* harness({
+        connections: [savedAccount],
+        actionReceipt: {
+          checked: true,
+          connection: { ...savedAccount, credentialObservation: "pending" },
+        },
+      });
+      const result = yield* h.service.authAction(
+        { instanceId, ...accountIdentity, provider: "openai", action: "check" },
+        "owner",
+      );
+      expect(result.status).toBe("disconnected");
+      expect(result.connection?.state).toBe("unknown");
+      expect(result.connection?.credentialObservation).toBe("pending");
+      expect(h.calls.map(({ method }) => method)).toEqual(["auth.v1.status", "auth.v1.check"]);
+      expect(h.refreshes).toEqual([
+        { operation: "default", instanceId, invalidateWorkspaces: true },
+      ]);
+    }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
+  it.effect.each(["negative", "other-account"])(
+    "rejects a %s credential check receipt",
+    (receipt) =>
+      Effect.gen(function* () {
+        const h = yield* harness({
+          connections: [savedAccount],
+          actionReceipt: {
+            checked: receipt !== "negative",
+            connection: {
+              ...savedAccount,
+              profileId: receipt === "other-account" ? "other" : savedAccount.profileId,
+            },
+          },
+        });
+        const result = yield* Effect.result(
+          h.service.authAction(
+            { instanceId, ...accountIdentity, provider: "openai", action: "check" },
+            "owner",
+          ),
+        );
+        expect(result._tag).toBe("Failure");
+        expect(h.refreshes).toEqual([]);
+      }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
   it.effect(
     "resolves an existing thread checkout without a native session and refreshes that scope",
     () =>
@@ -219,7 +369,7 @@ describe("Meerkat project account projection refresh", () => {
           },
         ]);
         const result = yield* h.service.authAction(
-          { ...threadScope, provider: "openai", action: "logout" },
+          { ...threadScope, ...accountIdentity, provider: "openai", action: "logout" },
           "owner",
         );
         expect(result.status).toBe("disconnected");
@@ -228,7 +378,11 @@ describe("Meerkat project account projection refresh", () => {
           params: {
             projectPath: threadTarget.expectedCwd,
             stateRoot: h.expectedThreadRoot,
+            ...accountIdentity,
             provider: "openai",
+            realmId: "project-b-realm",
+            bindingId: "work",
+            profileId: "work",
           },
         });
         expect(h.refreshes).toEqual([
@@ -267,7 +421,10 @@ describe("Meerkat project account projection refresh", () => {
           expect((yield* Effect.result(h.service.authStatus(input)))._tag).toBe("Failure");
           expect(
             (yield* Effect.result(
-              h.service.authAction({ ...input, provider: "openai", action: "logout" }, "owner"),
+              h.service.authAction(
+                { ...input, ...accountIdentity, provider: "openai", action: "logout" },
+                "owner",
+              ),
             ))._tag,
           ).toBe("Failure");
         }
@@ -296,7 +453,7 @@ describe("Meerkat project account projection refresh", () => {
         Effect.sync(h.dispose),
       );
       const flow = yield* h.service.authAction(
-        { ...threadScope, provider: "openai", action: "start" },
+        { ...threadScope, ...accountIdentity, provider: "openai", action: "start" },
         "owner",
       );
       const input = {
@@ -314,8 +471,12 @@ describe("Meerkat project account projection refresh", () => {
           params: {
             projectPath: threadTarget.expectedCwd,
             stateRoot: h.expectedThreadRoot,
+            ...accountIdentity,
             provider: "openai",
-            redirectUri: new URL(h.callbackUrl()).origin + "/oauth/callback",
+            realmId: "project-b-realm",
+            bindingId: "work",
+            profileId: "work",
+            redirectUri: new URL(h.callbackUrl()).origin + "/auth/callback",
             state: "native-state",
             code: "good",
           },
@@ -336,12 +497,13 @@ describe("Meerkat project account projection refresh", () => {
         Effect.sync(h.dispose),
       );
       const flow = yield* h.service.authAction(
-        { ...threadScope, provider: "openai", action: "start" },
+        { ...threadScope, ...accountIdentity, provider: "openai", action: "start" },
         "owner",
       );
       yield* h.service.authAction(
         {
           ...threadScope,
+          ...accountIdentity,
           provider: "openai",
           action: "complete",
           flowId: flow.flowId!,
@@ -354,7 +516,13 @@ describe("Meerkat project account projection refresh", () => {
       h.replaceInstance();
       const result = yield* Effect.result(
         h.service.authAction(
-          { ...threadScope, provider: "openai", action: "status", flowId: flow.flowId! },
+          {
+            ...threadScope,
+            ...accountIdentity,
+            provider: "openai",
+            action: "status",
+            flowId: flow.flowId!,
+          },
           "owner",
         ),
       );
@@ -377,17 +545,17 @@ describe("Meerkat project account projection refresh", () => {
         threadTarget: { ...threadTarget, threadId: siblingId },
       };
       yield* h.service.authAction(
-        { ...threadScope, provider: "openai", action: "start" },
+        { ...threadScope, ...accountIdentity, provider: "openai", action: "start" },
         "owner-a",
       );
       const siblingFlow = yield* h.service.authAction(
-        { ...siblingScope, provider: "openai", action: "start" },
+        { ...siblingScope, ...accountIdentity, provider: "openai", action: "start" },
         "owner-b",
       );
       const callbackUrl = h.callbackUrl();
       expect(
         (yield* h.service.authAction(
-          { ...threadScope, provider: "openai", action: "logout" },
+          { ...threadScope, ...accountIdentity, provider: "openai", action: "logout" },
           "owner-a",
         )).status,
       ).toBe("disconnected");
@@ -395,6 +563,7 @@ describe("Meerkat project account projection refresh", () => {
         h.service.authAction(
           {
             ...siblingScope,
+            ...accountIdentity,
             provider: "openai",
             action: "complete",
             flowId: siblingFlow.flowId!,
@@ -440,11 +609,17 @@ describe("Meerkat project account projection refresh", () => {
             threadTarget: { ...threadTarget, threadId: siblingId },
           };
           const starting = yield* h.service
-            .authAction({ ...siblingScope, provider: "openai", action: "start" }, "owner-b")
+            .authAction(
+              { ...siblingScope, ...accountIdentity, provider: "openai", action: "start" },
+              "owner-b",
+            )
             .pipe(Effect.result, Effect.forkChild);
           yield* Effect.promise(() => entered.promise);
           const signingOut = yield* h.service
-            .authAction({ ...threadScope, provider: "openai", action: "logout" }, "owner-a")
+            .authAction(
+              { ...threadScope, ...accountIdentity, provider: "openai", action: "logout" },
+              "owner-a",
+            )
             .pipe(Effect.forkChild);
           // Native account requests share the checkout lease. Observe the logout
           // reservation before releasing the older native request holding that lease.
@@ -465,6 +640,7 @@ describe("Meerkat project account projection refresh", () => {
               params: {
                 projectPath: threadTarget.expectedCwd,
                 stateRoot: h.expectedThreadRoot,
+                ...accountIdentity,
                 provider: "openai",
               },
             },
@@ -475,7 +651,7 @@ describe("Meerkat project account projection refresh", () => {
           ]);
           expect(
             (yield* h.service.authAction(
-              { ...siblingScope, provider: "openai", action: "start" },
+              { ...siblingScope, ...accountIdentity, provider: "openai", action: "start" },
               "owner-b",
             )).status,
           ).toBe("waiting");
@@ -511,18 +687,24 @@ describe("Meerkat project account projection refresh", () => {
           threadTarget: { ...threadTarget, threadId: siblingId },
         };
         const signingOut = yield* h.service
-          .authAction({ ...threadScope, provider: "openai", action: "logout" }, "owner-a")
+          .authAction(
+            { ...threadScope, ...accountIdentity, provider: "openai", action: "logout" },
+            "owner-a",
+          )
           .pipe(Effect.forkChild);
         yield* Effect.promise(() => entered.promise);
         const rejectedStart = yield* Effect.result(
-          h.service.authAction({ ...siblingScope, provider: "openai", action: "start" }, "owner-b"),
+          h.service.authAction(
+            { ...siblingScope, ...accountIdentity, provider: "openai", action: "start" },
+            "owner-b",
+          ),
         );
         expect(rejectedStart._tag).toBe("Failure");
         if (rejectedStart._tag === "Failure")
           expect(rejectedStart.failure.message).toContain("Sign-out is in progress");
         const rejectedLogout = yield* Effect.result(
           h.service.authAction(
-            { ...siblingScope, provider: "openai", action: "logout" },
+            { ...siblingScope, ...accountIdentity, provider: "openai", action: "logout" },
             "owner-b",
           ),
         );
@@ -531,7 +713,7 @@ describe("Meerkat project account projection refresh", () => {
           expect(rejectedLogout.failure.message).toContain("already in progress");
         expect(h.calls.map(({ method }) => method)).toEqual(["auth.v1.status", "auth.v1.logout"]);
         const otherCheckout = yield* h.service.authAction(
-          { projectId, instanceId, provider: "openai", action: "start" },
+          { projectId, instanceId, ...accountIdentity, provider: "openai", action: "start" },
           "owner-b",
         );
         expect(otherCheckout.status).toBe("waiting");
@@ -540,15 +722,19 @@ describe("Meerkat project account projection refresh", () => {
           params: {
             projectPath: "/project-b",
             stateRoot: h.expectedRoot,
+            ...accountIdentity,
             provider: "openai",
-            redirectUri: expect.stringMatching(/^http:\/\/127\.0\.0\.1:\d+\/oauth\/callback$/),
+            realmId: "project-b-realm",
+            bindingId: "work",
+            profileId: "work",
+            redirectUri: expect.stringMatching(/^http:\/\/localhost:\d+\/auth\/callback$/),
           },
         });
         yield* Effect.sync(() => release.resolve(undefined));
         expect((yield* Fiber.join(signingOut)).status).toBe("disconnected");
         expect(
           (yield* h.service.authAction(
-            { ...siblingScope, provider: "openai", action: "start" },
+            { ...siblingScope, ...accountIdentity, provider: "openai", action: "start" },
             "owner-b",
           )).status,
         ).toBe("waiting");
@@ -572,7 +758,7 @@ describe("Meerkat project account projection refresh", () => {
           Effect.sync(h.dispose),
         );
         yield* h.service.authAction(
-          { ...threadScope, provider: "openai", action: "start" },
+          { ...threadScope, ...accountIdentity, provider: "openai", action: "start" },
           "owner",
         );
         const sql = yield* SqlClient.SqlClient;
@@ -602,7 +788,7 @@ describe("Meerkat project account projection refresh", () => {
           Effect.sync(h.dispose),
         );
         const flow = yield* h.service.authAction(
-          { projectId, instanceId, provider: "openai", action: "start" },
+          { projectId, instanceId, ...accountIdentity, provider: "openai", action: "start" },
           "client-owner",
         );
         expect(flow.status).toBe("waiting");
@@ -623,8 +809,12 @@ describe("Meerkat project account projection refresh", () => {
         expect(h.calls.at(-1)?.params).toEqual({
           projectPath: "/project-b",
           stateRoot: h.expectedRoot,
+          ...accountIdentity,
           provider: "openai",
-          redirectUri: new URL(h.callbackUrl()).origin + "/oauth/callback",
+          realmId: "project-b-realm",
+          bindingId: "work",
+          profileId: "work",
+          redirectUri: new URL(h.callbackUrl()).origin + "/auth/callback",
           state: "native-state",
           code: "good",
         });
@@ -639,6 +829,7 @@ describe("Meerkat project account projection refresh", () => {
           {
             projectId,
             instanceId,
+            ...accountIdentity,
             provider: "openai",
             action,
             flowId: "owned-flow",
@@ -655,7 +846,7 @@ describe("Meerkat project account projection refresh", () => {
         ]).flat(),
       );
       expect(h.flowScopes).toEqual([
-        expect.stringMatching(new RegExp(`^${instanceId}:${h.expectedRoot}:instance:[0-9]+$`)),
+        expect.stringMatching(new RegExp(`^${instanceId}:${h.expectedRoot}:instance:[0-9]+:.*$`)),
         h.flowScopes[0],
       ]);
       expect(h.calls).toEqual([
@@ -665,7 +856,12 @@ describe("Meerkat project account projection refresh", () => {
         },
         {
           method: "auth.v1.logout",
-          params: { projectPath: "/project-b", stateRoot: h.expectedRoot, provider: "openai" },
+          params: {
+            projectPath: "/project-b",
+            stateRoot: h.expectedRoot,
+            ...accountIdentity,
+            provider: "openai",
+          },
         },
       ]);
     }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
@@ -677,13 +873,23 @@ describe("Meerkat project account projection refresh", () => {
       for (const status of ["waiting", "failed", "cancelled"] as const) {
         h.setStatus(status);
         yield* h.service.authAction(
-          { projectId, instanceId, provider: "openai", action: "status", flowId: "owned-flow" },
+          {
+            projectId,
+            instanceId,
+            ...accountIdentity,
+            provider: "openai",
+            action: "status",
+            flowId: "owned-flow",
+          },
           "client-owner",
         );
       }
       h.failLogout();
       const result = yield* h.service
-        .authAction({ projectId, instanceId, provider: "openai", action: "logout" }, "client-owner")
+        .authAction(
+          { projectId, instanceId, ...accountIdentity, provider: "openai", action: "logout" },
+          "client-owner",
+        )
         .pipe(Effect.result);
       expect(result._tag).toBe("Failure");
       expect(h.refreshes).toEqual([]);
@@ -696,7 +902,14 @@ describe("Meerkat project account projection refresh", () => {
       h.failRefresh();
       for (const action of ["status", "logout"] as const) {
         const result = yield* h.service.authAction(
-          { projectId, instanceId, provider: "openai", action, flowId: "owned-flow" },
+          {
+            projectId,
+            instanceId,
+            ...accountIdentity,
+            provider: "openai",
+            action,
+            flowId: "owned-flow",
+          },
           "client-owner",
         );
         expect(result.status).toBe(action === "logout" ? "disconnected" : "connected");
@@ -706,6 +919,511 @@ describe("Meerkat project account projection refresh", () => {
         { operation: "workspace", instanceId, cwd: "/project-b", invalidate: true },
       ]);
       expect(h.calls.filter(({ method }) => method === "auth.v1.logout")).toHaveLength(1);
+    }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+});
+
+const apiKeyMethod = {
+  id: "openai-api-key",
+  provider: "openai",
+  displayName: "OpenAI API key",
+  authMethod: "api_key",
+  backendKind: "openai_api",
+  flow: "secret" as const,
+  description: "Use an API key",
+  fields: [],
+};
+
+describe("Native account settings", () => {
+  for (const status of ["updated", "needs_selection"] as const) {
+    it.effect(
+      `preserves saved credentials and ${status} defaults when verification is unavailable`,
+      () =>
+        Effect.gen(function* () {
+          const defaultActivation = { status, providers: status === "updated" ? ["openai"] : [] };
+          const h = yield* harness({
+            methods: [apiKeyMethod],
+            defaultActivation,
+            credentialsSaved: true,
+            configureState: "unknown",
+          });
+          const result = yield* h.service.authAction(
+            {
+              instanceId,
+              provider: "openai",
+              action: "configure",
+              methodId: apiKeyMethod.id,
+              secret: "fixture-key",
+            },
+            "owner",
+          );
+          expect(result).toMatchObject({
+            status: "disconnected",
+            credentialsSaved: true,
+            defaultActivation,
+            connection: { ...accountIdentity, state: "unknown" },
+          });
+          expect(result.message).toBe(
+            "Credentials saved. Refresh account status to check the connection.",
+          );
+          expect(result.connection?.isDefault).toBeUndefined();
+          expect(h.calls.map(({ method }) => method)).toEqual([
+            "auth.v1.status",
+            "auth.v1.configure",
+          ]);
+          expect(h.refreshes).toEqual([
+            { operation: "default", instanceId, invalidateWorkspaces: true },
+          ]);
+        }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+    );
+  }
+
+  for (const status of ["updated", "unchanged", "needs_selection"] as const) {
+    it.effect(`preserves ${status} activation after saved credentials and browser sign-in`, () =>
+      Effect.gen(function* () {
+        const defaultActivation = { status, providers: status === "updated" ? ["openai"] : [] };
+        const h = yield* Effect.acquireRelease(
+          harness({ liveFlows: true, methods: [apiKeyMethod, browserMethod], defaultActivation }),
+          (h) => Effect.sync(h.dispose),
+        );
+        // Creation and replacement use the same native activation receipt.
+        for (const identity of [{}, accountIdentity]) {
+          const configured = yield* h.service.authAction(
+            {
+              instanceId,
+              ...identity,
+              provider: "openai",
+              action: "configure",
+              methodId: apiKeyMethod.id,
+              secret: "fixture-key",
+            },
+            "owner",
+          );
+          expect(configured.status).toBe("connected");
+          expect(configured.defaultActivation).toEqual(defaultActivation);
+          if (status === "needs_selection")
+            expect(configured.message).toContain("Choose a default");
+        }
+        const scope = { instanceId, ...accountIdentity, provider: "openai" };
+        const flow = yield* h.service.authAction({ ...scope, action: "start" }, "owner");
+        const connected = yield* h.service.authAction(
+          { ...scope, action: "complete", flowId: flow.flowId!, callbackUrl: h.callbackUrl() },
+          "owner",
+        );
+        expect(connected.status).toBe("connected");
+        expect(connected.defaultActivation).toEqual(defaultActivation);
+        if (status === "needs_selection") expect(connected.message).toContain("Choose a default");
+        expect(
+          yield* h.service.authAction(
+            { ...scope, action: "status", flowId: flow.flowId! },
+            "owner",
+          ),
+        ).toEqual(connected);
+        expect(h.refreshes.length).toBeGreaterThanOrEqual(4);
+        expect(h.refreshes.every((refresh) => refresh.invalidateWorkspaces === true)).toBe(true);
+        expect(h.calls.some(({ method }) => method === "auth.v1.default")).toBe(false);
+      }).pipe(Effect.scoped, Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+    );
+  }
+
+  it.effect("preserves native secret labels and deployment fields for cloud credentials", () =>
+    Effect.gen(function* () {
+      const method: MeerkatAuthMethod = {
+        id: "bedrock-bearer",
+        provider: "anthropic",
+        displayName: "Amazon Bedrock",
+        authMethod: "bedrock_bearer",
+        backendKind: "bedrock",
+        flow: "secret",
+        description: "Connect with a bearer token",
+        secretLabel: "Bearer token",
+        fields: [
+          { key: "endpoint", label: "Endpoint", required: true, secret: false },
+          { key: "model", label: "Model", required: true, secret: false },
+        ],
+      };
+      const h = yield* harness({ methods: [method] });
+      expect((yield* h.service.authStatus({ instanceId })).methods?.[0]?.secretLabel).toBe(
+        "Bearer token",
+      );
+      const fields = { endpoint: "https://cloud.fixture.example", model: "fixture-deployment" };
+      const missing = yield* Effect.result(
+        h.service.authAction(
+          {
+            instanceId,
+            provider: method.provider,
+            action: "configure",
+            methodId: method.id,
+            fields,
+          },
+          "owner",
+        ),
+      );
+      expect(missing._tag).toBe("Failure");
+      if (missing._tag === "Failure")
+        expect(missing.failure.message).toBe("Bearer token is required to save this account.");
+      yield* h.service.authAction(
+        {
+          instanceId,
+          provider: method.provider,
+          action: "configure",
+          methodId: method.id,
+          fields,
+          secret: "fixture-bearer",
+        },
+        "owner",
+      );
+      expect(h.calls.at(-1)).toEqual({
+        method: "auth.v1.configure",
+        params: {
+          methodId: method.id,
+          fields,
+          secret: "fixture-bearer",
+        },
+      });
+    }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
+  it.effect(
+    "permits exact secret replacement in its checkout but rejects scoped account creation",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness({
+          methods: [apiKeyMethod],
+          connections: [
+            {
+              provider: "openai",
+              displayName: "OpenAI",
+              ...accountIdentity,
+              source: "managed_store",
+              state: "connected",
+              editable: true,
+              supportsSecretUpdate: true,
+              supportsInteractiveLogin: false,
+            },
+          ],
+        });
+        yield* h.service.authAction(
+          {
+            ...threadScope,
+            provider: "openai",
+            action: "configure",
+            methodId: apiKeyMethod.id,
+            secret: "replacement-fixture",
+          },
+          "owner",
+        );
+        expect(h.calls.at(-1)).toEqual({
+          method: "auth.v1.configure",
+          params: {
+            projectPath: threadTarget.expectedCwd,
+            stateRoot: h.expectedThreadRoot,
+            methodId: apiKeyMethod.id,
+            ...accountIdentity,
+            fields: {},
+            secret: "replacement-fixture",
+          },
+        });
+        expect(
+          (yield* Effect.result(
+            h.service.authAction(
+              {
+                instanceId,
+                projectId,
+                provider: "openai",
+                action: "configure",
+                methodId: apiKeyMethod.id,
+                secret: "new-fixture",
+              },
+              "owner",
+            ),
+          ))._tag,
+        ).toBe("Failure");
+      }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
+  it.effect("preserves safe endpoint fields on exact credential replacement", () =>
+    Effect.gen(function* () {
+      const method = {
+        ...apiKeyMethod,
+        fields: [{ key: "endpoint", label: "Endpoint", required: true, secret: false }],
+      };
+      const h = yield* harness({
+        methods: [method],
+        connections: [
+          {
+            provider: "openai",
+            displayName: "OpenAI",
+            ...accountIdentity,
+            source: "managed_store",
+            state: "connected",
+            editable: true,
+            supportsSecretUpdate: true,
+            supportsInteractiveLogin: false,
+            fields: { endpoint: "https://fixture.example" },
+          },
+        ],
+      });
+      const overview = yield* h.service.authStatus({ instanceId });
+      expect(overview.connections[0]?.fields).toEqual({ endpoint: "https://fixture.example" });
+      yield* h.service.authAction(
+        {
+          instanceId,
+          provider: "openai",
+          action: "configure",
+          ...accountIdentity,
+          methodId: method.id,
+          secret: "replacement-fixture",
+        },
+        "owner",
+      );
+      expect(h.calls.at(-1)).toEqual({
+        method: "auth.v1.configure",
+        params: {
+          methodId: method.id,
+          ...accountIdentity,
+          fields: {},
+          secret: "replacement-fixture",
+        },
+      });
+    }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
+  it.effect("rejects negative native receipts instead of reporting account success", () =>
+    Effect.gen(function* () {
+      const h = yield* harness({ actionReceipt: { cleared: false, updated: false } });
+      for (const action of ["logout", "delete", "default"] as const) {
+        expect(
+          (yield* Effect.result(
+            h.service.authAction(
+              { instanceId, provider: "openai", ...accountIdentity, action },
+              "owner",
+            ),
+          ))._tag,
+        ).toBe("Failure");
+      }
+      expect(h.refreshes).toEqual([]);
+    }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
+  it.effect("does not report account removal from a credential-only logout receipt", () =>
+    Effect.gen(function* () {
+      const h = yield* harness({ actionReceipt: { cleared: true, state: "needs_auth" } });
+      const result = yield* Effect.result(
+        h.service.authAction(
+          { instanceId, provider: "openai", ...accountIdentity, action: "delete" },
+          "owner",
+        ),
+      );
+      expect(result._tag).toBe("Failure");
+      expect(h.calls.at(-1)?.method).toBe("auth.v1.delete");
+      expect(h.refreshes).toEqual([]);
+    }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
+  it.effect("refuses browser sign-in without the native callback contract", () =>
+    Effect.gen(function* () {
+      const { callback: _callback, ...legacyMethod } = browserMethod;
+      const h = yield* harness({ methods: [legacyMethod] });
+      try {
+        const result = yield* Effect.result(
+          h.service.authAction(
+            { instanceId, provider: "openai", ...accountIdentity, action: "start" },
+            "owner",
+          ),
+        );
+        expect(result._tag).toBe("Failure");
+        expect(h.calls.some((call) => call.method === "auth.v1.loginStart")).toBe(false);
+      } finally {
+        h.dispose();
+      }
+    }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
+  it.effect.each([undefined, false])(
+    "requires native removal capability before deleting an account (%s)",
+    (supportsRemoval) =>
+      Effect.gen(function* () {
+        const h = yield* harness({
+          connections: [
+            {
+              ...accountIdentity,
+              provider: "openai",
+              displayName: "OpenAI",
+              source: "managed_store",
+              state: "needs_auth",
+              supportsInteractiveLogin: true,
+              editable: true,
+              ...(supportsRemoval === undefined ? {} : { supportsRemoval }),
+            },
+          ],
+        });
+        const result = yield* Effect.result(
+          h.service.authAction(
+            { instanceId, provider: "openai", ...accountIdentity, action: "delete" },
+            "owner",
+          ),
+        );
+        expect(result._tag).toBe("Failure");
+        expect(h.calls.some((call) => call.method === "auth.v1.delete")).toBe(false);
+      }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
+  it.effect("lists and configures accounts without creating or selecting a project", () =>
+    Effect.gen(function* () {
+      const h = yield* harness({ methods: [apiKeyMethod] });
+      const overview = yield* h.service.authStatus({ instanceId });
+      expect(overview.workspace).toBeUndefined();
+      expect(overview.methods).toEqual([apiKeyMethod]);
+      expect(h.calls[0]).toEqual({ method: "auth.v1.status", params: {} });
+      const configured = yield* h.service.authAction(
+        {
+          instanceId,
+          provider: "openai",
+          action: "configure",
+          methodId: apiKeyMethod.id,
+          secret: "fixture-key",
+        },
+        "owner",
+      );
+      expect(configured.connection?.bindingId).toBe("work");
+      expect(h.calls.at(-1)).toEqual({
+        method: "auth.v1.configure",
+        params: {
+          methodId: apiKeyMethod.id,
+          fields: {},
+          secret: "fixture-key",
+        },
+      });
+      expect(h.refreshes).toEqual([
+        { operation: "default", instanceId, invalidateWorkspaces: true },
+      ]);
+    }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
+  it.effect("invalidates cached project models when a global account changes", () =>
+    Effect.gen(function* () {
+      const h = yield* harness();
+      for (const action of ["default", "delete", "logout"] as const) {
+        yield* h.service.authAction(
+          { instanceId, provider: "openai", ...accountIdentity, action },
+          "owner",
+        );
+      }
+      expect(h.refreshes).toEqual([
+        { operation: "default", instanceId, invalidateWorkspaces: true },
+        { operation: "default", instanceId, invalidateWorkspaces: true },
+        { operation: "default", instanceId, invalidateWorkspaces: true },
+      ]);
+    }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
+  it.effect(
+    "rejects a conversation without its project and actions without complete identity",
+    () =>
+      Effect.gen(function* () {
+        const h = yield* harness();
+        expect(
+          (yield* Effect.result(h.service.authStatus({ instanceId, threadTarget })))._tag,
+        ).toBe("Failure");
+        for (const identity of [
+          {},
+          { realmId: "global" },
+          { realmId: "global", bindingId: "work" },
+        ]) {
+          expect(
+            (yield* Effect.result(
+              h.service.authAction(
+                { instanceId, provider: "openai", action: "logout", ...identity },
+                "owner",
+              ),
+            ))._tag,
+          ).toBe("Failure");
+        }
+        expect(h.calls).toEqual([]);
+      }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
+  it.effect("targets one account when the provider has several bindings", () =>
+    Effect.gen(function* () {
+      const base = {
+        provider: "openai",
+        displayName: "OpenAI",
+        realmId: "global",
+        source: "managed_store",
+        state: "connected" as const,
+        supportsInteractiveLogin: true,
+        editable: true,
+      };
+      const h = yield* harness({
+        connections: [
+          { ...base, bindingId: "personal", profileId: "personal" },
+          { ...base, bindingId: "work", profileId: "work" },
+        ],
+      });
+      yield* h.service.authAction(
+        {
+          instanceId,
+          provider: "openai",
+          action: "logout",
+          realmId: "global",
+          bindingId: "work",
+          profileId: "work",
+        },
+        "owner",
+      );
+      expect(h.calls.at(-1)).toEqual({
+        method: "auth.v1.logout",
+        params: {
+          provider: "openai",
+          realmId: "global",
+          bindingId: "work",
+          profileId: "work",
+        },
+      });
+    }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
+  );
+
+  it.effect("refuses host-managed edits and redacts rejected credential values", () =>
+    Effect.gen(function* () {
+      const h = yield* harness({
+        methods: [apiKeyMethod],
+        configureError: "Invalid fixture-secret",
+        connections: [
+          {
+            provider: "openai",
+            displayName: "OpenAI",
+            ...accountIdentity,
+            source: "env",
+            state: "connected",
+            supportsInteractiveLogin: false,
+            editable: false,
+          },
+        ],
+      });
+      expect(
+        (yield* Effect.result(
+          h.service.authAction(
+            { instanceId, provider: "openai", action: "delete", ...accountIdentity },
+            "owner",
+          ),
+        ))._tag,
+      ).toBe("Failure");
+      const failure = yield* Effect.result(
+        h.service.authAction(
+          {
+            instanceId,
+            provider: "openai",
+            action: "configure",
+            methodId: apiKeyMethod.id,
+            secret: "fixture-secret",
+          },
+          "owner",
+        ),
+      );
+      expect(failure._tag).toBe("Failure");
+      if (failure._tag === "Failure") expect(failure.failure.message).toBe("Invalid [redacted]");
+      expect(h.calls.some((call) => call.method === "auth.v1.delete")).toBe(false);
     }).pipe(Effect.provide(Layer.mergeAll(SqlitePersistenceMemory, Path.layer))),
   );
 });

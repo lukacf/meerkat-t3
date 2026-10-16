@@ -3275,7 +3275,7 @@ export function GeneralSettingsPanel() {
         />
         <SettingsRow
           {...searchableSetting("open-source-licenses")}
-          description="License notices for Meerkat T3 and its bundled software and assets."
+          description="License notices for MeerkaT3 and its bundled software and assets."
           control={
             <Button
               render={<Link to="/settings/open-source-licenses" />}

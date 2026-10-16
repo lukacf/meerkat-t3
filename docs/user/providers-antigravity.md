@@ -1,5 +1,7 @@
 # Antigravity
 
+> **Inherited T3 reference.** This page describes the original T3 Code feature retained in the source. It is not part of the supported MeerkaT3 preview setup. Use [Installation](install.md) and [Providers and accounts](accounts.md) for MeerkaT3. Original T3 commands and downloads install a separate product.
+
 T3 Code runs Google's official Antigravity ACP agent on your selected environment.
 It has its own sign-in, separate from the Antigravity IDE or CLI. Google controls
 which models and account access are available through this agent.
@@ -73,7 +75,7 @@ Antigravity apps. A resumed thread keeps its selected model. If access to that
 model ends, select another available model before continuing.
 
 Use Antigravity's native `/plan` command for planning. T3 Code's separate Plan mode
-is unavailable. Tool approvals follow [Permission modes](./permission-modes.md).
+is unavailable. Tool approvals follow [Permission modes](https://github.com/pingdotgg/t3code/blob/main/docs/user/permission-modes.md).
 Questions with fixed choices still need one of the offered answers, even in
 **Full access**.
 
@@ -86,7 +88,7 @@ is unavailable. Continue with a follow-up message or start a new thread.
 Put project skills in `.agents/skills`. T3 Code also reads `.gemini/skills` and the
 legacy `.agent/skills` directory. Among these project locations, the first copy
 wins in this order: `.gemini/skills`, `.agents/skills`, `.agent/skills`. See
-[commands and skills](./composer.md#commands-and-skills) for invoking them.
+[commands and skills](https://github.com/pingdotgg/t3code/blob/main/docs/user/composer.md#commands-and-skills) for invoking them.
 
 Skills for every project go in `~/.gemini/config/skills` or
 `~/.gemini/antigravity-cli/skills`. Antigravity does not read `~/.agents/skills`,
@@ -102,7 +104,7 @@ mean this provider can use it.
 
 Antigravity groups subagent activity into batches. You cannot open or control
 individual subagents, and an idle batch does not confirm that every child
-succeeded. See [agent work](./thread-sidebar.md#inspect-agent-work) for where to
+succeeded. See [agent work](https://github.com/pingdotgg/t3code/blob/main/docs/user/thread-sidebar.md#inspect-agent-work) for where to
 inspect activity.
 
 ## Accounts and removal

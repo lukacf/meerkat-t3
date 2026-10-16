@@ -91,62 +91,105 @@ export function projectMeerkatModels(
   auth?: typeof MeerkatAuthOverview.Type,
 ): ReadonlyArray<ServerProviderModel> {
   const response = decodeCatalogResponse(value);
-  const connected = new Set(
+  // The runtime resolves provider:model through the native default binding.
+  // A different connected account cannot make that binding's models usable.
+  const accountProviders = new Set(
     auth?.connections
+      .filter((connection) => connection.isDefault !== undefined)
+      .map((connection) => connection.provider),
+  );
+  const activeConnections =
+    auth?.connections.filter(
+      (connection) => !accountProviders.has(connection.provider) || connection.isDefault === true,
+    ) ?? [];
+  const accountModels = new Map<string, Set<string>>();
+  for (const provider of accountProviders) accountModels.set(provider, new Set());
+  for (const connection of activeConnections) {
+    if (connection.state !== "connected" || connection.models === undefined) continue;
+    const supported = accountModels.get(connection.provider) ?? new Set<string>();
+    for (const model of connection.models) supported.add(model.id);
+    accountModels.set(connection.provider, supported);
+  }
+  const connected = new Set(
+    activeConnections
       .filter((connection) => connection.state === "connected")
       .map((connection) => connection.provider),
   );
   // Prefer an authenticated provider's native default for new selections. Unknown
   // or host-managed auth does not establish availability; preserve the catalog
   // defaults when no connected provider has a published default in this catalog.
-  const preferredProvider = response.catalog.providers.find(
-    (provider) =>
-      connected.has(provider.provider) &&
-      provider.models.some((model) => model.id === provider.default_model_id),
-  )?.provider;
-  const names = new Map<string, number>();
-  for (const provider of response.catalog.providers) {
-    for (const model of provider.models) {
-      const name = model.display_name?.trim() || model.id;
-      names.set(name, (names.get(name) ?? 0) + 1);
-    }
+  const defaultAccount = activeConnections.find(
+    (connection) => connection.isDefault && connection.state === "connected",
+  );
+  const preferredProvider =
+    defaultAccount?.provider ??
+    response.catalog.providers.find(
+      (provider) =>
+        connected.has(provider.provider) &&
+        provider.models.some((model) => model.id === provider.default_model_id),
+    )?.provider;
+  const accountLabels = new Map<string, Set<string>>();
+  for (const connection of activeConnections) {
+    const methods =
+      auth?.methods?.filter(
+        (method) =>
+          method.backendKind === connection.backendKind &&
+          method.authMethod === connection.authMethod,
+      ) ?? [];
+    const method =
+      methods.find((method) => method.provider === connection.provider) ??
+      (methods.length === 1 ? methods[0] : undefined);
+    const service = method?.displayName ?? connection.displayName;
+    const account = connection.accountLabel?.trim();
+    const labels = accountLabels.get(connection.provider) ?? new Set<string>();
+    labels.add(account && account !== service ? `${service} · ${account}` : service);
+    accountLabels.set(connection.provider, labels);
   }
   return response.catalog.providers.flatMap((provider) =>
-    provider.models.map((model) => {
-      const slug = `${provider.provider}:${model.id}`;
-      const name = model.display_name?.trim() || model.id;
-      return {
-        slug,
-        // Native aliases and provider bindings can share a display name. Keep
-        // their exact selectable identity first so truncation cannot hide the
-        // distinction, without merging or rewriting the selectable slug.
-        name: (names.get(name) ?? 0) > 1 ? `[${slug}] ${name}` : name,
-        shortName: name,
-        subProvider: provider.provider,
-        credentialState: (() => {
-          const states =
-            auth?.connections
-              .filter((connection) => connection.provider === provider.provider)
-              .map((connection) => connection.state) ?? [];
-          // Multiple bindings may serve one provider. Do not let an unused,
-          // expired binding hide a usable or host-managed one.
-          return states.includes("connected")
-            ? ("connected" as const)
-            : states.includes("host_managed")
-              ? ("host_managed" as const)
-              : states.includes("reauth_required")
-                ? ("reauth_required" as const)
-                : states.includes("needs_auth")
-                  ? ("needs_auth" as const)
-                  : ("unknown" as const);
-        })(),
-        isCustom: model.tier === "custom",
-        isDefault:
-          model.id === provider.default_model_id &&
-          (preferredProvider === undefined || provider.provider === preferredProvider),
-        capabilities: projectMeerkatCapabilities(provider.provider, model.profile?.params_schema),
-      };
-    }),
+    provider.models
+      .filter(
+        (model) =>
+          !accountModels.has(provider.provider) ||
+          accountModels.get(provider.provider)!.has(model.id),
+      )
+      .map((model) => {
+        const slug = `${provider.provider}:${model.id}`;
+        const name = model.display_name?.trim() || model.id;
+        return {
+          slug,
+          name,
+          shortName: name,
+          subProvider: provider.provider,
+          ...(accountLabels.get(provider.provider)?.size === 1
+            ? { accountLabel: [...accountLabels.get(provider.provider)!][0]! }
+            : {}),
+          ...(model.tier === "recommended" || model.tier === "supported" || model.tier === "custom"
+            ? { catalogTier: model.tier }
+            : {}),
+          credentialState: (() => {
+            const states =
+              activeConnections
+                .filter((connection) => connection.provider === provider.provider)
+                .map((connection) => connection.state) ?? [];
+            // Multiple bindings may serve one provider. Do not let an unused,
+            // expired binding hide a usable or host-managed one.
+            return states.includes("connected")
+              ? ("connected" as const)
+              : states.includes("host_managed")
+                ? ("host_managed" as const)
+                : states.includes("reauth_required")
+                  ? ("reauth_required" as const)
+                  : states.includes("needs_auth")
+                    ? ("needs_auth" as const)
+                    : ("unknown" as const);
+          })(),
+          isCustom: model.tier === "custom",
+          isDefault:
+            model.id === provider.default_model_id &&
+            (preferredProvider === undefined || provider.provider === preferredProvider),
+          capabilities: projectMeerkatCapabilities(provider.provider, model.profile?.params_schema),
+        };
+      }),
   );
 }
 
@@ -178,7 +221,7 @@ export type MeerkatDriverEnv = ServerConfig | Path.Path | FileSystem.FileSystem;
 
 export const MeerkatDriver: ProviderDriver<MeerkatDriverConfig, MeerkatDriverEnv> = {
   driverKind: MEERKAT_DRIVER_KIND,
-  metadata: { displayName: "Meerkat MobKit", supportsMultipleInstances: true },
+  metadata: { displayName: "Model accounts", supportsMultipleInstances: false },
   configSchema: MeerkatDriverConfig,
   defaultConfig: () => ({ gatewayBinaryPath: "meerkat-desktop-stdio" }),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
@@ -272,14 +315,14 @@ export const MeerkatDriver: ProviderDriver<MeerkatDriverConfig, MeerkatDriverEnv
       const baseSnapshot = (): ServerProvider => ({
         instanceId,
         driver: MEERKAT_DRIVER_KIND,
-        displayName: displayName ?? "Meerkat MobKit",
+        displayName: displayName ?? "Model accounts",
         ...(accentColor ? { accentColor } : {}),
         continuation: { groupKey: continuationIdentity.continuationKey },
         enabled,
         installed: false,
         version: null,
         status: enabled ? "warning" : "disabled",
-        auth: { status: "unknown", label: "Managed by Meerkat MobKit" },
+        auth: { status: "unknown", label: "Checking accounts" },
         checkedAt: DateTime.formatIso(DateTime.nowUnsafe()),
         availability: "available",
         requiresNewThreadForModelChange: false,
@@ -325,32 +368,38 @@ export const MeerkatDriver: ProviderDriver<MeerkatDriverConfig, MeerkatDriverEnv
             const connected = auth.connections.filter(
               (connection) => connection.state === "connected",
             );
-            const missing = auth.connections.filter(
-              (connection) =>
-                connection.state === "needs_auth" || connection.state === "reauth_required",
+            const unverifiedHost = auth.connections.some(
+              (connection) => connection.state === "host_managed",
+            );
+            const unverifiedAccount = auth.connections.some(
+              (connection) => connection.state === "unknown",
             );
             return {
               ...baseSnapshot(),
               auth: {
                 status: connected.length
                   ? ("authenticated" as const)
-                  : missing.length
-                    ? ("unauthenticated" as const)
-                    : ("unknown" as const),
+                  : unverifiedHost || unverifiedAccount
+                    ? ("unknown" as const)
+                    : ("unauthenticated" as const),
                 label: connected.length
                   ? connected.map((connection) => connection.displayName).join(", ")
-                  : missing.length
-                    ? "Connect a model account in Settings > Providers"
-                    : "Credentials managed by host",
+                  : unverifiedAccount
+                    ? "Model account status is unverified"
+                    : unverifiedHost
+                      ? "Host-managed model access is unverified"
+                      : "Connect a model account in Settings > Providers",
               },
               installed: true,
               version: `${identity.meerkatVersion} / MobKit ${identity.mobkitVersion}`,
-              status:
-                missing.length && !connected.length ? ("warning" as const) : ("ready" as const),
-              ...(missing.length && !connected.length
+              status: connected.length ? ("ready" as const) : ("warning" as const),
+              ...(!connected.length
                 ? {
-                    message:
-                      "Open Settings > Providers to add an API key. Existing host OAuth profiles can sign in from project Connections.",
+                    message: unverifiedAccount
+                      ? "Choose Check account in Settings > Providers to unlock saved credentials."
+                      : unverifiedHost
+                        ? "Check host-managed credentials in Settings > Providers before using a model."
+                        : "Open Settings > Providers to sign in or add an API key.",
                   }
                 : {}),
               skills,

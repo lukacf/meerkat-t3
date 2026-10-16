@@ -1,0 +1,6 @@
+dispatch2@0.3.1
+
+The exact crate commit declares Zlib OR Apache-2.0 OR MIT for this crate.
+This collection retains that declaration and the referenced canonical MIT terms.
+The upstream declaration does not identify a copyright holder or year.
+Generic canonical placeholders remain unchanged; no attribution was inferred.

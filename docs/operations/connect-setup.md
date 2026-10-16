@@ -1,5 +1,10 @@
 # T3 Connect setup
 
+> Scope: this page is reference material for the inherited T3 Connect service. It is not a
+> supported MeerkaT3 preview service or release path. The supported local Mac stack
+> is described in [development](../operations/development.md) and
+> [distribution](../operations/meerkat-distribution.md).
+
 Deployment and client configuration for T3 Connect. The [architecture note](../internals/t3-connect.md)
 explains the trust boundaries; the [relay README](../../infra/relay/README.md#deployment) owns relay
 provisioning instructions.
@@ -97,7 +102,7 @@ For a production macOS app with bundle ID `com.t3tools.t3code`:
    This setting also configures Electron/macOS passkeys.
 4. Check `https://<frontend-api>/.well-known/apple-app-site-association`. Its
    `webcredentials.apps` must include `<TEAM_ID>.com.t3tools.t3code`.
-5. Configure signing as described in the [release runbook](./release.md#2-apple-signing--notarization-setup-macos).
+5. Configure signing as described in the [release runbook](./meerkat-distribution.md#build-a-mac-release).
 
 Local signed builds additionally use:
 

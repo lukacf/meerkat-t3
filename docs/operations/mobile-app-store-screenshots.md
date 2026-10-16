@@ -1,5 +1,10 @@
 # Mobile app-store screenshot harness
 
+> Scope: this page is reference material for the inherited mobile screenshot tooling. It is not a
+> supported MeerkaT3 preview service or release path. The supported local Mac stack
+> is described in [development](../operations/development.md) and
+> [distribution](../operations/meerkat-distribution.md).
+
 > For maintainers. Using T3 Code? See [docs/user](../user/).
 
 The screenshot harness runs the real mobile application against three disposable local T3

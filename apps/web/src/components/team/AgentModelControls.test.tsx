@@ -84,6 +84,7 @@ beforeEach(() => {
       slug: "openai:example",
       name: "Example",
       isCustom: false,
+      credentialState: "connected",
       capabilities: {
         optionDescriptors: [
           { id: "prompt_cache_enabled", label: "Prompt caching", type: "boolean" },

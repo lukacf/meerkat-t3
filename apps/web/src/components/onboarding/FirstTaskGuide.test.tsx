@@ -204,3 +204,12 @@ it("replaces a missing first task only by explicit choice after saving recovery"
   expect(getClientSettings().onboardingProgress?.threadId).toBe(replacement);
   expect(getClientSettings().onboardingCompletedAt).toBeNull();
 });
+
+it("a repository-study reply cannot complete specialist onboarding", async () => {
+  const setup = { ...progress, step: "project-agents" as const };
+  __setClientSettingsForTests({ ...getClientSettings(), onboardingProgress: setup });
+  await render(true);
+  expect(getClientSettings().onboardingProgress).toEqual(setup);
+  expect(getClientSettings().onboardingCompletedAt).toBeNull();
+  expect(persistence.setClientSettings).not.toHaveBeenCalled();
+});

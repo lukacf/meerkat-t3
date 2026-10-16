@@ -183,7 +183,11 @@ export default function DiffPanel({
       : null,
   );
   const activeCwd = workspace?.cwd ?? activeThread?.worktreePath ?? activeProject?.workspaceRoot;
-  const workspaceMutationId = useWorkspaceMutationId(activeEnvironmentId, activeCwd, providerWorkspaceMutationId);
+  const workspaceMutationId = useWorkspaceMutationId(
+    activeEnvironmentId,
+    activeCwd,
+    providerWorkspaceMutationId,
+  );
   const activeRepositoryRoot = workspace
     ? workspace.repositoryRoot
     : activeThread?.worktreePath

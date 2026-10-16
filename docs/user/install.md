@@ -1,29 +1,37 @@
-# Install Meerkat T3
+# Install MeerkaT3
 
-## Supported pilot
+## Preview availability
 
-The current prototype is a **private pilot for Apple Silicon Macs**. Check Apple menu > About This Mac for an Apple M-series chip. The app requires macOS 13 or later. Intel Mac, Windows, Linux, mobile, and remote-host workflows are outside this pilot.
+The source is available in [lukacf/meerkat-t3](https://github.com/lukacf/meerkat-t3). A public desktop binary is **not yet published**. Contributors can [build from source](https://github.com/lukacf/meerkat-t3/blob/main/docs/operations/development.md); opening the source repository does not require a preview invitation.
 
-You need a provider API account with a valid key and access to the model you select, an internet connection for model requests, and a project folder. Git is needed for branches, worktrees, diffs, and commits. Building and testing your own project also requires that project's tools, such as Node.js or Python. The app includes Meerkat and MobKit; no separate Meerkat, Rust, Codex CLI, or Claude Code installation is required.
+The current desktop preview targets Apple Silicon Macs running macOS 13 or later. Check **Apple menu > About This Mac** for an Apple M-series chip. Intel Mac, Windows, Linux, mobile, and remote-host workflows are outside this preview.
+
+You need a supported provider account with access to the model you select, an internet connection for model requests, and a project folder. Connect it through browser sign-in, device sign-in, or an API key in Settings > Providers. Git is needed for branches, worktrees, diffs, and commits. Building and testing your own project also requires that project's tools, such as Node.js or Python. The app includes its agent runtime; no separate runtime or coding-agent CLI installation is required.
 
 ## Get and open the app
 
-1. Sign in with your invited GitHub account and open [Meerkat T3 Releases](https://github.com/lukacf/meerkat-t3/releases). Choose the Apple Silicon preview shared by the maintainer. Download its DMG or ZIP and the SHA-256 checksum for that exact file and version. Repository access by invitation is required.
+These steps apply when you have a preview package from the maintainers. Public packages, when released, will appear on [MeerkaT3 Releases](https://github.com/lukacf/meerkat-t3/releases).
+
+1. Obtain the Apple Silicon DMG or ZIP and its SHA-256 checksum for the exact file and version. Use a package and checksum supplied together by the maintainers; do not substitute a T3 Code download.
 2. Compare the downloaded file's checksum with the value published for that release. In Terminal, type `shasum -a 256 `, drag the DMG or ZIP into the window, and press Return. If the values differ, request a fresh download.
-3. For a DMG, open it and copy the supplied Meerkat T3 app to Applications, then eject the disk image. For a ZIP, expand it and move the app to Applications. Keep the supplied app name and open that copy, not the one in the disk image or Downloads.
+3. For a DMG, open it and copy the supplied MeerkaT3 app to Applications, then eject the disk image. For a ZIP, expand it and move the app to Applications. Keep the supplied app name and open that copy, not the one in the disk image or Downloads.
 4. Open it from Applications. This build uses ad-hoc signing, without Developer ID signing or Apple notarization. If macOS reports an unidentified developer or says Apple cannot check the app, follow the steps below.
-5. Check the version in **About Meerkat T3**, then follow [Your first task](getting-started.md). The in-app guide is available from the sidebar's **Help** button before connecting a model account.
+5. Check the version in **About MeerkaT3**, then follow [Start with your project](getting-started.md) to connect a model account and generate your project specialists. The in-app guide is available from the sidebar's **Help** button before connecting a model account.
 
-Original T3 downloads, `brew install --cask t3-code`, `npx t3`, and the T3 app-store clients install the donor product, not this prototype. Do not use them to install or update Meerkat T3.
+Original T3 downloads, `brew install --cask t3-code`, `npx t3`, and the T3 app-store clients install the donor product, not MeerkaT3. Do not use them to install or update MeerkaT3.
 
-**SSH** connections in Settings > Connections are disabled in this prototype. Use the local Mac for this pilot.
+**SSH** connections in Settings > Connections are disabled in this preview. Use the local Mac.
 
 ### If macOS asks you to approve the app
 
-After checking the download and trusting its source, try opening the app once. In **System Settings > Privacy & Security**, find the message for Meerkat T3 and choose **Open Anyway**, then confirm **Open**. This approves that app; you do not need an Apple Developer account or a different signed build. [Apple's instructions](https://support.apple.com/en-us/102445) describe this per-app exception.
+After checking the download and trusting its source, try opening the app once. In **System Settings > Privacy & Security**, find the message for MeerkaT3 and choose **Open Anyway**, then confirm **Open**. This approves that app; you do not need an Apple Developer account or a different signed build. [Apple's instructions](https://support.apple.com/en-us/102445) describe this per-app exception.
 
-If that option is unavailable, or macOS says the app is damaged or will harm your computer, keep the exact message and contact the distributor. Do not disable Gatekeeper or remove quarantine with Terminal commands.
+If that option is unavailable, or macOS says the app is damaged or will harm your computer, keep the exact message and contact the maintainers. Do not disable Gatekeeper or remove quarantine with Terminal commands.
 
 ## If startup fails
 
-Keep the error message and build version. Retry opening the app once. If it still fails, use [Recovery and troubleshooting](troubleshooting.md) or ask your distributor for a replacement build. Reinstalling the app should not require deleting your saved profile. Do not delete your data to fix a startup problem.
+Keep the exact error message and build version, then retry opening the app once. If About is unavailable, select the installed app in Finder and choose **File > Get Info** to find its version. Record your macOS version from **Apple menu > About This Mac** too.
+
+If the startup error offers **Export support report**, use that action. If the desktop menu is available, you can also choose **Help > Export support report** even when the workspace will not load. Choose a folder, then attach the saved JSON file to a [MeerkaT3 issue](https://github.com/lukacf/meerkat-t3/issues). It contains versions and startup status, excludes conversations, credentials and raw logs, and is not uploaded automatically.
+
+If no app menu or export dialog appears, report the versions, exact message and the step that failed. You do not need to get into the app to report a launch failure. Once the app opens, [Recovery and troubleshooting](troubleshooting.md) has further recovery steps. Review screenshots before sharing them, and do not send API keys or a whole profile. Keep your saved profile when reinstalling; deleting it is not a startup repair.

@@ -11,6 +11,16 @@ describe("DesktopAppBrandingSchema", () => {
     displayName: "Meerkat T3 (Prototype)",
   };
 
+  it.each(["Latest", "Internal Validation"])("accepts the %s product stage", (stageLabel) => {
+    const current = {
+      baseName: "MeerkaT3",
+      stageLabel,
+      displayName: stageLabel === "Latest" ? "MeerkaT3" : `MeerkaT3 (${stageLabel})`,
+      appVersion: "0.0.56",
+    };
+    expect(decode(current)).toEqual(current);
+  });
+
   it("preserves the running shell version while accepting older desktop payloads", () => {
     expect(decode({ ...branding, appVersion: "0.0.56" })).toEqual({
       ...branding,

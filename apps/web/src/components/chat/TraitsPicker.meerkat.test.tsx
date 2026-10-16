@@ -68,6 +68,7 @@ vi.mock("./ComposerControl", () => ({
 
 import { deriveEffectiveComposerModelState, useComposerDraftStore } from "../../composerDraftStore";
 import { deriveProviderInstanceEntries } from "../../providerInstances";
+import { toAppModelOption } from "../../modelSelection";
 import { TraitsPicker } from "./TraitsPicker";
 import { getComposerProviderState } from "./composerProviderState";
 import { getComposerModelSendBlock } from "./composerModelReadiness";
@@ -150,16 +151,7 @@ function block(catalog: ServerProviderModel[]) {
   return getComposerModelSendBlock({
     entries: deriveProviderInstanceEntries([provider(catalog)]),
     selections: [createModelSelection(instanceId, MODEL, dispatch(catalog))],
-    modelOptionsByInstance: new Map([
-      [
-        instanceId,
-        catalog.map((model) => ({
-          slug: model.slug,
-          name: model.name,
-          isCustom: model.isCustom,
-        })),
-      ],
-    ]),
+    modelOptionsByInstance: new Map([[instanceId, catalog.map(toAppModelOption)]]),
     nativeInstanceIds: new Set([instanceId]),
     catalogKnown: true,
     continuesActiveTurn: false,

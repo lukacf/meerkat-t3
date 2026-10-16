@@ -2181,18 +2181,21 @@ it.layer(
     ),
   );
 
-  it.effect("resolves the legacy Codex default instance", () =>
+  it.effect("does not synthesize a terminal instance from legacy Codex settings", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
-      const environment = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+      const error = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
         serverSettings,
         path,
         rawProviderInstanceId: "codex",
         env: undefined,
-      });
+      }).pipe(Effect.flip);
 
-      expect(environment.CODEX_HOME).toMatch(/[\\/][.]codex-legacy$/);
+      expect(error).toMatchObject({
+        _tag: "TerminalProviderInstanceNotFoundError",
+        providerInstanceId: "codex",
+      });
     }).pipe(
       Effect.provide(
         ServerSettings.ServerSettingsService.layerTest({
@@ -2203,18 +2206,21 @@ it.layer(
     ),
   );
 
-  it.effect("resolves the legacy Claude default instance", () =>
+  it.effect("does not synthesize a terminal instance from legacy Claude settings", () =>
     Effect.gen(function* () {
       const path = yield* Path.Path;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
-      const environment = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
+      const error = yield* TerminalManager.resolveProviderInstanceTerminalEnvironment({
         serverSettings,
         path,
         rawProviderInstanceId: "claudeAgent",
         env: undefined,
-      });
+      }).pipe(Effect.flip);
 
-      expect(environment.CLAUDE_CONFIG_DIR).toMatch(/[\\/][.]claude-legacy$/);
+      expect(error).toMatchObject({
+        _tag: "TerminalProviderInstanceNotFoundError",
+        providerInstanceId: "claudeAgent",
+      });
     }).pipe(
       Effect.provide(
         ServerSettings.ServerSettingsService.layerTest({

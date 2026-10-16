@@ -8,23 +8,40 @@ export function createMeerkatControlAtoms<R, E>(
 ) {
   return {
     usageSnapshot: createEnvironmentRpcQueryAtomFamily(runtime, {
-      label: "meerkat:usage-snapshot", tag: WS_METHODS.meerkatUsageSnapshot, staleTimeMs: 0, idleTtlMs: 0,
+      label: "meerkat:usage-snapshot",
+      tag: WS_METHODS.meerkatUsageSnapshot,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
     }),
     approvals: createEnvironmentRpcQueryAtomFamily(runtime, {
-      label: "meerkat:approvals", tag: WS_METHODS.meerkatApprovals, staleTimeMs: 0, idleTtlMs: 0,
+      label: "meerkat:approvals",
+      tag: WS_METHODS.meerkatApprovals,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
     }),
     decideApproval: createEnvironmentRpcCommand(runtime, {
-      label: "meerkat:approval-decide", tag: WS_METHODS.meerkatApprovalDecide,
+      label: "meerkat:approval-decide",
+      tag: WS_METHODS.meerkatApprovalDecide,
     }),
-    checkpointCapture: createEnvironmentRpcCommand(runtime, { label: "meerkat:checkpoint-capture", tag: WS_METHODS.meerkatCheckpointCapture }),
+    checkpointCapture: createEnvironmentRpcCommand(runtime, {
+      label: "meerkat:checkpoint-capture",
+      tag: WS_METHODS.meerkatCheckpointCapture,
+    }),
     checkpoints: createEnvironmentRpcQueryAtomFamily(runtime, {
-      label: "meerkat:checkpoints", tag: WS_METHODS.meerkatCheckpoints, staleTimeMs: 0, idleTtlMs: 0,
+      label: "meerkat:checkpoints",
+      tag: WS_METHODS.meerkatCheckpoints,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
     }),
     checkpointPreview: createEnvironmentRpcQueryAtomFamily(runtime, {
-      label: "meerkat:checkpoint-preview", tag: WS_METHODS.meerkatCheckpointPreview, staleTimeMs: 0, idleTtlMs: 0,
+      label: "meerkat:checkpoint-preview",
+      tag: WS_METHODS.meerkatCheckpointPreview,
+      staleTimeMs: 0,
+      idleTtlMs: 0,
     }),
     checkpointRestore: createEnvironmentRpcCommand(runtime, {
-      label: "meerkat:checkpoint-restore", tag: WS_METHODS.meerkatCheckpointRestore,
+      label: "meerkat:checkpoint-restore",
+      tag: WS_METHODS.meerkatCheckpointRestore,
     }),
     coordinatorWork: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "meerkat:coordinator-work",

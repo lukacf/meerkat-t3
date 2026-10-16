@@ -2,6 +2,7 @@ import * as NodePath from "@effect/platform-node/NodePath";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
@@ -40,6 +41,49 @@ const makeEnvironment = (
   DesktopEnvironment.DesktopEnvironment.pipe(Effect.provide(makeEnvironmentLayer(overrides, env)));
 
 describe("DesktopEnvironment", () => {
+  it.effect("retains packaged validation branding without changing the runtime identity", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const appPath = yield* fileSystem.makeTempDirectoryScoped();
+      yield* fileSystem.writeFileString(
+        `${appPath}/package.json`,
+        '{"meerkatArtifactPurpose":"internal-validation"}',
+      );
+      const environment = yield* makeEnvironment({
+        isPackaged: true,
+        appPath,
+        appVersion: "0.0.56-nightly.20261010.1",
+      });
+      assert.deepEqual(environment.branding, {
+        baseName: "MeerkaT3",
+        stageLabel: "Internal Validation",
+        displayName: "MeerkaT3 (Internal Validation)",
+        appVersion: "0.0.56-nightly.20261010.1",
+      });
+      assert.equal(environment.appUserModelId, "ai.rkat.meerkat-t3");
+      assert.equal(environment.linuxDesktopEntryName, "ai.rkat.MeerkatT3.desktop");
+      assert.equal(environment.stateDir, "/Users/alice/.meerkat-t3/userdata");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("uses the public product name and keeps development and nightly labels", () =>
+    Effect.gen(function* () {
+      const release = yield* makeEnvironment({ isPackaged: true });
+      const development = yield* makeEnvironment(
+        {},
+        { VITE_DEV_SERVER_URL: "http://localhost:5173" },
+      );
+      const nightly = yield* makeEnvironment({
+        isPackaged: true,
+        appVersion: "0.0.56-nightly.20261010.1",
+      });
+      assert.equal(release.branding.displayName, "MeerkaT3");
+      assert.equal(release.branding.stageLabel, "Latest");
+      assert.equal(development.branding.displayName, "MeerkaT3 (Dev)");
+      assert.equal(nightly.branding.displayName, "MeerkaT3 (Nightly)");
+    }),
+  );
+
   it.effect("carries the running packaged app version into renderer branding", () =>
     Effect.gen(function* () {
       const environment = yield* makeEnvironment({ isPackaged: true, appVersion: "0.0.56" });

@@ -4,7 +4,9 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeZlib from "node:zlib";
+import * as Effect from "effect/Effect";
 import { collectNativeNotices, readCrate, sha256 } from "./collect-native-license-notices.mjs";
+import { stageNativeNotices } from "./lib/native-notices.ts";
 
 function archive(files) {
   const blocks = [];
@@ -39,6 +41,235 @@ NodeTest.test(
     );
   },
 );
+
+async function readBundle(options) {
+  const read = (name) => NodeFSP.readFile(NodePath.join(options.output, name), "utf8");
+  return {
+    manifest: JSON.parse(await read("manifest.json")),
+    inventory: JSON.parse(await read("inventory.json")),
+    selection: JSON.parse(await read("selection.json")),
+    texts: await Promise.all(
+      ["manifest.json", "inventory.json", "selection.json", "README.txt"].map(read),
+    ),
+  };
+}
+
+function stageInput(options, manifest, destinationDir, selection) {
+  return {
+    bundleDir: options.output,
+    destinationDir,
+    target: manifest.target,
+    gateway: manifest.bindings.gateway,
+    resourceMonitor: {
+      cargoLockPath: selection.products.resourceMonitor.lock.path,
+      binaryPath: selection.products.resourceMonitor.root.binary,
+    },
+    t3LicensePath: options.t3License,
+  };
+}
+
+NodeTest.test(
+  "publishes portable provenance, binds both selections, and passes the unchanged packager",
+  async (context) => {
+    const { root, options, selection, inventory } = await fixture(context);
+    const marker = "/Users/SYNTHETIC_PRIVATE_HOME/Library/Caches/private-evidence";
+    const sourceManifest = NodePath.join(root, "private-source-manifest.toml");
+    const sourceManifestBytes = '[package]\nname = "demo"\nversion = "1.0.0"\n';
+    const extra = NodePath.join(root, "private-supplement.txt");
+    await NodeFSP.writeFile(sourceManifest, sourceManifestBytes);
+    await NodeFSP.writeFile(extra, "Exact supplemental copyright\r\n");
+    inventory.packages[0].licenseExpression = "Apache-2.0 / MIT";
+    await NodeFSP.writeFile(options.inventory, JSON.stringify(inventory));
+    selection.method = `Private capture at ${marker}`;
+    selection.provenance = {
+      inventory: { path: `${marker}/inventory.json`, sha256: "a".repeat(64) },
+    };
+    for (const graph of Object.values(selection.products)) {
+      graph.profile = "debug";
+      graph.root.artifact = `${marker}/deps/private-artifact`;
+      graph.lock.currentSource = `${marker}/Cargo.lock`;
+      graph.inputs = {
+        metadata: { path: `${marker}/metadata.json`, sha256: "b".repeat(64), bytes: 10 },
+      };
+      graph.unitGraph = { path: `${marker}/units.json`, sha256: "c".repeat(64), bytes: 20 };
+      graph.selectedRegistryPackages[0].units = [`${marker}/fingerprint.json`];
+    }
+    await NodeFSP.writeFile(options.selection, JSON.stringify(selection));
+    options.supplements = NodePath.join(root, "private-supplements.json");
+    await NodeFSP.writeFile(
+      options.supplements,
+      JSON.stringify({
+        packages: [
+          {
+            key: "demo@1.0.0",
+            checksum: selection.products.gateway.selectedRegistryPackages[0].checksum,
+            notices: [
+              {
+                name: "COPYRIGHT",
+                file: extra,
+                sha256: sha256("Exact supplemental copyright\r\n"),
+                source: {
+                  kind: "repository-workspace-license",
+                  repositoryPath: "core/LICENSE-MIT",
+                  localCachePath: marker,
+                  packageManifest: {
+                    path: sourceManifest,
+                    sha256: sha256(sourceManifestBytes),
+                    bytes: Buffer.byteLength(sourceManifestBytes),
+                  },
+                  declaration: {
+                    sourceUrl: "https://example.com/commit/LICENSE",
+                    declaredLink: "http://www.apache.org/licenses/LICENSE-2.0",
+                    path: "LICENSE",
+                    localEvidence: marker,
+                  },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    const originalSelection = await NodeFSP.readFile(options.selection);
+    await collectNativeNotices(options);
+    const bundle = await readBundle(options);
+    for (const text of bundle.texts) {
+      NodeAssert.ok(!text.includes(marker));
+      NodeAssert.ok(!text.includes(root));
+      NodeAssert.ok(!text.includes("file://"));
+    }
+    NodeAssert.equal(bundle.selection.provenance.sourceSelectionSha256, sha256(originalSelection));
+    NodeAssert.equal(bundle.manifest.bindings.selectionSha256, sha256(bundle.texts[2]));
+    NodeAssert.notEqual(bundle.manifest.bindings.selectionSha256, sha256(originalSelection));
+    NodeAssert.equal(
+      bundle.selection.products.gateway.root.binarySha256,
+      bundle.manifest.bindings.gateway.binarySha256,
+    );
+    NodeAssert.equal(
+      bundle.selection.products.gateway.lock.sha256,
+      bundle.manifest.bindings.gateway.cargoLockSha256,
+    );
+    NodeAssert.deepEqual(await NodeFSP.readFile(options.selection), originalSelection);
+    const source = bundle.inventory.packages[0].notices.at(-1).source;
+    NodeAssert.deepEqual(source.packageManifest, {
+      sha256: sha256(sourceManifestBytes),
+      bytes: Buffer.byteLength(sourceManifestBytes),
+    });
+    NodeAssert.deepEqual(source.declaration, {
+      sourceUrl: "https://example.com/commit/LICENSE",
+      declaredLink: "http://www.apache.org/licenses/LICENSE-2.0",
+      path: "LICENSE",
+    });
+    await Effect.runPromise(
+      stageNativeNotices(
+        stageInput(options, bundle.manifest, NodePath.join(root, "staged"), selection),
+      ),
+    );
+  },
+);
+
+NodeTest.test(
+  "rejects changed private lock and manifest evidence before public collection",
+  async (context) => {
+    const { options, selection } = await fixture(context);
+    await NodeFSP.appendFile(selection.products.gateway.lock.path, "# changed after capture\n");
+    await NodeAssert.rejects(collectNativeNotices(options), /Lock binding mismatch/);
+    // New collection inputs cannot disguise a workspace notice's stale manifest hash.
+    const other = await fixture(context);
+    const sourceManifest = NodePath.join(other.root, "manifest.toml");
+    const extra = NodePath.join(other.root, "notice.txt");
+    await NodeFSP.writeFile(sourceManifest, "changed manifest");
+    await NodeFSP.writeFile(extra, "exact notice");
+    other.options.supplements = NodePath.join(other.root, "supplements.json");
+    await NodeFSP.writeFile(
+      other.options.supplements,
+      JSON.stringify({
+        packages: [
+          {
+            key: "demo@1.0.0",
+            checksum: other.selection.products.gateway.selectedRegistryPackages[0].checksum,
+            notices: [
+              {
+                name: "extra",
+                file: extra,
+                sha256: sha256("exact notice"),
+                source: {
+                  kind: "repository-workspace-license",
+                  packageManifest: { path: sourceManifest, sha256: sha256("original manifest") },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    );
+    await NodeAssert.rejects(
+      collectNativeNotices(other.options),
+      /Workspace manifest provenance mismatch/,
+    );
+  },
+);
+
+NodeTest.test(
+  "unchanged packager rejects altered public selection and native inputs",
+  async (context) => {
+    const { root, options, selection } = await fixture(context);
+    await collectNativeNotices(options);
+    const { manifest } = await readBundle(options);
+    const input = stageInput(options, manifest, NodePath.join(root, "tampered-staging"), selection);
+    await NodeFSP.appendFile(NodePath.join(options.output, "selection.json"), " ");
+    await NodeAssert.rejects(
+      Effect.runPromise(stageNativeNotices(input)),
+      /Notice file differs from its manifest: selection.json/,
+    );
+    NodeAssert.equal(await NodeFSP.stat(input.destinationDir).catch(() => null), null);
+    const other = await fixture(context);
+    await collectNativeNotices(other.options);
+    const valid = await readBundle(other.options);
+    const wrong = stageInput(
+      other.options,
+      valid.manifest,
+      NodePath.join(other.root, "changed-binary-staging"),
+      other.selection,
+    );
+    await NodeFSP.writeFile(wrong.resourceMonitor.binaryPath, "changed after collection");
+    await NodeAssert.rejects(
+      Effect.runPromise(stageNativeNotices(wrong)),
+      /Resource monitor binary or Cargo.lock differs/,
+    );
+    NodeAssert.equal(await NodeFSP.stat(wrong.destinationDir).catch(() => null), null);
+  },
+);
+
+NodeTest.test("rejects local paths in recognized public provenance fields", async (context) => {
+  for (const source of [
+    { kind: "repository-commit", path: "/Users/SYNTHETIC_PRIVATE_HOME/LICENSE" },
+    { kind: "repository-commit", sourceUrl: "file:///Users/SYNTHETIC_PRIVATE_HOME/LICENSE" },
+    { kind: "repository-commit", attribution: "Copied from /Users/SYNTHETIC_PRIVATE_HOME/LICENSE" },
+    { kind: "repository-commit", attribution: "Copied=/Users/SYNTHETIC_PRIVATE_HOME/LICENSE" },
+  ]) {
+    const { root, options, selection } = await fixture(context);
+    const file = NodePath.join(root, "extra");
+    await NodeFSP.writeFile(file, "exact notice");
+    options.supplements = NodePath.join(root, "supplements.json");
+    await NodeFSP.writeFile(
+      options.supplements,
+      JSON.stringify({
+        packages: [
+          {
+            key: "demo@1.0.0",
+            checksum: selection.products.gateway.selectedRegistryPackages[0].checksum,
+            notices: [{ name: "extra", file, sha256: sha256("exact notice"), source }],
+          },
+        ],
+      }),
+    );
+    await NodeAssert.rejects(
+      collectNativeNotices(options),
+      /Unsafe relative path|public HTTP\(S\)|local filesystem paths/,
+    );
+  }
+});
 
 NodeTest.test("resolves PAX long paths before matching nested notices", () => {
   const longPath = `demo-1.0.0/${"nested/".repeat(20)}LICENSE`;

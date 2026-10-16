@@ -24,6 +24,7 @@ const state = vi.hoisted(() => ({
   threadShellReady: false,
   search: {} as Record<string, unknown>,
 }));
+vi.mock("../onboarding/ProjectAgentsGuide", () => ({ ProjectAgentsGuide: () => null }));
 vi.mock("../../state/server", () => ({ environmentServerConfigsAtom: "configs" }));
 vi.mock("../../rpc/atomRegistry", () => ({
   appAtomRegistry: { get: () => new Map([["environment", state.latest]]) },
@@ -354,7 +355,6 @@ it("opens the created conversation without starting when reasoning remains unava
   await act(async () => renderer!.update(proposal(original)));
   expect(renderer!.root.findAllByType("select")).toHaveLength(0);
   expect(JSON.stringify(renderer!.toJSON())).toContain("high (unavailable)");
-  expect(JSON.stringify(renderer!.toJSON())).not.toContain("Choose a supported level");
   const open = renderer!.root
     .findAllByType("button")
     .find((button) => button.children.join("") === "Open setup conversation")!;

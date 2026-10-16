@@ -1,3 +1,5 @@
+import { ProjectAgentsGuide } from "../onboarding/ProjectAgentsGuide";
+import { useClientSettings } from "../../hooks/useSettings";
 import type {
   EnvironmentId,
   MeerkatProjectAgent,
@@ -32,6 +34,7 @@ import { Checkbox } from "../ui/checkbox";
 import {
   latestProposalAgent,
   proposalCandidateState,
+  proposalAssignmentMatches,
   proposalPreparationSummary,
   proposalVisibleInThread,
 } from "./projectAgentProposal.logic";
@@ -135,38 +138,47 @@ export function ProjectAgentProposalPanel({
           refreshAuthority={query.refresh}
         />
       ) : (
-        <div className="flex min-w-0 items-center gap-3 px-4 py-2.5">
-          <BookOpenIcon className="size-4 shrink-0 text-muted-foreground" />
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-xs font-medium">
-              {snapshot?.status === "pending" || busy
-                ? "Project setup in progress"
-                : snapshot?.status === "none"
-                  ? "Set up project agents"
-                  : snapshot?.status === "unavailable"
-                    ? "Project agent proposals unavailable"
-                    : "Proposal needs another pass"}
-            </p>
-            {snapshot?.error ? (
-              <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{snapshot.error}</p>
+        <>
+          <ProjectAgentsGuide
+            environmentId={environmentId}
+            projectId={projectId}
+            sourceThreadId={sourceThreadId}
+          />
+          <div className="flex min-w-0 items-center gap-3 px-4 py-2.5">
+            <BookOpenIcon className="size-4 shrink-0 text-muted-foreground" />
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-xs font-medium">
+                {snapshot?.status === "pending" || busy
+                  ? "Project setup in progress"
+                  : snapshot?.status === "none"
+                    ? "Set up project agents"
+                    : snapshot?.status === "unavailable"
+                      ? "Project agent proposals unavailable"
+                      : "Proposal needs another pass"}
+              </p>
+              {snapshot?.error ? (
+                <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+                  {snapshot.error}
+                </p>
+              ) : null}
+            </div>
+            {snapshot?.status !== "pending" && !busy ? (
+              <Button
+                size="xs"
+                variant="outline"
+                disabled={blocked}
+                onClick={() => void refreshProposal()}
+              >
+                <RefreshCwIcon />
+                {refreshing
+                  ? "Starting..."
+                  : snapshot?.status === "none"
+                    ? "Start study"
+                    : "Try again"}
+              </Button>
             ) : null}
           </div>
-          {snapshot?.status !== "pending" && !busy ? (
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={blocked}
-              onClick={() => void refreshProposal()}
-            >
-              <RefreshCwIcon />
-              {refreshing
-                ? "Starting..."
-                : snapshot?.status === "none"
-                  ? "Start study"
-                  : "Try again"}
-            </Button>
-          ) : null}
-        </div>
+        </>
       )}
       {query.error || error ? (
         <p role="alert" className="px-5 pb-3 text-sm text-warning-foreground">
@@ -251,6 +263,29 @@ function ProposalReview({
   const needsAttention = progress.failed > 0 || requestIssue !== null;
   const submitting = pendingIds.size > 0;
   const blocked = busy || submitting || team.error !== null || team.data === null;
+  const onboarding = useClientSettings((settings) => settings.onboardingProgress);
+  const specialistSetup =
+    onboarding?.step === "project-agents" &&
+    onboarding.projectRef?.environmentId === environmentId &&
+    onboarding.projectRef.projectId === projectId &&
+    (onboarding.threadId === null || onboarding.threadId === sourceThreadId);
+  const acceptedAgent = rows.find(
+    ({ candidate, agent }) =>
+      agent &&
+      agent.projectId === projectId &&
+      agent.instanceId === instanceId &&
+      agent.enabled &&
+      !agent.archived &&
+      !errors.has(candidate.id) &&
+      !agent.error &&
+      ((agent.pendingRevision &&
+        !agent.pendingRevision.error &&
+        proposalAssignmentMatches(candidate, { ...agent, ...agent.pendingRevision })) ||
+        (proposalAssignmentMatches(candidate, agent) &&
+          agent.preparation &&
+          ["queued", "dispatching", "studying", "ready"].includes(agent.preparation.status) &&
+          !agent.preparation.error)),
+  )?.agent;
   const startTask = () => {
     setReviewOpen(false);
     void navigate({
@@ -332,6 +367,14 @@ function ProposalReview({
   }
   return (
     <>
+      <ProjectAgentsGuide
+        environmentId={environmentId}
+        projectId={projectId}
+        sourceThreadId={sourceThreadId}
+        acceptedAgentId={acceptedAgent?.agentId}
+        preparationLabel={progress.label}
+        blocked={blocked || needsAttention}
+      />
       <div className="flex min-w-0 flex-wrap items-center gap-2 px-4 py-2.5">
         {needsAttention ? (
           <AlertCircleIcon className="size-4 shrink-0 text-warning" />
@@ -353,7 +396,7 @@ function ProposalReview({
               ? "View agents"
               : "Review proposal"}
         </Button>
-        {progress.available > 0 && !reviewOpen ? (
+        {progress.available > 0 && !reviewOpen && !specialistSetup ? (
           <Button size="xs" disabled={submitting} onClick={startTask}>
             Start a task <ArrowRightIcon />
           </Button>
@@ -611,8 +654,8 @@ function ProposalReview({
             ) : null}
             {progress.available > 0 ? (
               <p className="text-xs text-muted-foreground">
-                Start a task to choose which project agents to work with. This setup conversation
-                stays solo.
+                Open a specialist from the sidebar to follow its preparation. Connect specialists
+                with each other or with task threads when you are ready.
               </p>
             ) : null}
           </DialogPanel>
@@ -625,7 +668,7 @@ function ProposalReview({
               <Button size="sm" disabled={blocked} onClick={() => void createSelected(selectedIds)}>
                 Apply {selectedIds.length} {selectedIds.length === 1 ? "assignment" : "assignments"}
               </Button>
-            ) : progress.available > 0 ? (
+            ) : progress.available > 0 && !specialistSetup ? (
               <Button size="sm" disabled={submitting} onClick={startTask}>
                 Start a task <ArrowRightIcon />
               </Button>

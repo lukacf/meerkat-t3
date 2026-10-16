@@ -109,7 +109,7 @@ async fn assert_saved_identity(mob: &MobkitMobRuntime, model: &str, effort: Reas
         "status must observe the exact specialist session"
     );
     let busy = mob.console_target_busy(&expected).await.unwrap();
-    let observed = crate::native_work::read(mob, &expected, busy)
+    let observed = crate::native_work::read(mob, &expected, busy, None)
         .await
         .unwrap();
     mob.validate_console_incarnation(&expected).await.unwrap();
@@ -225,13 +225,19 @@ async fn initial_model_proof(
         "providerParams": {"reasoning_effort": "xhigh"}
     });
     let input = CreateMobInput {
-        mob_id: "initial-model-proof".into(),
+        // Native comms names are process-wide even when storage is isolated.
+        // Keep this identity stable across this proof's restart, unique across
+        // concurrently running domain and thread proofs.
+        mob_id: format!("initial-model-proof-{}", uuid::Uuid::new_v4()),
         kind: kind.into(),
         label: "Initial model proof".into(),
         role: "domain".into(),
         coordinator_identity: "specialist".into(),
         model: "gpt-5.6-sol".into(),
-        initial_llm: Some(initial.as_object().unwrap().clone()),
+        initial_llm: Some(crate::native_model::InitialAgentLlmRequest {
+            params: initial.as_object().unwrap().clone(),
+            catalog: crate::effective_catalog_models(&config).unwrap(),
+        }),
         instructions: "Keep this project charter across reconnects.".into(),
         thread_id: None,
         include_native_workers: false,
@@ -248,6 +254,7 @@ async fn initial_model_proof(
             input.clone(),
             Arc::clone(&host_tools),
             Some(llm.clone()),
+            None,
             None,
         )
         .await
@@ -319,12 +326,14 @@ async fn initial_model_proof(
         .initial_llm
         .as_mut()
         .unwrap()
+        .params
         .insert("model".into(), json!(stale_input.model));
     let restored = Arc::new(
         bootstrap_local_runtime_with_proposal_dispatcher(
             stale_input,
             Arc::clone(&host_tools),
             Some(llm.clone()),
+            None,
             None,
         )
         .await

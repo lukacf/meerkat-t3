@@ -278,7 +278,7 @@ beforeEach(() => {
   state.savedAttempt = null;
   state.pending = false;
   state.recovery = null;
-  state.models = [{ slug: "model", isDefault: true }];
+  state.models = [{ slug: "model", isDefault: true, credentialState: "connected" }];
   state.projectActionCount = 0;
   state.terminalAttachments = [];
   state.terminalClose.mockReset().mockResolvedValue({ _tag: "Success" });
@@ -518,6 +518,25 @@ it("hands delivery to the observed provider and blocks if that exact model leave
   await act(async () => delivery().props.onClick());
   expect(state.start).toHaveBeenCalledOnce();
 });
+
+it.each([undefined, "unknown", "host_managed"] as const)(
+  "blocks a new delivery handoff when native account access is %s",
+  async (credentialState) => {
+    state.models = [{ slug: "model", isDefault: true, credentialState }];
+    await act(async () => {
+      renderer = create(<AgentWorkspaceTools {...props} />);
+    });
+    const delivery = renderer!.root
+      .findAllByType("button")
+      .find((node) => node.children.includes("Delivery task"))!;
+    expect(delivery.props.disabled).toBe(true);
+    expect(JSON.stringify(renderer!.toJSON())).toContain(
+      "Check this provider in Settings > Providers",
+    );
+    await act(async () => delivery.props.onClick());
+    expect(state.start).not.toHaveBeenCalled();
+  },
+);
 
 it("blocks a delivery handoff with an actionable account link instead of changing its model", async () => {
   state.models = [

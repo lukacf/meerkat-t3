@@ -70,3 +70,32 @@ describe("compatibility banners", () => {
     );
   });
 });
+
+describe("model access recovery", () => {
+  const unavailable: ServerProvider = {
+    ...provider,
+    instanceId: ProviderInstanceId.make("meerkat"),
+    driver: ProviderDriverKind.make("meerkat"),
+    status: "error",
+    auth: { status: "unknown" },
+    message:
+      "Provider driver 'meerkat' failed to create instance 'meerkat': Meerkat gateway request timed out: models.v1.catalog. Execution outcome is unknown.",
+  };
+
+  it("keeps a failed account check distinct from being signed out", () => {
+    expect(getProviderStatusMessage(unavailable)).toBe(
+      "Could not check model access. Open Settings > Providers to retry.",
+    );
+    expect(getProviderStatusMessage({ ...unavailable, auth: { status: "unauthenticated" } })).toBe(
+      "Connect an account in Settings > Providers to use its models.",
+    );
+  });
+
+  it("shows a new failure after dismissing an earlier one, despite sharing a recovery summary", () => {
+    const changed = { ...unavailable, message: "Native model catalog could not be loaded." };
+    expect(getProviderStatusMessage(changed)).toBe(getProviderStatusMessage(unavailable));
+    expect(shouldShowProviderStatusBanner(changed, getProviderStatusBannerKey(unavailable))).toBe(
+      true,
+    );
+  });
+});

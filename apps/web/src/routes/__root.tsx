@@ -140,9 +140,10 @@ function RootRouteNotFoundView() {
 function RootRouteView() {
   const navigate = useNavigate();
   useEffect(
-    () => window.desktopBridge?.onMenuAction((action) => {
-      if (action === "open-help") void navigate({ to: "/help", search: { topic: "start" } });
-    }),
+    () =>
+      window.desktopBridge?.onMenuAction((action) => {
+        if (action === "open-help") void navigate({ to: "/help", search: { topic: "start" } });
+      }),
     [navigate],
   );
   useEffect(() => installDesktopPasteAsText(window.desktopBridge, window), []);
@@ -150,7 +151,9 @@ function RootRouteView() {
   const { authGateState } = Route.useRouteContext();
   const primaryEnvironmentAuthenticated = authGateState.status === "authenticated";
   const returningFromWelcomeRef = useRef(pathname === "/welcome");
-  const onboardingInProgress = useClientSettings((settings) => settings.onboardingProgress !== null);
+  const onboardingInProgress = useClientSettings(
+    (settings) => settings.onboardingProgress !== null,
+  );
 
   useEffect(() => {
     if (pathname === "/welcome") {
@@ -245,7 +248,11 @@ function RootRouteView() {
           <ProjectCloneToastCoordinator />
           <HostedStaticEnvironmentBootstrap />
           {primaryEnvironmentAuthenticated ? (
-            <EventRouter skipInitialBootstrapNavigation={returningFromWelcomeRef.current || onboardingInProgress} />
+            <EventRouter
+              skipInitialBootstrapNavigation={
+                returningFromWelcomeRef.current || onboardingInProgress
+              }
+            />
           ) : null}
           {primaryEnvironmentAuthenticated ? <PlanAgentSelectionHeal /> : null}
           {primaryEnvironmentAuthenticated ? <ProviderUpdateLaunchNotification /> : null}
@@ -399,7 +406,11 @@ function RootRouteErrorView({ error }: ErrorComponentProps) {
           Reload app
         </Button>
         <CopyErrorButton report={report} />
-        <Button size="sm" variant="outline" render={<Link to="/help" search={{ topic: "recovery" }} />}>
+        <Button
+          size="sm"
+          variant="outline"
+          render={<Link to="/help" search={{ topic: "recovery" }} />}
+        >
           Recovery guide
         </Button>
       </div>

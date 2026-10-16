@@ -295,7 +295,8 @@ export const LoadBalancingWeights = Schema.Record(
 export const DiffColorScheme = Schema.Literals(["red-green", "blue-orange"]);
 
 export const OnboardingProgress = Schema.Struct({
-  step: Schema.Literals(["connection", "agents", "projects", "first-task"]),
+  step: Schema.Literals(["connection", "agents", "projects", "project-agents", "first-task"]),
+  resumeStep: Schema.optional(Schema.Literals(["first-task", "project-agents"])),
   environmentIds: Schema.Array(EnvironmentId),
   startedAt: Schema.String,
   projectRef: Schema.NullOr(Schema.Struct({ environmentId: EnvironmentId, projectId: ProjectId })),
@@ -1348,6 +1349,7 @@ export class ProviderSettingsConflictError extends Schema.TaggedError<ProviderSe
       "driver_changed",
       "config_not_object",
       "conflicting_config_keys",
+      "unsupported_driver",
     ]),
   },
 ) {
@@ -1359,6 +1361,8 @@ export class ProviderSettingsConflictError extends Schema.TaggedError<ProviderSe
         return "This provider no longer exists. Refresh settings before editing it.";
       case "driver_changed":
         return "This provider has changed. Refresh settings before editing it.";
+      case "unsupported_driver":
+        return "This app manages model accounts directly. Other agent runtimes cannot be configured.";
       case "config_not_object":
       case "conflicting_config_keys":
         return "These changes cannot be applied to the current provider configuration.";

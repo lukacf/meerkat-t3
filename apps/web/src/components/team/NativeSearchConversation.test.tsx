@@ -74,9 +74,7 @@ describe("native saved search result", () => {
         transcriptBefore: 824,
       },
     });
-    expect(renderer!.root.findByType("article").props.initial.sessionId).toBe(
-      "old-session",
-    );
+    expect(renderer!.root.findByType("article").props.initial.sessionId).toBe("old-session");
     expect(renderer!.root.findAllByType("textarea")).toHaveLength(0);
   });
   it("refuses another session instead of showing a replacement agent's history", () => {

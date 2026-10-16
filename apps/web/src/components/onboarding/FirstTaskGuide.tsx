@@ -130,7 +130,7 @@ export function FirstTaskGuide(
                 ? "Your first task is running. Setup finishes when its reply arrives."
                 : props.latestTurn?.state === "error" || props.latestTurn?.state === "interrupted"
                   ? "This task has not finished successfully. Resolve the issue shown below, then continue this conversation to finish setup."
-                  : "Choose a model below and ask: Explain this project and suggest a small first task. Setup finishes when a reply arrives."}
+                  : "Choose a model and ask for a brief introduction to this project. A reply confirms setup. Then use the project's Propose agents from repository action to prepare its specialists."}
         </p>
         {error ? (
           <p className="text-xs text-destructive" role="alert">

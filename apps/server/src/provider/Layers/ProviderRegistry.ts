@@ -527,7 +527,12 @@ export const ProviderRegistryLive = Layer.effect(
       const providers = yield* upsertProviders([provider], options);
       // Reclassify the current read model after fetching. Never republish the
       // probe captured before the fetch: a newer health result may have landed.
-      if (!(yield* Ref.getAndSet(compatibilityRefreshRunning, true))) {
+      // Meerkat discovers its models through the native runtime.
+      if (
+        provider.enabled &&
+        provider.driver !== "meerkat" &&
+        !(yield* Ref.getAndSet(compatibilityRefreshRunning, true))
+      ) {
         yield* manifestService.refresh.pipe(
           Effect.andThen(upsertProviders([], { persist: false })),
           Effect.ensuring(Ref.set(compatibilityRefreshRunning, false)),

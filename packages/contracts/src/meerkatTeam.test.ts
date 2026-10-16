@@ -42,6 +42,43 @@ describe("native agent reasoning observations", () => {
   });
 });
 
+describe("native agent model account observations", () => {
+  const codec = Schema.fromJsonString(MeerkatAgentWork);
+  const decode = Schema.decodeUnknownSync(codec);
+  const encode = Schema.encodeSync(codec);
+  const work = { status: "idle", observedAt: "2026-10-09T00:00:00.000Z", model: "model" };
+
+  it("preserves exact pinned/default account state without inferring a missing observation", () => {
+    expect(decode(JSON.stringify(work))).not.toHaveProperty("modelAuth");
+    for (const source of ["pinned", "default"]) {
+      for (const state of [
+        "connected",
+        "needs_auth",
+        "reauth_required",
+        "host_managed",
+        "unknown",
+      ]) {
+        const modelAuth = {
+          state,
+          source,
+          provider: "openai",
+          realmId: "global",
+          bindingId: "work-account",
+          profileId: "work-profile",
+          accountLabel: "Work",
+          authMethod: "chatgpt_oauth",
+          backendKind: "chatgpt_backend",
+        };
+        const observed = decode(JSON.stringify({ ...work, modelAuth }));
+        expect(decode(encode(observed)).modelAuth).toEqual(modelAuth);
+      }
+    }
+    expect(() =>
+      decode(JSON.stringify({ ...work, modelAuth: { state: "connected", provider: "openai" } })),
+    ).toThrow();
+  });
+});
+
 describe("native delivery reconciliation wire result", () => {
   it("preserves missing and uncertain receipts across JSON without treating either as acceptance", () => {
     const codec = Schema.fromJsonString(MeerkatAgentDeliveryReconcileResult);

@@ -17,7 +17,7 @@ import {
 } from "./KeybindingsSettings.logic";
 
 describe("KeybindingsSettings.logic", () => {
-  it("lists composer, provider, and pull request commands with editable defaults", () => {
+  it("lists composer and pull request commands with editable defaults", () => {
     const rows = buildKeybindingRows(DEFAULT_RESOLVED_KEYBINDINGS, "");
     for (const command of [
       "composer.host",
@@ -26,8 +26,6 @@ describe("KeybindingsSettings.logic", () => {
       "composer.workspace",
       "composer.branch",
       "composer.previousWorktree",
-      "modelPicker.previousProvider",
-      "modelPicker.nextProvider",
       "thread.copyReference",
       "pullRequest.copyNumber",
     ]) {
@@ -36,6 +34,22 @@ describe("KeybindingsSettings.logic", () => {
         conflicts: [],
       });
     }
+  });
+  it("does not offer removed runtime-switching commands from default or saved bindings", () => {
+    const savedBindings: ResolvedKeybindingsConfig = DEFAULT_RESOLVED_KEYBINDINGS.map((binding) =>
+      binding.command === "modelPicker.previousProvider"
+        ? { ...binding, shortcut: { ...binding.shortcut, key: "p" } }
+        : binding,
+    );
+    const rows = buildKeybindingRows(savedBindings, "");
+    const options = buildKeybindingCommandOptions(savedBindings);
+    for (const command of ["modelPicker.previousProvider", "modelPicker.nextProvider"]) {
+      expect(rows.some((row) => row.command === command)).toBe(false);
+      expect(options).not.toContain(command);
+    }
+    expect(
+      savedBindings.some((binding) => binding.command === "modelPicker.previousProvider"),
+    ).toBe(true);
   });
   it.each(["pu", "pull request", "copy link", "thread id"])(
     "finds the copy link shortcut with %s",

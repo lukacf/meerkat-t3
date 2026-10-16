@@ -4,7 +4,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import { MEERKAT_REQUIRED_METHODS } from "@t3tools/shared/meerkatRuntime";
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { ProviderInstanceId, type MeerkatAuthConnection } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -233,10 +233,7 @@ describe("MeerkatDriver catalog", () => {
       ],
     },
   };
-  const connection = (
-    provider: string,
-    state: "connected" | "needs_auth" | "reauth_required" | "host_managed",
-  ) => ({
+  const connection = (provider: string, state: MeerkatAuthConnection["state"]) => ({
     provider,
     displayName: provider,
     realmId: "env_default",
@@ -373,6 +370,101 @@ describe("MeerkatDriver catalog", () => {
         }).pipe(Effect.scoped),
     );
 
+  for (const { states, expectedAuth } of [
+    { states: ["unknown"], expectedAuth: "unknown" },
+    { states: ["unknown", "needs_auth"], expectedAuth: "unknown" },
+    { states: ["needs_auth"], expectedAuth: "unauthenticated" },
+    { states: ["reauth_required"], expectedAuth: "unauthenticated" },
+  ] as const) {
+    effectIt.effect(`projects saved account states ${states.join(", ")} as ${expectedAuth}`, () =>
+      Effect.gen(function* () {
+        const root = yield* Effect.promise(() =>
+          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "meerkat-saved-account-status-")),
+        );
+        yield* Effect.addFinalizer(() =>
+          Effect.promise(() => NodeFSP.rm(root, { recursive: true, force: true })),
+        );
+        const stub = vi.spyOn(GatewayClient, "createMeerkatGatewayClient").mockReturnValue({
+          pid: undefined,
+          request: async (method) => {
+            if (method === "system.v1.health")
+              return {
+                ok: true,
+                runtime: "mobkit",
+                build: {
+                  gatewayVersion: "0.1.0",
+                  meerkatVersion: "0.8.52",
+                  mobkitVersion: "0.8.49",
+                  cargoLockSha256: "a".repeat(64),
+                  platform: "macos",
+                  arch: "aarch64",
+                },
+              };
+            if (method === "system.v1.capabilities")
+              return {
+                contractVersion: "pure-mobkit-runtime-v1",
+                methods: MEERKAT_REQUIRED_METHODS,
+              };
+            if (method === "models.v1.catalog") return nativeCatalog;
+            if (method === "skills.v1.list") return { skills: [] };
+            if (method === "auth.v1.status")
+              return {
+                connections: states.map((state, index) => ({
+                  ...connection(index === 0 ? "openai" : "anthropic", state),
+                  realmId: "global",
+                  bindingId: `saved-${index}`,
+                  profileId: `saved-${index}`,
+                  source: "managed_store",
+                  isDefault: true,
+                  models: [],
+                })),
+              };
+            throw new Error(`Unexpected native method: ${method}`);
+          },
+          subscribe: () => () => {},
+          onClose: () => () => {},
+          close: async () => {},
+        });
+        yield* Effect.addFinalizer(() => Effect.sync(() => stub.mockRestore()));
+        yield* Effect.gen(function* () {
+          const instance = yield* MeerkatDriver.create({
+            instanceId: ProviderInstanceId.make("saved-account-status-test"),
+            displayName: undefined,
+            environment: [],
+            enabled: true,
+            config: { gatewayBinaryPath: "unused-mocked-gateway", projectPath: root },
+          });
+          const snapshot = yield* instance.snapshot.getSnapshot;
+          expect(snapshot.installed).toBe(true);
+          expect(snapshot.status).toBe("warning");
+          expect(snapshot.auth.status).toBe(expectedAuth);
+          expect(snapshot.models.some((model) => model.credentialState === "connected")).toBe(
+            false,
+          );
+          expect(snapshot.models.some((model) => model.subProvider === "openai")).toBe(false);
+          if (expectedAuth === "unknown") {
+            expect(snapshot.auth.label).toBe("Model account status is unverified");
+            expect(snapshot.message).toBe(
+              "Choose Check account in Settings > Providers to unlock saved credentials.",
+            );
+          } else {
+            expect(snapshot.auth.label).toBe("Connect a model account in Settings > Providers");
+            expect(snapshot.message).toBe(
+              "Open Settings > Providers to sign in or add an API key.",
+            );
+          }
+        }).pipe(
+          Effect.provide(
+            Layer.merge(
+              Layer.mock(MeerkatCheckpointStoreService)({}),
+              ServerConfig.layerTest(root, root).pipe(Layer.provideMerge(NodeServices.layer)),
+            ),
+          ),
+        );
+      }).pipe(Effect.scoped),
+    );
+  }
+
   it("preserves native source identity for skills with the same name", () => {
     const result = projectMeerkatSkills({
       skills: ["b3fdcd90-cb8c-40c2-aee5-c1aba30a9b64", "4fa3e1a2-5b6c-47d8-9012-3456789abcde"].map(
@@ -390,15 +482,17 @@ describe("MeerkatDriver catalog", () => {
       "meerkat-skill://4fa3e1a2-5b6c-47d8-9012-3456789abcde/review",
     ]);
   });
-  for (const { fail, needsAuth, held } of [
-    { fail: false, needsAuth: false, held: false },
-    { fail: true, needsAuth: false, held: false },
-    { fail: false, needsAuth: true, held: false },
-    { fail: false, needsAuth: false, held: true },
-    { fail: false, needsAuth: true, held: true },
+  for (const { fail, needsAuth, held, accounts } of [
+    { fail: false, needsAuth: false, held: false, accounts: "configured" },
+    { fail: true, needsAuth: false, held: false, accounts: "configured" },
+    { fail: false, needsAuth: true, held: false, accounts: "configured" },
+    { fail: false, needsAuth: false, held: true, accounts: "configured" },
+    { fail: false, needsAuth: true, held: true, accounts: "configured" },
+    { fail: false, needsAuth: true, held: false, accounts: "empty" },
+    { fail: false, needsAuth: false, held: false, accounts: "host" },
   ]) {
     effectIt.effect(
-      `reads discovery with policy failure=${fail}, missing credentials=${needsAuth}, restore held=${held}`,
+      `reads discovery with policy failure=${fail}, missing credentials=${needsAuth}, restore held=${held}, accounts=${accounts}`,
       () =>
         Effect.gen(function* () {
           const root = yield* Effect.promise(async () =>
@@ -466,10 +560,15 @@ describe("MeerkatDriver catalog", () => {
                 };
               if (method === "auth.v1.status")
                 return {
-                  connections: [
-                    connection("anthropic", "needs_auth"),
-                    connection("openai", needsAuth ? "needs_auth" : "connected"),
-                  ],
+                  connections:
+                    accounts === "empty"
+                      ? []
+                      : accounts === "host"
+                        ? [connection("openai", "host_managed")]
+                        : [
+                            connection("anthropic", "needs_auth"),
+                            connection("openai", needsAuth ? "needs_auth" : "connected"),
+                          ],
                 };
               return {};
             },
@@ -522,13 +621,15 @@ describe("MeerkatDriver catalog", () => {
               ),
             ),
           );
-          expect(snapshot.status).toBe(fail ? "error" : needsAuth ? "warning" : "ready");
+          expect(snapshot.status).toBe(
+            fail ? "error" : needsAuth || accounts === "host" ? "warning" : "ready",
+          );
           if (!fail) {
             expect(snapshot.skills[0]?.name).toBe("Native skill");
             expect(
               snapshot.models.filter((model) => model.isDefault).map((model) => model.slug),
             ).toEqual(
-              needsAuth
+              needsAuth || accounts === "host"
                 ? ["anthropic:claude-opus-5-5", "openai:gpt-6-astra", "self_hosted:local-model"]
                 : ["openai:gpt-6-astra"],
             );
@@ -537,7 +638,17 @@ describe("MeerkatDriver catalog", () => {
             expect(snapshot.auth.status).toBe("unauthenticated");
             expect(snapshot.auth.label).toBe("Connect a model account in Settings > Providers");
             expect(snapshot.message).toContain("API key");
-            expect(snapshot.message).toContain("OAuth profiles");
+            expect(snapshot.message).toContain("sign in");
+          }
+          if (accounts === "empty" || accounts === "host") {
+            expect(snapshot.models.every((model) => model.credentialState !== "connected")).toBe(
+              true,
+            );
+            if (accounts === "host") {
+              expect(snapshot.auth.status).toBe("unknown");
+              expect(snapshot.auth.label).toBe("Host-managed model access is unverified");
+              expect(snapshot.message).toContain("Check host-managed credentials");
+            }
           }
           expect(request.mock.calls.map(([method]) => method)).toEqual(
             fail
@@ -555,15 +666,118 @@ describe("MeerkatDriver catalog", () => {
     );
   }
 
-  it("keeps native aliases selectable and distinguishes their labels by exact identity", () => {
+  it("keeps native aliases selectable without putting routing identifiers in human names", () => {
     const models = projectMeerkatModels(nativeCatalog);
     expect(models.map((model) => [model.slug, model.name])).toEqual([
       ["anthropic:claude-opus-5-5", "Claude Opus 5.5"],
-      ["openai:gpt-5.6", "[openai:gpt-5.6] GPT-5.6 Sol"],
-      ["openai:gpt-5.6-sol", "[openai:gpt-5.6-sol] GPT-5.6 Sol"],
+      ["openai:gpt-5.6", "GPT-5.6 Sol"],
+      ["openai:gpt-5.6-sol", "GPT-5.6 Sol"],
       ["openai:gpt-6-astra", "GPT-6 Astra"],
       ["self_hosted:local-model", "Local model"],
     ]);
+  });
+
+  it("passes recognized native tiers without inferring recommendations from defaults or names", () => {
+    const models = projectMeerkatModels({
+      catalog: {
+        providers: [
+          {
+            provider: "openai",
+            default_model_id: "unknown-tier",
+            models: [
+              { id: "recommended-model", tier: "recommended" },
+              { id: "supported-model", tier: "supported" },
+              { id: "custom-model", tier: "custom" },
+              { id: "unknown-tier", display_name: "Recommended", tier: "premium" },
+              { id: "no-tier" },
+            ],
+          },
+        ],
+      },
+    });
+    expect(models.map((model) => model.catalogTier)).toEqual([
+      "recommended",
+      "supported",
+      "custom",
+      undefined,
+      undefined,
+    ]);
+    expect(models[3]).not.toHaveProperty("catalogTier");
+    expect(models[4]).not.toHaveProperty("catalogTier");
+  });
+
+  it("labels native Copilot offerings with the connected account while retaining exact execution routes", () => {
+    const offerings = [
+      { provider: "anthropic", id: "claude-fable-5", display_name: "Claude Fable 5" },
+      { provider: "openai", id: "gpt-6-astra", display_name: "GPT-6 Astra" },
+      { provider: "gemini", id: "gemini-3.5-pro", display_name: "Gemini 3.5 Pro" },
+    ];
+    const models = projectMeerkatModels(
+      {
+        catalog: {
+          providers: offerings.map((offering) => ({
+            provider: offering.provider,
+            models: [{ id: offering.id, display_name: offering.display_name }],
+          })),
+        },
+      },
+      {
+        methods: [
+          {
+            id: "github-copilot",
+            provider: "copilot",
+            displayName: "GitHub Copilot",
+            authMethod: "github_copilot_oauth",
+            backendKind: "copilot",
+            flow: "device",
+            description: "Sign in",
+            fields: [],
+          },
+        ],
+        connections: offerings.flatMap((offering) => [
+          {
+            ...connection(offering.provider, "connected"),
+            displayName: `GitHub Copilot (${offering.provider})`,
+            authMethod: "github_copilot_oauth",
+            backendKind: "copilot",
+            bindingId: `copilot-${offering.provider}`,
+            accountLabel: "King",
+            isDefault: true,
+            modelsVerified: true,
+            models: [
+              {
+                id: offering.id,
+                displayName: offering.display_name,
+                tier: "supported",
+                recommended: false,
+              },
+            ],
+          },
+          {
+            ...connection(offering.provider, "connected"),
+            displayName: "Different account",
+            accountLabel: "Personal",
+            isDefault: false,
+          },
+        ]),
+      },
+    );
+    expect(
+      models.map(({ slug, name, accountLabel, subProvider }) => ({
+        slug,
+        name,
+        accountLabel,
+        subProvider,
+      })),
+    ).toEqual(
+      offerings.map((offering) => ({
+        slug: `${offering.provider}:${offering.id}`,
+        name: offering.display_name,
+        accountLabel: "GitHub Copilot · King",
+        subProvider: offering.provider,
+      })),
+    );
+    expect(models.every((model) => model.credentialState === "connected")).toBe(true);
   });
 
   it("prefers a connected provider's published default without removing any model", () => {
@@ -575,8 +789,75 @@ describe("MeerkatDriver catalog", () => {
       "openai:gpt-6-astra",
     ]);
     expect(
-      connected.map(({ credentialState, ...model }) => ({ ...model, isDefault: false })),
-    ).toEqual(unchanged.map(({ credentialState, ...model }) => ({ ...model, isDefault: false })));
+      connected.map(
+        ({ credentialState: _credentialState, accountLabel: _accountLabel, ...model }) => ({
+          ...model,
+          isDefault: false,
+        }),
+      ),
+    ).toEqual(
+      unchanged.map(
+        ({ credentialState: _credentialState, accountLabel: _accountLabel, ...model }) => ({
+          ...model,
+          isDefault: false,
+        }),
+      ),
+    );
+  });
+
+  it("uses connected account model catalogs and the native default account", () => {
+    const models = projectMeerkatModels(nativeCatalog, {
+      connections: [
+        { ...connection("anthropic", "connected"), models: [], modelsVerified: false },
+        {
+          ...connection("openai", "connected"),
+          isDefault: true,
+          modelsVerified: true,
+          models: [
+            { id: "gpt-6-astra", displayName: "GPT-6 Astra", tier: "flagship", recommended: true },
+          ],
+        },
+      ],
+    });
+    expect(
+      models.filter((model) => model.credentialState === "connected").map((model) => model.slug),
+    ).toEqual(["openai:gpt-6-astra"]);
+    expect(models.filter((model) => model.isDefault).map((model) => model.slug)).toEqual([
+      "openai:gpt-6-astra",
+    ]);
+    expect(models.some((model) => model.slug === "self_hosted:local-model")).toBe(true);
+  });
+
+  it("exposes only the executing default binding and changes catalogs when that account changes", () => {
+    const account = (bindingId: string, isDefault: boolean, model: string) => ({
+      ...connection("openai", "connected"),
+      bindingId,
+      profileId: bindingId,
+      isDefault,
+      models: [{ id: model, displayName: model, tier: "standard", recommended: true }],
+    });
+    for (const defaultBinding of ["api", "copilot"] as const) {
+      const models = projectMeerkatModels(nativeCatalog, {
+        connections: [
+          account("api", defaultBinding === "api", "gpt-6-astra"),
+          account("copilot", defaultBinding === "copilot", "gpt-5.6-sol"),
+        ],
+      });
+      expect(
+        models
+          .filter((model) => model.subProvider === "openai")
+          .map((model) => [model.slug, model.credentialState]),
+      ).toEqual([
+        [defaultBinding === "api" ? "openai:gpt-6-astra" : "openai:gpt-5.6-sol", "connected"],
+      ]);
+    }
+    const disconnectedDefault = projectMeerkatModels(nativeCatalog, {
+      connections: [
+        { ...account("api", true, "gpt-6-astra"), state: "needs_auth" },
+        account("copilot", false, "gpt-5.6-sol"),
+      ],
+    });
+    expect(disconnectedDefault.some((model) => model.subProvider === "openai")).toBe(false);
   });
 
   it("preserves catalog defaults for absent, host-managed, and unmatched auth", () => {
@@ -589,9 +870,13 @@ describe("MeerkatDriver catalog", () => {
     ]) {
       expect(
         projectMeerkatModels(nativeCatalog, { connections }).map(
-          ({ credentialState, ...model }) => model,
+          ({ credentialState: _credentialState, accountLabel: _accountLabel, ...model }) => model,
         ),
-      ).toEqual(unchanged.map(({ credentialState, ...model }) => model));
+      ).toEqual(
+        unchanged.map(
+          ({ credentialState: _credentialState, accountLabel: _accountLabel, ...model }) => model,
+        ),
+      );
     }
     const noPublishedDefault = {
       catalog: {
@@ -603,9 +888,13 @@ describe("MeerkatDriver catalog", () => {
     expect(
       projectMeerkatModels(noPublishedDefault, {
         connections: [connection("openai", "connected")],
-      }).map(({ credentialState, ...model }) => model),
+      }).map(
+        ({ credentialState: _credentialState, accountLabel: _accountLabel, ...model }) => model,
+      ),
     ).toEqual(
-      projectMeerkatModels(noPublishedDefault).map(({ credentialState, ...model }) => model),
+      projectMeerkatModels(noPublishedDefault).map(
+        ({ credentialState: _credentialState, accountLabel: _accountLabel, ...model }) => model,
+      ),
     );
   });
 
@@ -636,7 +925,7 @@ describe("MeerkatDriver catalog", () => {
     ).toBe(true);
   });
 
-  it("disambiguates equal display names across native providers without merging them", () => {
+  it("preserves equal display names and distinct routing identities without merging them", () => {
     expect(
       projectMeerkatModels({
         catalog: {
@@ -647,8 +936,8 @@ describe("MeerkatDriver catalog", () => {
         },
       }).map((model) => [model.slug, model.name, model.shortName]),
     ).toEqual([
-      ["openai:shared", "[openai:shared] Shared model", "Shared model"],
-      ["self_hosted:shared", "[self_hosted:shared] Shared model", "Shared model"],
+      ["openai:shared", "Shared model", "Shared model"],
+      ["self_hosted:shared", "Shared model", "Shared model"],
     ]);
   });
 
@@ -685,6 +974,7 @@ describe("MeerkatDriver catalog", () => {
         slug: "anthropic:shared-model",
         name: "Custom model",
         shortName: "Custom model",
+        catalogTier: "custom",
         subProvider: "anthropic",
         credentialState: "unknown",
         isDefault: false,

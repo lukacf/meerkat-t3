@@ -91,7 +91,10 @@ describe("Settings checkout provider truth", () => {
       instanceId,
       saved.model,
     ).get(instanceId);
-    expect(options?.map((model) => model.slug)).toEqual([modelB.slug]);
+    expect(options?.filter((model) => !model.isUnavailable).map((model) => model.slug)).toEqual([
+      modelB.slug,
+    ]);
+    expect(options?.find((model) => model.slug === modelA.slug)?.isUnavailable).toBe(true);
     expect(getProviderSummary(result.providers[0]).headline).toBe(
       "Credentials detected · B account",
     );

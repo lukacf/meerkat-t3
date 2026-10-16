@@ -2,6 +2,7 @@ import {
   DEFAULT_SERVER_SETTINGS,
   ProviderDriverKind,
   ProviderInstanceId,
+  type MeerkatAgentWork,
   type ServerProvider,
   type ServerProviderModel,
   type ServerConfig,
@@ -17,6 +18,14 @@ const model: ServerProviderModel = {
   subProvider: "openai",
   credentialState: "connected",
   capabilities: null,
+};
+const modelAuth: NonNullable<MeerkatAgentWork["modelAuth"]> = {
+  state: "connected",
+  source: "pinned",
+  provider: "openai",
+  realmId: "global",
+  bindingId: "work-account",
+  profileId: "Work-account",
 };
 function config(
   overrides: Partial<ServerProvider> = {},
@@ -48,6 +57,7 @@ function block(overrides: Partial<Parameters<typeof getAgentModelSendBlock>[0]> 
     instanceId,
     selection: { instanceId, model: model.slug },
     currentModel: "example",
+    modelAuth,
     steering: false,
     serverConfig: config(),
     ...overrides,
@@ -55,7 +65,7 @@ function block(overrides: Partial<Parameters<typeof getAgentModelSendBlock>[0]> 
 }
 
 describe("specialist model admission", () => {
-  it("admits B's explicit and current models only using B's account projection", () => {
+  it("admits B's explicit models only using B's account projection", () => {
     const serverConfig = config({
       supportsWorkspaceReadiness: true,
       auth: { status: "unauthenticated" },
@@ -70,46 +80,43 @@ describe("specialist model admission", () => {
         },
       ],
     });
-    for (const selection of [undefined, { instanceId, model: model.slug }]) {
-      expect(block({ serverConfig, cwd: "/repo/b", selection })).toBeNull();
-      expect(block({ serverConfig, cwd: "/repo/a", selection })?.reason).toContain(
-        "Checking models for this workspace",
-      );
-      expect(block({ serverConfig, cwd: "/repo/b/worktree", selection })?.reason).toContain(
-        "Checking models for this workspace",
-      );
-      const signedOut = {
-        ...serverConfig,
-        providers: serverConfig.providers.map((provider) => ({
-          ...provider,
-          auth: { status: "authenticated" as const },
-          models: [model],
-          workspaceSnapshots: [
-            {
-              ...provider.workspaceSnapshots![0]!,
-              readiness: {
-                status: "warning" as const,
-                auth: { status: "unauthenticated" as const },
-                models: [{ ...model, credentialState: "reauth_required" as const }],
-              },
+    const selection = { instanceId, model: model.slug };
+    expect(block({ serverConfig, cwd: "/repo/b", selection })).toBeNull();
+    expect(block({ serverConfig, cwd: "/repo/a", selection })?.reason).toContain(
+      "Checking models for this workspace",
+    );
+    expect(block({ serverConfig, cwd: "/repo/b/worktree", selection })?.reason).toContain(
+      "Checking models for this workspace",
+    );
+    const signedOut = {
+      ...serverConfig,
+      providers: serverConfig.providers.map((provider) => ({
+        ...provider,
+        auth: { status: "authenticated" as const },
+        models: [model],
+        workspaceSnapshots: [
+          {
+            ...provider.workspaceSnapshots![0]!,
+            readiness: {
+              status: "warning" as const,
+              auth: { status: "unauthenticated" as const },
+              models: [{ ...model, credentialState: "reauth_required" as const }],
             },
-          ],
-        })),
-      };
-      expect(block({ serverConfig: signedOut, cwd: "/repo/b", selection })?.action).toMatchObject({
-        kind: "settings",
-        instanceId,
-        label: "Connect model account",
-      });
-    }
+          },
+        ],
+      })),
+    };
+    expect(block({ serverConfig: signedOut, cwd: "/repo/b", selection })?.action).toMatchObject({
+      kind: "settings",
+      instanceId,
+      label: "Connect model account",
+    });
   });
 
   it("keeps active steering available while an exact workspace check is missing or failed", () => {
     const serverConfig = config({ supportsWorkspaceReadiness: true, workspaceSnapshots: [] });
     expect(block({ serverConfig, cwd: "/repo", steering: true })).toBeNull();
-    expect(block({ serverConfig, cwd: "/repo", selection: undefined })?.reason).toContain(
-      "Checking",
-    );
+    expect(block({ serverConfig, cwd: "/repo" })?.reason).toContain("Checking");
   });
 
   it.each([
@@ -127,7 +134,7 @@ describe("specialist model admission", () => {
       });
       for (const selection of [undefined, { instanceId, model: model.slug }]) {
         const result = block({ serverConfig, cwd: "/repo", selection });
-        expect(result?.reason).toContain("provider is unavailable");
+        expect(result?.reason).toContain("Model access is unavailable");
         expect(result?.action).toEqual({
           kind: "settings",
           instanceId,
@@ -151,7 +158,7 @@ describe("specialist model admission", () => {
     };
     for (const selection of [undefined, { instanceId, model: model.slug }]) {
       expect(block({ serverConfig, cwd: "/repo", selection })?.reason).toContain(
-        "provider is unavailable",
+        "Model access is unavailable",
       );
     }
   });
@@ -213,7 +220,7 @@ describe("specialist model admission", () => {
     });
   });
 
-  it("does not interpret an omitted override as an unavailable selection", () => {
+  it("admits an exact connected session account independently of the current default catalog", () => {
     expect(block({ selection: undefined, serverConfig: undefined })).toBeNull();
     expect(
       block({
@@ -222,7 +229,36 @@ describe("specialist model admission", () => {
       }),
     ).toBeNull();
     expect(block({ selection: undefined, currentModel: "older-session-model" })).toBeNull();
+    expect(
+      block({
+        selection: undefined,
+        serverConfig: config({
+          supportsWorkspaceReadiness: true,
+          workspaceSnapshots: [],
+          auth: { status: "unauthenticated" },
+          models: [{ ...model, credentialState: "needs_auth" }],
+        }),
+      }),
+    ).toBeNull();
   });
+
+  it.each([undefined, "unknown", "host_managed"] as const)(
+    "does not use another connected account to infer %s session access",
+    (state) => {
+      const currentAuth = state ? { ...modelAuth, state } : undefined;
+      expect(
+        block({ selection: undefined, currentModel: "older-session-model", modelAuth: currentAuth })
+          ?.reason,
+      ).toContain("Could not confirm access to this agent's model account");
+      expect(block({ selection: undefined, modelAuth: currentAuth })?.action).toEqual({
+        kind: "settings",
+        instanceId,
+        label: "Open provider settings",
+      });
+      expect(block({ selection: undefined, modelAuth: currentAuth, steering: true })).toBeNull();
+      expect(block({ modelAuth: currentAuth })).toBeNull();
+    },
+  );
 
   it.each(["needs_auth", "reauth_required"] as const)(
     "blocks known %s for explicit and current models",
@@ -233,7 +269,13 @@ describe("specialist model admission", () => {
         instanceId,
         label: "Connect model account",
       });
-      expect(block({ serverConfig, selection: undefined })?.action).toEqual({
+      expect(
+        block({
+          serverConfig,
+          selection: undefined,
+          modelAuth: { ...modelAuth, state: credentialState },
+        })?.action,
+      ).toEqual({
         kind: "settings",
         instanceId,
         label: "Connect model account",
@@ -241,24 +283,26 @@ describe("specialist model admission", () => {
     },
   );
 
-  it("blocks a known signed-out provider for new current-model sends while preserving per-model auth", () => {
+  it("blocks only the retained session account, independently of provider default authentication", () => {
     const signedOut = config({ models: [], auth: { status: "unauthenticated" } });
-    expect(block({ serverConfig: signedOut, selection: undefined })?.action).toEqual({
+    expect(
+      block({
+        serverConfig: config(),
+        selection: undefined,
+        modelAuth: { ...modelAuth, state: "needs_auth" },
+      })?.action,
+    ).toEqual({
       kind: "settings",
       instanceId,
       label: "Connect model account",
     });
-    for (const credentialState of ["connected", "host_managed"] as const) {
-      expect(
-        block({
-          selection: undefined,
-          serverConfig: config({
-            auth: { status: "unauthenticated" },
-            models: [{ ...model, credentialState }],
-          }),
-        }),
-      ).toBeNull();
-    }
+    expect(block({ serverConfig: signedOut, selection: undefined })).toBeNull();
+    expect(
+      block({
+        selection: undefined,
+        modelAuth: { ...modelAuth, state: "reauth_required", accountLabel: "Original account" },
+      })?.reason,
+    ).toContain('Reconnect the "Original account" account');
   });
 
   it("does not disable live steering for a missing catalog, missing account, or saved override", () => {
@@ -281,7 +325,7 @@ describe("specialist model admission", () => {
         },
       },
     };
-    expect(block({ serverConfig })?.reason).toContain("provider is unavailable");
+    expect(block({ serverConfig })?.reason).toContain("Model access is unavailable");
   });
 });
 
@@ -349,6 +393,27 @@ describe("explicit specialist delivery retry", () => {
       }),
     ).not.toBeNull();
     expect(attempt).toEqual(retained);
+  });
+  it("rechecks the retained account for a retry without a model override", () => {
+    const withoutOverride = {
+      requestId: attempt.requestId,
+      agentRef: attempt.agentRef,
+      text: attempt.text,
+      mode: attempt.mode,
+    };
+    const retained = structuredClone(withoutOverride);
+    const retry = { ...input, attempt: withoutOverride, modelAuth };
+    expect(getAgentDeliveryRetryBlock(retry)).toBeNull();
+    expect(
+      getAgentDeliveryRetryBlock({
+        ...retry,
+        modelAuth: { ...modelAuth, state: "needs_auth" },
+      })?.reason,
+    ).toContain("Connect this agent's model account");
+    expect(getAgentDeliveryRetryBlock({ ...retry, modelAuth: undefined })?.reason).toContain(
+      "Could not confirm access",
+    );
+    expect(withoutOverride).toEqual(retained);
   });
   it("holds an explicit retry after restore without changing its original receipt identity", () => {
     const retained = structuredClone(attempt);

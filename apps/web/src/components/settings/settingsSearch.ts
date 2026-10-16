@@ -536,32 +536,8 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: "Providers",
     to: "/settings/providers",
     searchTerms: [
-      "agents cli codex claude cursor grok opencode antigravity google sign in sign out install subscription instances authentication api key models configuration binary path config directory endpoint arguments environment variables display name accent color custom favorite hidden auto compact",
+      "accounts authentication sign in sign out connect openai anthropic claude google gemini azure oauth api key token credentials profiles endpoint cloud region models recommended supported",
     ],
-  },
-  {
-    id: "usage-providers",
-    title: "Usage providers",
-    to: "/settings/providers",
-    searchTerms: [
-      "usage sources CLIProxyAPI CLI proxy hub quota subscription limits management key add remove",
-    ],
-    providerSettingsOnly: true,
-  },
-  {
-    id: "cursor-keychain-usage",
-    title: "Cursor account usage",
-    to: "/settings/providers",
-    searchTerms: ["cursor macOS keychain usage tokens cost limits permission"],
-    providerSettingsOnly: true,
-    macProviderSettingsOnly: true,
-  },
-  {
-    id: "provider-health-check-interval",
-    title: "Health check interval",
-    to: "/settings/providers",
-    searchTerms: ["refresh availability versions auth state models background probes seconds off"],
-    providerSettingsOnly: true,
   },
   {
     id: "agent-browser-access",

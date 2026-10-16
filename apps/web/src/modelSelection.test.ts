@@ -46,6 +46,7 @@ function provider(input: {
       slug,
       name: slug,
       isCustom: false,
+      credentialState: "connected",
       capabilities: {},
     })),
     slashCommands: [],
@@ -93,6 +94,7 @@ describe("instance-scoped model selection", () => {
                     aliases: [saved.model],
                     isDefault: true,
                     isCustom: false,
+                    credentialState: "connected" as const,
                     capabilities: {},
                   },
                 ],
@@ -205,6 +207,7 @@ describe("instance-scoped model selection", () => {
             name: "Claude Opus 5.5",
             isDefault: false,
             isCustom: false,
+            credentialState: "connected" as const,
             capabilities: {},
           },
           {
@@ -212,6 +215,7 @@ describe("instance-scoped model selection", () => {
             name: "[openai:gpt-5.6] GPT-5.6 Sol",
             isDefault: false,
             isCustom: false,
+            credentialState: "connected" as const,
             capabilities: {},
           },
           {
@@ -220,6 +224,7 @@ describe("instance-scoped model selection", () => {
             subProvider: "openai",
             isDefault: false,
             isCustom: false,
+            credentialState: "connected" as const,
             capabilities: {},
           },
           {
@@ -227,6 +232,7 @@ describe("instance-scoped model selection", () => {
             name: "GPT-6 Astra",
             isDefault: true,
             isCustom: false,
+            credentialState: "connected" as const,
             capabilities: {},
           },
           {
@@ -235,6 +241,7 @@ describe("instance-scoped model selection", () => {
             subProvider: "self_hosted",
             isDefault: false,
             isCustom: true,
+            credentialState: "connected" as const,
             capabilities: {},
           },
           {
@@ -242,6 +249,7 @@ describe("instance-scoped model selection", () => {
             name: "Local",
             isDefault: false,
             isCustom: true,
+            credentialState: "connected" as const,
             capabilities: {},
           },
         ],
@@ -282,8 +290,20 @@ describe("instance-scoped model selection", () => {
     const providers = [instanceId, customId].map((id) => ({
       ...provider({ provider: driver, instanceId: id, models: ["openai:gpt-5.6-sol"] }),
       models: [
-        { slug: "openai:gpt-5.6-sol", name: "GPT 5.6 Sol", isCustom: false, capabilities: {} },
-        { slug: nativeModel, name: "Project model", isCustom: true, capabilities: {} },
+        {
+          slug: "openai:gpt-5.6-sol",
+          name: "GPT 5.6 Sol",
+          isCustom: false,
+          credentialState: "connected" as const,
+          capabilities: {},
+        },
+        {
+          slug: nativeModel,
+          name: "Project model",
+          isCustom: true,
+          credentialState: "connected" as const,
+          capabilities: {},
+        },
       ],
     }));
     const settings: UnifiedSettings = {
@@ -329,6 +349,41 @@ describe("instance-scoped model selection", () => {
     expect(getAppModelOptionsForInstance(settingsWithProviderInstances(), stock)[0]?.isLegacy).toBe(
       true,
     );
+  });
+
+  it("preserves native recommendation and support tiers in composer options", () => {
+    const baseProvider = provider({
+      provider: ProviderDriverKind.make("meerkat"),
+      instanceId: "meerkat",
+      models: ["anthropic:current", "anthropic:older"],
+    });
+    const entry = deriveProviderInstanceEntries([
+      {
+        ...baseProvider,
+        models: [
+          {
+            ...baseProvider.models[0]!,
+            catalogTier: "recommended" as const,
+            accountLabel: "GitHub Copilot · King",
+          },
+          {
+            ...baseProvider.models[1]!,
+            catalogTier: "supported" as const,
+            accountLabel: "GitHub Copilot · King",
+          },
+        ],
+      },
+    ])[0]!;
+    expect(
+      getAppModelOptionsForInstance(DEFAULT_UNIFIED_SETTINGS, entry).map(
+        (model) => model.catalogTier,
+      ),
+    ).toEqual(["recommended", "supported"]);
+    expect(
+      getAppModelOptionsForInstance(DEFAULT_UNIFIED_SETTINGS, entry).map(
+        (model) => model.accountLabel,
+      ),
+    ).toEqual(["GitHub Copilot · King", "GitHub Copilot · King"]);
   });
 
   it("keeps custom models on the provider instance that declared them", () => {

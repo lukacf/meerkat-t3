@@ -196,7 +196,9 @@ export const ClaudeDriver: ProviderDriver<ClaudeSettings, ClaudeDriverEnv> = {
 
       // Start the TTL-gated refresh without delaying provider readiness. The
       // next check observes a remote manifest after the background fetch lands.
-      const checkProvider = modelManifest.refreshInBackground.pipe(
+      const checkProvider = (
+        effectiveConfig.enabled ? modelManifest.refreshInBackground : Effect.void
+      ).pipe(
         Effect.andThen(
           modelManifest.current.pipe(
             Effect.flatMap((manifest) =>

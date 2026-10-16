@@ -1,5 +1,5 @@
 import { type ProviderDriverKind, type ProviderInstanceId } from "@t3tools/contracts";
-import { memo } from "react";
+import { memo, useId } from "react";
 import { CheckIcon, StarIcon } from "lucide-react";
 import {
   getDisplayModelName,
@@ -34,6 +34,9 @@ export const ModelListRow = memo(function ModelListRow(props: {
   isSelected: boolean;
   showSelection?: boolean;
   showProvider: boolean;
+  sectionLabel?: string | undefined;
+  showModelId?: boolean;
+  showCatalogTier?: boolean;
   preferShortName?: boolean;
   useTriggerLabel?: boolean;
   showNewBadge?: boolean;
@@ -42,16 +45,31 @@ export const ModelListRow = memo(function ModelListRow(props: {
   disabledReason?: string | null;
   onToggleFavorite: () => void;
 }) {
+  const sectionLabelId = useId();
   const ProviderIcon = PROVIDER_ICON_BY_PROVIDER[props.driverKind] ?? null;
-  const providerLabel = props.model.subProvider
-    ? `${props.providerDisplayName} · ${props.model.subProvider}`
-    : props.providerDisplayName;
+  const providerLabel =
+    props.driverKind === "meerkat"
+      ? (props.model.accountLabel ?? "")
+      : props.model.subProvider
+        ? `${props.providerDisplayName} · ${props.model.subProvider}`
+        : props.providerDisplayName;
+  const catalogLabel =
+    props.showCatalogTier && props.driverKind === "meerkat"
+      ? props.model.catalogTier === "recommended"
+        ? "Recommended"
+        : props.model.catalogTier === "supported"
+          ? "Supported"
+          : props.model.catalogTier === "custom"
+            ? "Configured"
+            : null
+      : null;
 
   const row = (
     <ComboboxItem
       hideIndicator
       index={props.index}
       value={modelPickerModelKey(props.instanceId, props.model.slug)}
+      aria-describedby={props.sectionLabel ? sectionLabelId : undefined}
       disabled={Boolean(props.disabledReason)}
       className={cn(
         "group relative w-full !min-w-0 max-w-full cursor-pointer",
@@ -77,7 +95,7 @@ export const ModelListRow = memo(function ModelListRow(props: {
               New
             </span>
           ) : null}
-          {modelCredentialRequirement(props.model) ? (
+          {modelCredentialRequirement(props.model, props.driverKind === "meerkat") ? (
             <Badge variant="outline" size="sm">
               Connect account
             </Badge>
@@ -87,12 +105,21 @@ export const ModelListRow = memo(function ModelListRow(props: {
             </Badge>
           ) : null}
         </div>
-        {props.showProvider && (
-          <div className="mt-1 flex items-center gap-1.5">
+        {props.showProvider && (providerLabel || props.showModelId || catalogLabel) && (
+          <div className="mt-1 flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
             {ProviderIcon ? <ProviderIcon className="size-3 shrink-0" /> : null}
-            <span className="truncate text-xs font-normal leading-snug text-muted-foreground/70">
-              {providerLabel}
-            </span>
+            {(providerLabel || catalogLabel) && (
+              <span className="truncate text-xs font-normal leading-snug text-muted-foreground/70">
+                {[providerLabel, catalogLabel].filter(Boolean).join(" · ")}
+              </span>
+            )}
+            {props.showModelId && (
+              <span className="w-full break-all font-mono text-3xs leading-snug text-muted-foreground/70">
+                {props.driverKind === "meerkat"
+                  ? props.model.slug.slice(props.model.slug.indexOf(":") + 1)
+                  : props.model.slug}
+              </span>
+            )}
           </div>
         )}
       </div>
@@ -136,16 +163,27 @@ export const ModelListRow = memo(function ModelListRow(props: {
     </ComboboxItem>
   );
 
-  if (!props.disabledReason) {
-    return row;
-  }
-
   return (
-    <Tooltip>
-      <TooltipTrigger render={row} />
-      <TooltipPopup side="left" align="center">
-        {props.disabledReason}
-      </TooltipPopup>
-    </Tooltip>
+    <>
+      {props.sectionLabel ? (
+        <div
+          id={sectionLabelId}
+          role="presentation"
+          className="px-2 pb-1 pt-2 text-3xs font-medium leading-5 text-muted-foreground"
+        >
+          {props.sectionLabel}
+        </div>
+      ) : null}
+      {props.disabledReason ? (
+        <Tooltip>
+          <TooltipTrigger render={row} />
+          <TooltipPopup side="left" align="center">
+            {props.disabledReason}
+          </TooltipPopup>
+        </Tooltip>
+      ) : (
+        row
+      )}
+    </>
   );
 });

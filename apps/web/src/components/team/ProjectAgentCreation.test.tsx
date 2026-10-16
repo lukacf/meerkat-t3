@@ -257,8 +257,12 @@ it("shares only matching composer account guidance while retaining agent creatio
     renderer = create(renderStart());
   });
   expect(text()).not.toContain("No usable model");
-  expect(button("Architect").props.disabled).toBe(true);
-  await act(async () => button("Architect").props.onClick());
+  await act(async () => button("Add agent").props.onClick());
+  expect(state.navigate).toHaveBeenCalledWith({
+    to: "/$environmentId/projects/$projectId/agents/new",
+    params: { environmentId: scope.environmentId, projectId: scope.projectId },
+    search: {},
+  });
   expect(state.create).not.toHaveBeenCalled();
 
   state.proposalError = "The proposal capability check failed.";
@@ -457,12 +461,22 @@ it("clears reasoning when the user chooses another provider", async () => {
   expect(state.create.mock.calls[0]![0].input).toMatchObject({ instanceId: other, options: [] });
 });
 
-it("retains original preset reasoning after composer changes and carries it into both setup routes", async () => {
+it("carries reasoning into both setup routes and retains a legacy request after composer changes", async () => {
   const original = {
     instanceId,
     model: "openai:review-model",
     options: [{ id: "reasoning_effort", value: "high" }],
   };
+  const legacy = createProjectAgentCreationDraftStore(scope, storage, () => "legacy-preset");
+  const saved = legacy.getState().beginPreset({
+    ...original,
+    projectId: scope.projectId,
+    label: "Architect",
+    role: "architect",
+    instructions: "Saved architecture assignment",
+    accessMode: "read-only",
+  })!;
+  legacy.getState().finish(saved.input.requestId, "Response lost");
   const renderStart = (modelSelection = original) => (
     <ProjectStart
       environmentId={scope.environmentId}
@@ -473,7 +487,7 @@ it("retains original preset reasoning after composer changes and carries it into
   await act(async () => {
     renderer = create(renderStart());
   });
-  await act(async () => button(" Custom agent").props.onClick());
+  await act(async () => button("Add agent").props.onClick());
   expect(state.navigate).toHaveBeenCalledWith(
     expect.objectContaining({
       to: "/$environmentId/projects/$projectId/agents/new",
@@ -487,8 +501,10 @@ it("retains original preset reasoning after composer changes and carries it into
       search: { instance: instanceId, model: original.model, options: original.options },
     }),
   );
-  await act(async () => button("Architect").props.onClick());
+  expect(state.create).not.toHaveBeenCalled();
+  await act(async () => button("Retry same request").props.onClick());
   const first = state.create.mock.calls[0]![0];
+  expect(first.input).toEqual(saved.input);
   expect(first.input.options).toEqual(original.options);
   await act(async () => renderer!.unmount());
   await act(async () => {
@@ -496,7 +512,7 @@ it("retains original preset reasoning after composer changes and carries it into
       renderStart({ ...original, options: [{ id: "reasoning_effort", value: "low" }] }),
     );
   });
-  await act(async () => button("Retry Architect").props.onClick());
+  await act(async () => button("Retry same request").props.onClick());
   expect(state.create).toHaveBeenNthCalledWith(2, first);
 });
 
@@ -651,6 +667,36 @@ it("keeps restore-held creation passive while a saved acceptance can still open"
   expect(state.create).toHaveBeenCalledTimes(1);
 });
 
+it("preserves a legacy draft's role while its visible name and assignment are edited", async () => {
+  const legacy = createProjectAgentCreationDraftStore(scope, storage, () => "legacy-draft");
+  const saved = {
+    custom: false,
+    label: "Architect",
+    role: "architect",
+    instructions: "Saved architecture assignment",
+    instanceId,
+    chosenModel: "openai:review-model",
+  };
+  legacy.getState().updateDraft(saved);
+  await act(async () => {
+    renderer = create(setup());
+  });
+  expect(createProjectAgentCreationDraftStore(scope, storage).getState().draft.value).toMatchObject(
+    saved,
+  );
+  expect(state.create).not.toHaveBeenCalled();
+  await fill("Platform architecture", "Own the project's integration boundaries");
+  await submit();
+  expect(state.create.mock.calls[0]![0].input).toMatchObject({
+    requestId: "legacy-draft",
+    label: "Platform architecture",
+    role: "architect",
+    instructions: "Own the project's integration boundaries",
+    instanceId,
+    model: "openai:review-model",
+  });
+});
+
 it("does not replace a recovered explicit model with a different catalog default", async () => {
   const store = createProjectAgentCreationDraftStore(scope, storage, () => "draft");
   store.getState().updateDraft({
@@ -687,7 +733,18 @@ it("waits for the exact checkout before editing or dispatching a setup", async (
   ).toBe("Known checkout only");
 });
 
-it("recovers a preset across remount even while the roster still reports no agents", async () => {
+it("recovers a legacy preset across remount even while the roster still reports no agents", async () => {
+  const legacy = createProjectAgentCreationDraftStore(scope, storage, () => "legacy-preset");
+  const saved = legacy.getState().beginPreset({
+    projectId: scope.projectId,
+    instanceId,
+    label: "Architect",
+    role: "architect",
+    instructions: "Saved architecture assignment",
+    model: "openai:review-model",
+    accessMode: "read-only",
+  })!;
+  legacy.getState().finish(saved.input.requestId, "Response lost");
   const renderStart = () => (
     <ProjectStart
       environmentId={scope.environmentId}
@@ -698,8 +755,10 @@ it("recovers a preset across remount even while the roster still reports no agen
   await act(async () => {
     renderer = create(renderStart());
   });
-  await act(async () => button("Architect").props.onClick());
+  expect(state.create).not.toHaveBeenCalled();
+  await act(async () => button("Retry same request").props.onClick());
   const first = state.create.mock.calls[0]![0];
+  expect(first.input).toEqual(saved.input);
   await act(async () => renderer!.unmount());
   state.providers = [
     {
@@ -719,7 +778,7 @@ it("recovers a preset across remount even while the roster still reports no agen
     renderer = create(renderStart());
   });
   expect(state.create).toHaveBeenCalledTimes(1);
-  await act(async () => button("Retry Architect").props.onClick());
+  await act(async () => button("Retry same request").props.onClick());
   expect(state.create).toHaveBeenNthCalledWith(2, first);
   state.create.mockResolvedValueOnce({ _tag: "Success", value: receipt });
   await act(async () => button("Retry same request").props.onClick());

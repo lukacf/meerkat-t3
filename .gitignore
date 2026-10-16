@@ -50,3 +50,12 @@ node_modules/
 # Provisioned native Meerkat runtime (rebuilt from the consumer lock).
 apps/server/resources/meerkat-runtime/
 apps/server/resources/native-notices/
+
+# Native build fallbacks and local packaging outputs.
+core/target/
+release-mac/
+release-internal/
+
+# Python notice-tool bytecode caches.
+__pycache__/
+*.pyc

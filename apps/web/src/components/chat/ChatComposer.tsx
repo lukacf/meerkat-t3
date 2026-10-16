@@ -964,11 +964,11 @@ import {
   XIcon,
 } from "lucide-react";
 import { proposedPlanTitle } from "../../proposedPlan";
-import { hasProviderSetup } from "./ProviderStatusBanner";
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
   NO_PROVIDER_MODEL_SELECTION,
+  resolveMeerkatAccountInstance,
   sortProviderInstanceEntries,
   type ProviderInstanceEntry,
 } from "../../providerInstances";
@@ -1965,10 +1965,11 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   const providerCatalogPending = noProviderAvailable && !providerCatalogKnown;
   const showProviderUnavailable = noProviderAvailable && !providerCatalogPending;
   const providerSetupInstanceId = noProviderAvailable
-    ? (unavailableProviderInstanceId ??
-      (lockedProvider === null
-        ? providerInstanceEntries.find((entry) => hasProviderSetup(entry.snapshot))?.instanceId
-        : undefined))
+    ? resolveMeerkatAccountInstance({
+        entries: providerInstanceEntries,
+        requestedInstanceId: unavailableProviderInstanceId,
+        requireExactInstance: lockedProvider !== null,
+      })
     : undefined;
   const resolvedCompactDisabledReason =
     compactDisabledReason ?? (noProviderAvailable ? "Compacting is unavailable right now" : null);

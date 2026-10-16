@@ -176,7 +176,7 @@ function CredentialEditor({
           : pending === "check"
             ? "Credential changes saved. Checking the runtime..."
             : ready
-              ? "Credentials saved. Runtime setup is ready; your first task will confirm model access."
+              ? "Credentials saved. Runtime setup is ready; your first request will confirm model access."
               : saved
                 ? "Credential changes saved. The runtime still needs attention."
                 : null}

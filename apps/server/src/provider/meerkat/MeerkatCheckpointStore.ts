@@ -85,8 +85,12 @@ async function safePath(workspace: string, relative: string) {
     parent = NodePath.join(parent, part);
     const stat = await NodeFSP.lstat(parent).catch((cause: unknown) => {
       if (missing(cause))
-        throw Error(
-          `The parent folder "${NodePath.relative(workspace, parent)}" is missing. Recreate it as an ordinary folder in this workspace, then refresh History to restore the file.`,
+        throw Object.assign(
+          new Error(
+            `The parent folder "${NodePath.relative(workspace, parent)}" is missing. Recreate it as an ordinary folder in this workspace, then refresh History to restore the file.`,
+            { cause },
+          ),
+          { code: "ENOENT" },
         );
       throw cause;
     });

@@ -18,7 +18,7 @@ export function resolveAgentWorkspaceModel(
     !currentProvider && current ? models.filter((model) => model.slug.endsWith(`:${current}`)) : [];
   const existing = exact ?? (rawMatches.length === 1 ? rawMatches[0] : undefined);
   if (existing) {
-    const blockedReason = modelCredentialRequirement(existing);
+    const blockedReason = modelCredentialRequirement(existing, true);
     return { model: blockedReason ? undefined : existing, blockedReason };
   }
   if (currentProvider) {
@@ -28,7 +28,7 @@ export function resolveAgentWorkspaceModel(
         "The agent's current model is unavailable in this workspace. Check Settings > Providers.",
     };
   }
-  const usable = models.filter((model) => !modelCredentialRequirement(model));
+  const usable = models.filter((model) => !modelCredentialRequirement(model, true));
   const connected = usable.filter((model) => model.credentialState === "connected");
   const model =
     connected.find((model) => model.isDefault) ??

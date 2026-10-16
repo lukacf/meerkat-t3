@@ -52,8 +52,10 @@ const provider: ServerProvider = {
 };
 
 describe("provider compatibility", () => {
-  it("bundles a compatibility policy for every built-in harness", () => {
+  it("bundles a compatibility policy for every built-in donor harness", () => {
     for (const builtIn of BUILT_IN_DRIVERS) {
+      // The bundled Meerkat runtime is qualified with the app, not by T3's CLI catalog.
+      if (builtIn.driverKind === "meerkat") continue;
       assert.isDefined(
         resolveProviderCompatibility(
           ModelManifest.BUNDLED_MODEL_MANIFEST.compatibility,

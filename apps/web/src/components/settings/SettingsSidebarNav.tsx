@@ -12,7 +12,7 @@ import {
 import {
   ArchiveIcon,
   BlocksIcon,
-  BotIcon,
+  KeyRoundIcon,
   createLucideIcon,
   GitBranchIcon,
   HardDriveIcon,
@@ -81,7 +81,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/projects": PanelsTopLeftIcon,
   "/settings/keybindings": KeyboardIcon,
   "/settings/snap-shot": SnapShotIcon,
-  "/settings/providers": BotIcon,
+  "/settings/providers": KeyRoundIcon,
   "/settings/integrations": BlocksIcon,
   "/settings/source-control": GitBranchIcon,
   "/settings/storage": HardDriveIcon,

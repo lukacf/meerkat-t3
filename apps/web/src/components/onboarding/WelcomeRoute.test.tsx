@@ -143,6 +143,8 @@ vi.mock("./OnboardingProjectStep", () => ({
   OnboardingProjectStep: ({
     environmentIds,
     initialProjectRef,
+    onProject,
+    onReviewProject,
   }: ComponentProps<typeof import("./OnboardingProjectStep").OnboardingProjectStep>) => {
     const [draft, setDraft] = useState(() => {
       workspace.projectMounts();
@@ -152,6 +154,12 @@ vi.mock("./OnboardingProjectStep", () => ({
       <section aria-label="Project setup">
         <output>{environmentIds.join(",")}</output>
         <output>{initialProjectRef?.projectId}</output>
+        <button onClick={() => initialProjectRef && onReviewProject?.(initialProjectRef)}>
+          Reselect project
+        </button>
+        <button onClick={() => initialProjectRef && onProject(initialProjectRef)}>
+          Continue with project
+        </button>
         <input value={draft} onChange={(event) => setDraft(event.target.value)} />
       </section>
     );
@@ -234,7 +242,15 @@ beforeEach(() => {
     status: "ready",
     auth: { status: "authenticated" },
     checkedAt: "2026-10-05T00:00:00.000Z",
-    models: [],
+    models: [
+      {
+        slug: "claude-test",
+        name: "Claude test",
+        credentialState: "connected",
+        isCustom: false,
+        capabilities: null,
+      },
+    ],
     slashCommands: [],
     skills: [],
   };
@@ -254,7 +270,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-it.each(["projects", "first-task"] as const)(
+it.each(["projects", "first-task", "project-agents"] as const)(
   "waits for a cold direct welcome read before restoring saved %s progress",
   async (step) => {
     const read = deferredSettings();
@@ -371,6 +387,7 @@ it("retains the reviewed project and first task while its computer remains selec
     ...progress,
     environmentIds: [local, remote],
     threadId,
+    resumeStep: "first-task",
   });
   expect(renderer!.root.findAllByType("output").map((node) => node.children.join(""))).toEqual([
     `${local},${remote}`,
@@ -393,6 +410,7 @@ it("keeps saved project and thread identity when a changed computer selection ca
     ...progress,
     step: "connection",
     threadId,
+    resumeStep: "first-task",
   });
   expect(renderer!.root.findByType("h1").children.join("")).toBe("Connect your computers");
   expect(workspace.toast).toHaveBeenCalledWith(
@@ -409,3 +427,76 @@ it("keeps saved project and thread identity when a changed computer selection ca
     threadId: null,
   });
 });
+
+it("persists specialist setup before opening the selected remote repository proposal", async () => {
+  persistence.getClientSettings.mockResolvedValue(savedSettings);
+  await render();
+  await click("Continue with project");
+  expect(getClientSettings().onboardingProgress).toMatchObject({
+    step: "project-agents",
+    projectRef: progress.projectRef,
+    threadId: null,
+  });
+  expect(getClientSettings().onboardingCompletedAt).toBeNull();
+  expect(workspace.navigate).toHaveBeenCalledWith({
+    to: "/$environmentId/projects/$projectId/agents/propose",
+    params: progress.projectRef,
+    replace: true,
+  });
+});
+
+it("does not navigate away when saving the specialist checkpoint fails", async () => {
+  persistence.getClientSettings.mockResolvedValue(savedSettings);
+  await render();
+  persistence.setClientSettings.mockRejectedValueOnce(new Error("disk unavailable"));
+  await click("Continue with project");
+  expect(getClientSettings().onboardingProgress).toEqual(progress);
+  expect(workspace.navigate).not.toHaveBeenCalled();
+});
+
+it("keeps the legacy first task when continuing its saved project", async () => {
+  const legacy = { ...progress, step: "first-task" as const, threadId };
+  persistence.getClientSettings.mockResolvedValue({ ...savedSettings, onboardingProgress: legacy });
+  await render();
+  await click("Continue with project");
+  expect(getClientSettings().onboardingProgress).toEqual({ ...legacy, resumeStep: "first-task" });
+  expect(workspace.navigate).toHaveBeenCalledWith({
+    to: "/$environmentId/projects/$projectId/start",
+    params: progress.projectRef,
+    replace: true,
+  });
+});
+
+it.each(["first-task", "project-agents"] as const)(
+  "keeps the saved %s conversation after reselecting its project and reloading",
+  async (step) => {
+    const savedProgress = { ...progress, step, threadId };
+    persistence.getClientSettings.mockResolvedValue({
+      ...savedSettings,
+      onboardingProgress: savedProgress,
+    });
+    await render();
+    await click("Reselect project");
+    expect(getClientSettings().onboardingProgress).toMatchObject({
+      step: "projects",
+      resumeStep: step,
+      threadId,
+    });
+    const saved = getClientSettings();
+    act(() => renderer!.unmount());
+    renderer = undefined;
+    __resetClientSettingsPersistenceForTests();
+    persistence.getClientSettings.mockResolvedValue(saved);
+    await render();
+    await click("Continue with project");
+    expect(getClientSettings().onboardingProgress).toEqual({ ...savedProgress, resumeStep: step });
+    expect(workspace.navigate).toHaveBeenCalledWith({
+      to:
+        step === "first-task"
+          ? "/$environmentId/projects/$projectId/start"
+          : "/$environmentId/projects/$projectId/agents/propose",
+      params: progress.projectRef,
+      replace: true,
+    });
+  },
+);

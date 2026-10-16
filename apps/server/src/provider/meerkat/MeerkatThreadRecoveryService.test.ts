@@ -456,6 +456,10 @@ describe("Meerkat thread recovery", () => {
           pid: undefined,
           request: async (method, params = {}) => {
             nativeCalls.push({ method, params });
+            if (method === "models.v1.catalog")
+              return {
+                catalog: { providers: [{ provider: "openai", models: [{ id: "gpt-test" }] }] },
+              };
             if (method === "mobs.v1.runStatus") return h.nativeRequest(method, { ...params });
             if (method === "mobs.v1.turnStart") {
               if (loseReply)

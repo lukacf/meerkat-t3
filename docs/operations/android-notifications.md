@@ -1,5 +1,10 @@
 # Android notifications
 
+> Scope: this page is reference material for the inherited Android client and notification infrastructure. It is not a
+> supported MeerkaT3 preview service or release path. The supported local Mac stack
+> is described in [development](../operations/development.md) and
+> [distribution](../operations/meerkat-distribution.md).
+
 The Android app receives Firebase Cloud Messaging (FCM) data messages. The relay sends them directly through FCM HTTP v1; an Expo Push account is not required.
 
 ## Android compatibility and automated checks

@@ -102,7 +102,7 @@ async fn cold_receipt_is_read_only_and_binds_the_native_input() {
     let store = std::sync::Arc::new(
         meerkat_runtime::store::SqliteRuntimeStore::new(state.join("runtime.sqlite")).unwrap(),
     );
-    let machine = meerkat_runtime::MeerkatMachine::persistent_without_blobs(store);
+    let machine = meerkat_runtime::MeerkatMachine::persistent_without_blobs(store).unwrap();
     machine.register_session(session.clone()).await.unwrap();
     let key = native_key("root-mob", &expected, "request").unwrap();
     let prompt = input("Current-run correction".into(), key.clone());

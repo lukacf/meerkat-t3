@@ -24,8 +24,8 @@ use meerkat_mobkit::{
     handle_unified_rpc_json, member_comms_id, member_entry_to_json,
     Base64BlobStoreAdapter, BinaryBlobStore,
     ConsoleAggregatorOptions, ConsoleRuntimeRegistration, DiscoverySpec, GatewayPeerKeys,
-    MobBootstrapSpec, MobKitConfig,
-    MobKitConsoleAggregator, ModuleConfig, ObjectStoreBlobStore, PreSpawnData,
+    MobBootstrapSpec, MetaConfig,
+    MetaConsoleAggregator, ModuleConfig, ObjectStoreBlobStore, PreSpawnData,
     TopologyBootstrapConfig, TopologyControlMode, TopologyControlPolicy, UnifiedRuntime,
 };
 use meerkat_store::SqliteSessionStore;
@@ -42,8 +42,17 @@ use crate::host_tools::HostToolTransport;
 mod configured_auth;
 mod background_tasks;
 use background_tasks::{RetainedShutdown, RetainedTask};
+mod observer_drain;
+pub(crate) mod storage_upgrade;
+use observer_drain::MobStoreObserverDisposal;
+type ObserverDisposalRegistry =
+    std::sync::Mutex<BTreeMap<PathBuf, Arc<MobStoreObserverDisposal>>>;
 #[cfg(test)]
 mod initial_model_tests;
+#[cfg(test)]
+mod observer_registration_tests;
+#[cfg(test)]
+mod schedule_runtime_tests;
 
 #[derive(Clone)]
 pub struct MobkitMobRuntime {
@@ -77,11 +86,14 @@ pub struct MobkitMobRuntime {
     /// console router only. Registration also starts the session-history
     /// backfill, so agent-to-agent comms deliveries (peer messages recorded
     /// as `system_notice` session entries) become queryable frames.
-    pub console: Option<MobKitConsoleAggregator>,
+    pub console: Option<MetaConsoleAggregator>,
     /// Agent-authored schedules are durable, but the firing loop is owned by
     /// the live embedded runtime. Keep its shutdown authority beside the mob
     /// so registry removal cannot leave a detached schedule driver behind.
     schedule_host: Option<Arc<Mutex<RetainedShutdown>>>,
+    /// The schedule dispatcher and target registry point back to the session
+    /// service and child-mob state. Release both after their producers stop.
+    schedule_bindings: Option<Arc<ScheduleBindings>>,
     /// The watchdog turns a stuck durable occurrence into an actionable log
     /// instead of allowing silent pending rows. It is aborted and joined with the mob.
     schedule_watchdog: Option<Arc<Mutex<RetainedTask>>>,
@@ -89,6 +101,27 @@ pub struct MobkitMobRuntime {
     event_drain: Option<Arc<Mutex<RetainedTask>>>,
     disposal: Arc<crate::thread_dispose::NativeRuntimeDisposal>,
     created_at: chrono::DateTime<Utc>,
+}
+
+struct ScheduleBindings {
+    targets: meerkat_mobkit::schedule_wiring::ScheduleMobTargetRegistry,
+    tools: Arc<std::sync::RwLock<Option<Arc<dyn meerkat_core::AgentToolDispatcher>>>>,
+}
+
+impl ScheduleBindings {
+    fn clear(&self) {
+        self.targets.set_mob_state(None);
+        // Native identity probes hold the session service and mob state. The
+        // default dispatcher closes that cycle through the service's builder.
+        *self.tools.write().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+}
+
+impl Drop for ScheduleBindings {
+    fn drop(&mut self) {
+        // Also cover bootstrap failures before there is a registry entry.
+        self.clear();
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -104,6 +137,9 @@ pub enum MobPlacement {
 pub struct ProjectMobkitRegistry {
     mobs: RwLock<HashMap<String, Arc<MobkitMobRuntime>>>,
     local_bootstrap_locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    // Paths only: unloaded or failed bootstraps must remain in the final
+    // observer scope without retaining the runtimes that own their stores.
+    observer_disposals: ObserverDisposalRegistry,
     admission: RwLock<bool>,
     host_tools: Arc<HostToolTransport>,
     #[cfg(test)]
@@ -119,7 +155,7 @@ pub struct CreateMobInput {
     pub coordinator_identity: String,
     pub model: String,
     /// Creation request, validated only when native storage has no saved session.
-    pub(crate) initial_llm: Option<serde_json::Map<String, Value>>,
+    pub(crate) initial_llm: Option<crate::native_model::InitialAgentLlmRequest>,
     pub instructions: String,
     /// Optional desktop flow-tool binding, never inferred from a mob id.
     pub thread_id: Option<String>,
@@ -149,13 +185,13 @@ pub struct EffectiveRealmConfig {
 /// erase inherited self-hosted aliases or scalar policy. Desktop config writes
 /// therefore retain the raw document shape while still delegating typed reads,
 /// full replacements, and canonical validation to Meerkat.
-struct PresencePreservingFileConfigStore {
+pub(crate) struct PresencePreservingFileConfigStore {
     path: PathBuf,
     catalog: ModelCatalog,
 }
 
 impl PresencePreservingFileConfigStore {
-    fn new(path: PathBuf, catalog: ModelCatalog) -> Self {
+    pub(crate) fn new(path: PathBuf, catalog: ModelCatalog) -> Self {
         Self { path, catalog }
     }
 
@@ -329,6 +365,7 @@ impl ProjectMobkitRegistry {
         Self {
             mobs: RwLock::new(HashMap::new()),
             local_bootstrap_locks: Mutex::new(HashMap::new()),
+            observer_disposals: ObserverDisposalRegistry::default(),
             admission: RwLock::new(true),
             host_tools,
             #[cfg(test)]
@@ -348,6 +385,7 @@ impl ProjectMobkitRegistry {
         Self {
             mobs: RwLock::new(HashMap::new()),
             local_bootstrap_locks: Mutex::new(HashMap::new()),
+            observer_disposals: ObserverDisposalRegistry::default(),
             admission: RwLock::new(true),
             host_tools,
             test_llm_client: Some(test_llm_client),
@@ -400,6 +438,7 @@ impl ProjectMobkitRegistry {
             approvals: None,
             console: None,
             schedule_host: None,
+            schedule_bindings: None,
             schedule_watchdog: None,
             event_drain: None,
             disposal: Arc::new(Default::default()),
@@ -441,19 +480,15 @@ impl ProjectMobkitRegistry {
             return Ok(existing);
         }
         #[cfg(not(test))]
-        let bootstrapped = bootstrap_local_runtime(input, Arc::clone(&self.host_tools)).await?;
+        let test_llm_client = None;
         #[cfg(test)]
-        let bootstrapped = match self.test_llm_client.as_ref() {
-            Some(client) => {
-                bootstrap_local_runtime_with_test_llm(
-                    input,
-                    Arc::clone(&self.host_tools),
-                    Arc::clone(client),
-                )
-                .await?
-            }
-            None => bootstrap_local_runtime(input, Arc::clone(&self.host_tools)).await?,
-        };
+        let test_llm_client = self.test_llm_client.clone();
+        let bootstrapped = bootstrap_local_runtime_inner(
+            input,
+            Arc::clone(&self.host_tools),
+            test_llm_client,
+            Some(&self.observer_disposals),
+        ).await?;
         let mob = Arc::new(bootstrapped);
         self.mobs
             .write()
@@ -501,6 +536,18 @@ impl ProjectMobkitRegistry {
                 }
             }
             if native_disposed {
+                if failures.is_empty() {
+                    if let Some(bindings) = mob.schedule_bindings.as_ref() {
+                        bindings.clear();
+                    }
+                }
+                if let Some(console) = mob.console.as_ref() {
+                    // Unregister closes discovery, but an already admitted
+                    // native history read can retain cloned runtime handles.
+                    // Keep this runtime in the registry until those reads
+                    // finish; cancellation leaves it available for retry.
+                    console.history_backfill_converged().await;
+                }
                 if let Some(event_drain) = mob.event_drain.as_ref() {
                     if let Err(error) = event_drain.lock().await.join().await {
                         failures.push(error);
@@ -519,9 +566,28 @@ impl ProjectMobkitRegistry {
         // Await any admitted bootstrap before taking the list, and permanently
         // close creation even for callers holding a clone of this registry.
         *self.admission.write().await = false;
-        let mobs = self.list().await;
-        futures_util::future::join_all(mobs.iter().map(|mob| self.remove(&mob.mob_id)))
+        let mob_ids = self.list().await.into_iter()
+            .map(|mob| mob.mob_id.clone()).collect::<Vec<_>>();
+        futures_util::future::join_all(mob_ids.iter().map(|mob_id| self.remove(mob_id)))
             .await.into_iter().filter_map(Result::err).collect()
+    }
+
+    /// Called only after native shutdown and all admitted gateway requests
+    /// have settled. This observes mob-store closure; it never removes storage.
+    pub async fn drain_storage_observers(&self) -> Vec<String> {
+        if *self.admission.read().await {
+            return vec!["Cannot drain mob observers while runtime admission is open".into()];
+        }
+        let targets = self.observer_disposals.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values().cloned().collect::<Vec<_>>();
+        let mut failures = Vec::new();
+        for target in targets {
+            if let Err(error) = target.drain().await {
+                failures.push(error);
+            }
+        }
+        failures
     }
 }
 
@@ -530,10 +596,15 @@ pub async fn mobkit_rpc(
     method: &str,
     params: Value,
 ) -> Result<Value, String> {
+    // The desktop protocol keeps its existing namespace across upgrades.
+    // Only the native dispatch boundary adopts Meta's renamed RPC methods.
+    let native_method = method.strip_prefix("mobkit/")
+        .map(|suffix| format!("meta/{suffix}"))
+        .unwrap_or_else(|| method.to_owned());
     let request = json!({
         "jsonrpc": "2.0",
         "id": "desktop",
-        "method": method,
+        "method": native_method,
         "params": params,
     });
     let raw = handle_unified_rpc_json(
@@ -1142,73 +1213,36 @@ async fn build_ui_mcp_dispatcher(
 
 const PROJECT_AGENT_PROPOSAL_TOOL: &str = "ui_project_agent_proposal";
 
-/// The app-owned proposal server only validates arguments and returns a result.
-/// Its declaration is local authority, not trust in an arbitrary MCP readOnlyHint.
+/// Only the exact app-owned proposal process has read-only authority. The
+/// native MCP router rechecks this declaration at the physical transport entry.
 struct PureProjectAgentProposal {
-    inner: Arc<dyn meerkat_core::AgentToolDispatcher>,
+    selected: McpServerConfig,
 }
 
 #[async_trait::async_trait]
-impl meerkat_core::AgentToolDispatcher for PureProjectAgentProposal {
-    fn tools(&self) -> Arc<[Arc<meerkat_core::types::ToolDef>]> {
-        self.inner.tools()
+impl meerkat_mcp::McpCallContextProvider for PureProjectAgentProposal {
+    async fn prepare(
+        &self,
+        target: meerkat_mcp::McpCallTarget<'_>,
+        _call: meerkat_core::types::ToolCallView<'_>,
+        _context: &meerkat_core::ToolDispatchContext,
+    ) -> Result<Option<meerkat_mcp::McpCallContext>, meerkat_mcp::McpCallContextError> {
+        if target.config != &self.selected || target.raw_operation != PROJECT_AGENT_PROPOSAL_TOOL {
+            return Err(meerkat_mcp::McpCallContextError::Denied);
+        }
+        Ok(None)
     }
 
-    fn tool_catalog_capabilities(&self) -> meerkat_core::ToolCatalogCapabilities {
-        self.inner.tool_catalog_capabilities()
-    }
-
-    fn tool_catalog(&self) -> Arc<[meerkat_core::ToolCatalogEntry]> {
-        self.inner.tool_catalog()
-    }
-
-    fn pending_catalog_sources(&self) -> Arc<[String]> {
-        self.inner.pending_catalog_sources()
-    }
-
-    fn tool_mutation_class(&self, name: &str) -> meerkat_core::ToolMutationClass {
-        if name == PROJECT_AGENT_PROPOSAL_TOOL {
+    fn tool_mutation_class(
+        &self,
+        config: &McpServerConfig,
+        operation: &str,
+    ) -> meerkat_core::ToolMutationClass {
+        if config == &self.selected && operation == PROJECT_AGENT_PROPOSAL_TOOL {
             meerkat_core::ToolMutationClass::ReadOnly
         } else {
             meerkat_core::ToolMutationClass::Unknown
         }
-    }
-
-    fn execution_binding_epoch(&self, name: &str) -> u64 {
-        self.inner.execution_binding_epoch(name)
-    }
-
-    async fn dispatch(
-        &self,
-        call: meerkat_core::types::ToolCallView<'_>,
-    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
-        self.inner.dispatch(call).await
-    }
-
-    async fn dispatch_with_context(
-        &self,
-        call: meerkat_core::types::ToolCallView<'_>,
-        context: &meerkat_core::ToolDispatchContext,
-    ) -> Result<meerkat_core::ToolDispatchOutcome, meerkat_core::ToolError> {
-        self.inner.dispatch_with_context(call, context).await
-    }
-
-    async fn poll_external_updates(&self) -> meerkat_core::ExternalToolUpdate {
-        self.inner.poll_external_updates().await
-    }
-
-    fn bind_mcp_server_lifecycle_handle(
-        &self,
-        handle: Arc<dyn meerkat_core::handles::McpServerLifecycleHandle>,
-    ) {
-        self.inner.bind_mcp_server_lifecycle_handle(handle);
-    }
-
-    fn bind_external_tool_surface_handle(
-        &self,
-        handle: Arc<dyn meerkat_core::handles::ExternalToolSurfaceHandle>,
-    ) {
-        self.inner.bind_external_tool_surface_handle(handle);
     }
 }
 
@@ -1238,16 +1272,20 @@ async fn connect_project_agent_proposal_dispatcher(
     node_command: String,
     server_js: String,
 ) -> Result<Arc<dyn meerkat_core::AgentToolDispatcher>, String> {
+    let selected = McpServerConfig::stdio(
+        "project_agent_proposal",
+        node_command,
+        vec![server_js],
+        HashMap::new(),
+    );
     let mut router = McpRouter::new_with_surface_handle(Arc::new(
         meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
-    ));
+    ))
+    .with_call_context_provider(Arc::new(PureProjectAgentProposal {
+        selected: selected.clone(),
+    }));
     router
-        .stage_add(McpServerConfig::stdio(
-            "project_agent_proposal",
-            node_command,
-            vec![server_js],
-            HashMap::new(),
-        ))
+        .stage_add(selected)
         .map_err(|error| format!("failed to stage project-agent proposal tool: {error}"))?;
     tokio::time::timeout(Duration::from_secs(15), router.apply_staged())
         .await
@@ -1286,7 +1324,7 @@ async fn connect_project_agent_proposal_dispatcher(
             "project-agent proposal server must expose only ui_project_agent_proposal".to_string(),
         );
     }
-    Ok(Arc::new(PureProjectAgentProposal { inner: dispatcher }))
+    Ok(dispatcher)
 }
 
 fn desktop_flow_instructions(
@@ -1317,26 +1355,19 @@ Pass this exact `thread_id` to every desktop flow tool: `{thread_id}`."
     ))
 }
 
+#[cfg(test)]
 async fn bootstrap_local_runtime(
     input: CreateMobInput,
     host_tools: Arc<HostToolTransport>,
 ) -> Result<MobkitMobRuntime, String> {
-    bootstrap_local_runtime_inner(input, host_tools, None).await
-}
-
-#[cfg(test)]
-async fn bootstrap_local_runtime_with_test_llm(
-    input: CreateMobInput,
-    host_tools: Arc<HostToolTransport>,
-    test_llm_client: Arc<dyn meerkat::LlmClient>,
-) -> Result<MobkitMobRuntime, String> {
-    bootstrap_local_runtime_inner(input, host_tools, Some(test_llm_client)).await
+    bootstrap_local_runtime_inner(input, host_tools, None, None).await
 }
 
 async fn bootstrap_local_runtime_inner(
     input: CreateMobInput,
     host_tools: Arc<HostToolTransport>,
     test_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
+    observer_disposals: Option<&ObserverDisposalRegistry>,
 ) -> Result<MobkitMobRuntime, String> {
     let proposal_dispatcher = if input.kind == "thread" {
         project_agent_proposal_dispatcher().await?
@@ -1348,6 +1379,7 @@ async fn bootstrap_local_runtime_inner(
         host_tools,
         test_llm_client,
         proposal_dispatcher,
+        observer_disposals,
     )
     .await
 }
@@ -1357,16 +1389,63 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
     host_tools: Arc<HostToolTransport>,
     test_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
     proposal_dispatcher: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
+    observer_disposals: Option<&ObserverDisposalRegistry>,
 ) -> Result<MobkitMobRuntime, String> {
-    let mob_root = input
-        .state_root
-        .join("mobkit")
-        .join(stable_slug(&input.mob_id));
+    // The desktop is the credential owner and opts into Keychain-aware native
+    // persistence. Tests can exercise the same runtime with an isolated store.
+    let persistence = crate::provider_auth::desktop_token_backend()
+        .and_then(meerkat_providers::auth_store::TokenStoreBackend::open_with_refresh_authority)
+        .map_err(|error| format!("failed to open desktop credential store: {error}"))?;
+    bootstrap_local_runtime_with_provider_persistence(
+        input, host_tools, test_llm_client, proposal_dispatcher, persistence,
+        observer_disposals,
+    ).await
+}
+
+fn local_mob_storage(
+    input: &CreateMobInput,
+) -> (PathBuf, meerkat_mobkit::MetaStorageLayout, PathBuf) {
+    let root = input.state_root.join("mobkit").join(stable_slug(&input.mob_id));
+    let layout = meerkat_mobkit::MetaStorageLayout::with_injected_roots(root.clone(), None);
+    let database = root.join("mob.sqlite");
+    (root, layout, database)
+}
+
+fn desktop_topology_policy() -> TopologyControlPolicy {
+    TopologyControlPolicy {
+        mode: TopologyControlMode::Editable,
+        // The desktop picker explicitly admits at most eight frozen targets.
+        allow_bulk: true,
+        max_batch_size: 8,
+        allow_cross_authority: true,
+        receipt_limit: 256,
+        idempotency_history_limit: 4_096,
+    }
+}
+
+async fn bootstrap_local_runtime_with_provider_persistence(
+    input: CreateMobInput,
+    host_tools: Arc<HostToolTransport>,
+    test_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
+    proposal_dispatcher: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
+    provider_auth_persistence: meerkat_providers::auth_store::ProviderAuthPersistence,
+    observer_disposals: Option<&ObserverDisposalRegistry>,
+) -> Result<MobkitMobRuntime, String> {
+    let (mob_root, _, mob_db_path) = local_mob_storage(&input);
     std::fs::create_dir_all(&mob_root).map_err(|error| error.to_string())?;
-    let mob_db_path = mob_root.join("mob.sqlite");
+    // Creation holds this mob's admission lock and has no native store owner.
+    // Adopt the stopped installation before resolving or opening its stores.
+    let mut storage_admission = storage_upgrade::prepare(&mob_root, desktop_topology_policy())
+        .await.map_err(|error| format!("{error:?}"))?;
+    let storage_layout = meerkat_mobkit::MetaStorageLayout::with_injected_roots(mob_root.clone(), None);
     let existing_mob = mob_db_path.exists();
     migrate_stored_mob_events_v8_to_v9(&mob_db_path)?;
-    let definition = durable_mob_definition(&input, &mob_db_path).await?;
+    let definition_storage = open_mob_definition_storage(
+        storage_layout.clone(), &mob_db_path, observer_disposals,
+    )?;
+    let definition = durable_mob_definition_from_storage(
+        &input, &mob_db_path, definition_storage,
+    ).await?;
     let coordinator_profile = definition
         .orchestrator
         .as_ref()
@@ -1422,22 +1501,12 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
     let runtime_adapter = Arc::new(meerkat_runtime::MeerkatMachine::persistent(
         Arc::clone(&runtime_store),
         Arc::clone(&blob_store),
-    ));
+    ).map_err(|error| format!("failed to acquire persistent MobKit runtime: {error}"))?);
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     crate::native_process_custody::NativeProcessCustody::install(
         &runtime_adapter,
         mob_root.clone(),
     );
-    // Meerkat's generic factory deliberately defaults to file-only
-    // credentials so CLI use never causes an OS Keychain prompt. The desktop
-    // is the interactive credential owner and historically persisted OAuth
-    // logins in Keychain, so it must opt into the keyring-aware backend
-    // explicitly. `Auto` still falls back to the canonical file store and
-    // preserves one refresh-lock authority for either location.
-    let provider_auth_persistence =
-        meerkat_providers::auth_store::TokenStoreBackend::default_keyring_auto()
-            .and_then(meerkat_providers::auth_store::TokenStoreBackend::open_with_refresh_authority)
-            .map_err(|error| format!("failed to open desktop credential store: {error}"))?;
     let factory = AgentFactory::new(&mob_root)
         .with_provider_auth_persistence(provider_auth_persistence)
         .session_store(session_store.clone())
@@ -1478,11 +1547,34 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
         builder.default_llm_client = Some(Arc::clone(test_llm_client));
     }
     builder.default_blob_store = Some(blob_store.clone());
+    // Delivery and the factory share one native job store and inbox. The
+    // factory rebinds the projector to each session's actual realm.
+    let job_store: Arc<dyn meerkat::DetachedJobStore> = Arc::new(
+        meerkat::SqliteDetachedJobStore::open(storage_layout.jobs_db()
+            .map_err(|error| format!("failed to resolve persistent MobKit job store: {error}"))?)
+            .map_err(|error| format!("failed to open persistent MobKit job store: {error}"))?,
+    );
+    let runtime_delivery = meerkat_mobkit::mob_handle_runtime::MobRuntimeDelivery::new(
+        Arc::clone(&runtime_store),
+        Arc::clone(&job_store),
+    );
+    builder.default_detached_job_store = Some(Arc::clone(&job_store));
+    builder.default_shell_job_delivery_projector = Some(meerkat::JobOutboxProjector::new_for_realm(
+        job_store,
+        runtime_delivery.inbox(),
+        storage_layout.meerkat_level_realm()
+            .map_err(|error| format!("failed to resolve persistent MobKit realm: {error}"))?
+            .as_str(),
+    ));
     let attached_schedule =
         meerkat_mobkit::schedule_wiring::attach_schedule_tools_with_identity_targets_reporting(
             &builder, &mob_root,
         )
         .map_err(|error| format!("failed to attach durable project-agent schedules: {error}"))?;
+    let schedule_bindings = Arc::new(ScheduleBindings {
+        targets: attached_schedule.mob_target_registry.clone(),
+        tools: Arc::clone(&builder.default_schedule_tools),
+    });
     let coordination_root = input.config_state_root.join("coordination");
     std::fs::create_dir_all(&coordination_root).map_err(|error| {
         format!(
@@ -1538,6 +1630,26 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
     }
     let session_service: Arc<dyn meerkat_mob::MobSessionService> = if let Some(service) = &normal_session_service { service.clone() }
         else { approval_session_service.as_ref().expect("selected approval service").clone() };
+    macro_rules! session_cleanup_for {
+        ($service:expr) => {{
+            let service = Arc::clone($service);
+            Arc::new(crate::thread_dispose::OwnedSessionCleanup::new(move || {
+                let service = Arc::clone(&service);
+                async move {
+                    service.try_shutdown().await
+                        .map_err(|error| format!("Desktop session service cleanup did not complete: {error}"))
+                }
+            }))
+        }};
+    }
+    let session_cleanup = if let Some(service) = &normal_session_service {
+        session_cleanup_for!(service)
+    } else {
+        session_cleanup_for!(approval_session_service.as_ref().expect("selected approval service"))
+    };
+    let disposal = Arc::new(crate::thread_dispose::NativeRuntimeDisposal::with_session_cleanup(
+        Arc::clone(&session_cleanup),
+    ));
     let recovery_session = if input.kind == "thread" {
         crate::thread_recovery::recovering_session(
             &input.state_root, &input.mob_id, &input.coordinator_identity,
@@ -1558,8 +1670,10 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
     let initial_coordinator_profile = match (
         coordinator_resume_session_id.as_ref(), input.initial_llm.as_ref(),
     ) {
-        (None, Some(params)) => {
-            let selection = crate::native_model::initial_selection(params, &realm_config.effective)
+        (None, Some(request)) => {
+            let selection = crate::native_model::initial_selection_with_catalog(
+                &request.params, &realm_config.effective, &request.catalog,
+            )
                 .map_err(|error| format!("Invalid initial agent model: {error}"))?;
             let mut profile = definition.profiles.get(&coordinator_profile)
                 .and_then(|binding| binding.as_inline())
@@ -1584,11 +1698,16 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
     } else { desktop_access_mode };
     let mut spec = MobBootstrapSpec::new(definition, storage, session_service)
         .with_mob_storage_provenance(storage_provenance)
+        .with_child_mob_storage(meerkat_mobkit::ChildMobStorage::Durable(storage_layout.clone()))
+        .with_meta_storage_layout(storage_layout)
         .with_session_runtime_adapter(runtime_adapter.clone())
+        .map_err(|error| format!("failed to bind MobKit session runtime: {error}"))?
+        .with_runtime_delivery(runtime_delivery)
         // Order is contractual: child mobs snapshot WorkGraph authority when
         // agent mob tools are installed.
         .with_workgraph_service(Some(workgraph_service.clone()))
         .with_agent_mob_tools(agent_mob_tools_slot)
+        .map_err(|error| format!("failed to compose native child-mob delivery: {error}"))?
         .with_workgraph_admission_slot(workgraph_admission_slot)
         .with_workgraph_admission_sidecar(&coordination_root);
     // Use the native default provider so the app proposal tool is present on
@@ -1617,7 +1736,7 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
     spec.options.notify_orchestrator_on_resume = false;
     spec.runtime_adapter = Some(runtime_adapter.clone());
     spec.binary_blob_store = Some(binary_blob_store);
-    let config = MobKitConfig {
+    let config = MetaConfig {
         modules: Vec::<ModuleConfig>::new(),
         discovery: DiscoverySpec {
             namespace: "desktop".to_string(),
@@ -1626,23 +1745,23 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
         pre_spawn: Vec::<PreSpawnData>::new(),
     };
     let topology = TopologyBootstrapConfig {
-        policy: TopologyControlPolicy {
-            mode: TopologyControlMode::Editable,
-            // The desktop creation picker is an explicit, bounded host opt-in
-            // to bulk topology. Generic MobKit hosts keep the default-off
-            // policy; Meerkat App admits at most eight frozen targets.
-            allow_bulk: true,
-            max_batch_size: 8,
-            allow_cross_authority: true,
-            receipt_limit: 256,
-            idempotency_history_limit: 4_096,
-        },
+        policy: desktop_topology_policy(),
         state_path: Some(mob_root.join("topology-control.json")),
     };
-    let mut runtime =
-        UnifiedRuntime::bootstrap_with_topology(spec, config, Duration::from_secs(45), topology)
-            .await
-            .map_err(|error| format!("failed to bootstrap MobKit runtime: {error}"))?;
+    storage_admission.handoff_topology();
+    let mut runtime = match
+        UnifiedRuntime::bootstrap_with_topology(spec, config, Duration::from_secs(45), topology).await
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            let mut error = format!("failed to bootstrap MobKit runtime: {error}");
+            if let Err(cleanup) = session_cleanup.shutdown().await {
+                error.push_str(&format!("; {cleanup}"));
+            }
+            return Err(error);
+        }
+    };
+    let setup_result: Result<(), String> = async {
     if let Some(child_state) = runtime.mob_runtime().agent_mob_mcp_state() {
         let child_state = Arc::downgrade(&child_state);
         runtime_config_store.bind_child_realms(Arc::new(move || {
@@ -1664,10 +1783,12 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
     runtime.set_gateway_peer_keys(keys);
     if matches!(input.kind.as_str(), "domain" | "thread" | "sub") {
         let store =
-            match meerkat_mobkit::SqliteConsoleLogStore::open(mob_root.join("console.sqlite")) {
+            match meerkat_mobkit::SqliteConsoleLogStore::open(
+                meerkat_mobkit::MetaStorageLayout::with_injected_roots(mob_root.clone(), None)
+                    .console_db().map_err(|error| format!("failed to resolve durable native console log: {error}"))?.path,
+            ) {
                 Ok(store) => store,
                 Err(error) => {
-                    let _ = runtime.shutdown().await;
                     return Err(format!(
                         "failed to open durable native console log: {error}"
                     ));
@@ -1682,7 +1803,15 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
         .activate_without_identity_context()
         .await
         .map_err(|error| format!("failed to activate durable desktop mob: {error}"))?;
+    Ok(())
+    }.await;
     let runtime = Arc::new(runtime);
+    if let Err(mut error) = setup_result {
+        if let Err(cleanup) = disposal.shutdown(&runtime).await {
+            error.push_str(&format!("; {cleanup}"));
+        }
+        return Err(error);
+    }
     let mut event_drain = RetainedTask::new(
         "MobKit event drain",
         Arc::clone(&runtime).spawn_event_drain_task(),
@@ -1755,7 +1884,7 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
             // remains alive outside the registry and every retry reports that
             // this process already owns the state.
             return Err(bootstrap_failure_after_drain(
-                &runtime, &mut event_drain, format!("failed to spawn MobKit coordinator: {error}"),
+                &runtime, &disposal, &mut event_drain, format!("failed to spawn MobKit coordinator: {error}"),
             ).await);
         }
     }
@@ -1770,7 +1899,7 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
         .await
     {
         return Err(bootstrap_failure_after_drain(
-            &runtime, &mut event_drain, format!("failed to materialize MobKit coordinator: {error}"),
+            &runtime, &disposal, &mut event_drain, format!("failed to materialize MobKit coordinator: {error}"),
         ).await);
     }
 
@@ -1781,7 +1910,7 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
         if let Some(state) = runtime.mob_runtime().agent_mob_mcp_state() {
             if let Err(error) = state.mob_handles_snapshot().await {
                 return Err(bootstrap_failure_after_drain(
-                    &runtime, &mut event_drain,
+                    &runtime, &disposal, &mut event_drain,
                     format!("failed to initialize native worker observation: {error}"),
                 ).await);
             }
@@ -1823,9 +1952,10 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
         else { schedule_for_service!(approval_session_service.expect("selected approval service")) })
     else {
         return Err(bootstrap_failure_after_drain(
-            &runtime, &mut event_drain, "failed to start the project-agent schedule host".into(),
+            &runtime, &disposal, &mut event_drain, "failed to start the project-agent schedule host".into(),
         ).await);
     };
+    attached_schedule.firing_host_binding.bind();
     let schedule_watchdog = meerkat_mobkit::schedule_wiring::spawn_schedule_claim_watchdog(
         attached_schedule.service,
         mob_root.join(meerkat_mobkit::schedule_wiring::SCHEDULE_STORE_FILE),
@@ -1839,7 +1969,7 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
     //
     // The released unregister API detaches this live source during remove(),
     // including its history discovery loop, while preserving stored frames.
-    let console = MobKitConsoleAggregator::new_with_options(
+    let console = MetaConsoleAggregator::new_with_options(
         runtime.console_log_store(),
         console_options_for_mob_kind(&input.kind),
     );
@@ -1873,23 +2003,24 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
         schedule_host: Some(Arc::new(Mutex::new(RetainedShutdown::new(
             "Project-agent scheduler", schedule_host.shutdown(),
         )))),
+        schedule_bindings: Some(schedule_bindings),
         schedule_watchdog: Some(Arc::new(Mutex::new(RetainedTask::new(
             "Project-agent schedule watchdog", schedule_watchdog,
         )))),
         event_drain: Some(Arc::new(Mutex::new(event_drain))),
-        disposal: Arc::new(Default::default()),
+        disposal,
         created_at: Utc::now(),
     })
 }
 
 async fn bootstrap_failure_after_drain(
     runtime: &Arc<UnifiedRuntime>,
+    disposal: &crate::thread_dispose::NativeRuntimeDisposal,
     event_drain: &mut RetainedTask,
     mut error: String,
 ) -> String {
-    let shutdown = runtime.shutdown().await;
-    if !shutdown.cleanup_completed() {
-        error.push_str(&format!("; runtime cleanup was incomplete: {shutdown:?}"));
+    if let Err(cleanup) = disposal.shutdown(runtime).await {
+        error.push_str(&format!("; {cleanup}"));
     }
     // Failed bootstrap has no registry owner to retain a stuck observer.
     // Native shutdown already owns event draining; stop and join this leaf task.
@@ -2056,12 +2187,41 @@ fn migrate_stored_mob_events_v8_to_v9(mob_db_path: &std::path::Path) -> Result<u
     Ok(legacy_rows.len())
 }
 
+fn open_mob_definition_storage(
+    layout: meerkat_mobkit::MetaStorageLayout,
+    database: &std::path::Path,
+    observer_disposals: Option<&ObserverDisposalRegistry>,
+) -> Result<MobStorage, String> {
+    let storage = MobStorage::persistent(database)
+        .map_err(|error| format!("failed to open mob definition storage: {error}"))?;
+    // Successful acquisition is the first observer-owning boundary. Record it
+    // synchronously before any await so cancellation and later bootstrap
+    // failures cannot lose the cleanup obligation. Pre-storage failures have
+    // acquired nothing and must not invent a missing-path cleanup failure.
+    if let Some(disposals) = observer_disposals {
+        let database = database.to_path_buf();
+        disposals.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+            .entry(database.clone())
+            .or_insert_with(|| Arc::new(MobStoreObserverDisposal::new(layout, database)));
+    }
+    Ok(storage)
+}
+
+#[cfg(test)]
 async fn durable_mob_definition(
     input: &CreateMobInput,
     mob_db_path: &std::path::Path,
 ) -> Result<MobDefinition, String> {
     let storage = MobStorage::persistent(mob_db_path)
         .map_err(|error| format!("failed to open mob definition storage: {error}"))?;
+    durable_mob_definition_from_storage(input, mob_db_path, storage).await
+}
+
+async fn durable_mob_definition_from_storage(
+    input: &CreateMobInput,
+    mob_db_path: &std::path::Path,
+    storage: MobStorage,
+) -> Result<MobDefinition, String> {
     let snapshot = storage
         .created_definition_snapshot()
         .await
@@ -2388,6 +2548,24 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn proposal_read_only_authority_requires_the_exact_process_and_operation() {
+        use meerkat_mcp::McpCallContextProvider;
+        let selected = McpServerConfig::stdio(
+            "project_agent_proposal", "node", vec!["/app/proposal.mjs".into()], HashMap::new(),
+        );
+        let authority = PureProjectAgentProposal { selected: selected.clone() };
+        assert_eq!(authority.tool_mutation_class(&selected, PROJECT_AGENT_PROPOSAL_TOOL),
+            meerkat_core::ToolMutationClass::ReadOnly);
+        let other_process = McpServerConfig::stdio(
+            "project_agent_proposal", "node", vec!["/other/proposal.mjs".into()], HashMap::new(),
+        );
+        assert_eq!(authority.tool_mutation_class(&other_process, PROJECT_AGENT_PROPOSAL_TOOL),
+            meerkat_core::ToolMutationClass::Unknown);
+        assert_eq!(authority.tool_mutation_class(&selected, "other_operation"),
+            meerkat_core::ToolMutationClass::Unknown);
+    }
+
     const PROPOSAL_MCP_FIXTURE: &str = r#"
 import readline from 'node:readline';
 const tool = { name: 'ui_project_agent_proposal', description: 'Pure proposal fixture',
@@ -2452,7 +2630,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                 assert!(result.is_error);
                 assert!(result
                     .text_content()
-                    .contains("PROPOSAL_VALIDATION_REJECTED"));
+                    .contains("PROPOSAL_VALIDATION_REJECTED"), "unexpected proposal result: {result:?}");
             }
             let events = if matches!(phase, 0 | 1 | 3) {
                 vec![
@@ -2598,7 +2776,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
         let host_tools = HostToolTransport::new();
         let state_root = fixture.join("state");
         let input = CreateMobInput {
-            mob_id: "proposal-thread".to_string(),
+            mob_id: format!("proposal-thread-{}", uuid::Uuid::new_v4()),
             kind: "thread".to_string(),
             label: "Proposal proof".to_string(),
             role: "ingress".to_string(),
@@ -2622,6 +2800,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                 Arc::clone(&host_tools),
                 Some(llm.clone()),
                 Some(Arc::clone(&dispatcher)),
+                None,
             )
             .await
             .unwrap();
@@ -2765,7 +2944,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                 };
                 let mut saved_session = None;
                 for _ in 0..2 {
-                    let runtime = bootstrap_local_runtime_with_proposal_dispatcher(input.clone(), host.clone(), Some(llm.clone()), None).await.unwrap();
+                    let runtime = bootstrap_local_runtime_with_proposal_dispatcher(input.clone(), host.clone(), Some(llm.clone()), None, None).await.unwrap();
                     assert_eq!(runtime.access_mode, crate::native_execution_modes::ExecutionMode::ReadOnly);
                     let unified = runtime.runtime.as_ref().unwrap();
                     let session = unified.mob_handle().resolve_bridge_session_id(&member_comms_id::mob_member_id("ingress")).await.unwrap();
@@ -2787,7 +2966,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
     }
 
     #[tokio::test]
-    async fn realm_config_rejects_invalid_inherited_fallback_until_explicitly_overridden() {
+    async fn realm_config_normalizes_legacy_fallback_but_rejects_new_invalid_policy() {
         let fixture = std::env::temp_dir().join(format!(
             "meerkat-realm-fallback-policy-{}",
             uuid::Uuid::new_v4()
@@ -2806,14 +2985,35 @@ for await (const line of readline.createInterface({input: process.stdin})) {
         let head_document = format!("[realm.{realm_id}]\nparent = \"global\"\n");
         std::fs::write(&head_path, &head_document).expect("write explicit global inheritance");
 
-        let error = load_effective_realm_config(&project_path, &state_root)
+        let inherited = load_effective_realm_config(&project_path, &state_root)
             .await
-            .err()
-            .expect("invalid inherited fallback must fail");
+            .expect("native persisted-config migration must load the legacy default");
+        assert!(!inherited.effective.model_fallback.is_enabled());
+        assert!(inherited.effective.model_fallback.chain.is_empty());
+        let (_, warnings) = EffectiveConfigReader::new(inherited.source.clone())
+            .effective_config_over_head_with_warnings(
+                &inherited.realm_id,
+                inherited.raw_head.clone(),
+            )
+            .await
+            .expect("read canonical migration warnings");
+        assert_eq!(warnings.len(), 1);
+        assert_eq!(warnings[0].realm, RealmId::global());
+        assert_eq!(
+            warnings[0].warning,
+            meerkat_core::config::ConfigWarning::LegacyModelFallbackDefault,
+        );
+        // Only persisted legacy documents are normalized. A new explicit
+        // enabled policy still needs a reviewed chain at the native write gate.
+        let mut invalid_candidate = inherited.raw_head.clone();
+        invalid_candidate.model_fallback.enabled = Some(true);
+        let error = inherited.head_store.set(invalid_candidate).await
+            .expect_err("a newly authored fallback policy needs an explicit chain");
         assert!(
-            error.contains("requires a nonempty explicit chain"),
+            error.to_string().contains("requires a nonempty explicit chain"),
             "{error}"
         );
+        assert_eq!(std::fs::read_to_string(&head_path).unwrap(), head_document);
 
         std::fs::write(
             &head_path,
@@ -2850,6 +3050,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                     description: String::new(),
                     input_schema: json!({"type": "object"}),
                     provenance: None,
+                    audience: Default::default(),
                 })
             })
             .collect();
@@ -3275,7 +3476,8 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                         Ok(_) => panic!("corrupt runtime storage must refuse mob bootstrap"),
                     };
                     assert!(
-                        error.contains("failed to open persistent MobKit runtime store"),
+                        error.contains("Cannot upgrade saved conversation storage")
+                            && error.contains("file is not a database"),
                         "{error}"
                     );
                     assert!(error.contains(runtime_db.to_str().unwrap()), "{error}");
@@ -3365,6 +3567,13 @@ for await (const line of readline.createInterface({input: process.stdin})) {
             .await
             .expect("bootstrap legacy persisted mob");
         let unified = runtime.runtime.as_ref().expect("local unified runtime");
+
+        let status = mobkit_rpc(unified, "mobkit/status", json!({})).await
+            .expect("legacy app RPC reaches the released Meta dispatcher");
+        assert!(status.get("contract_version").is_some());
+        let native_status = mobkit_rpc(unified, "meta/status", json!({})).await
+            .expect("native Meta RPC remains available");
+        assert_eq!(status["contract_version"], native_status["contract_version"]);
 
         let members = list_members(unified).await;
         assert_eq!(members.len(), 1);

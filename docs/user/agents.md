@@ -1,32 +1,46 @@
-# Work with agents
+# Work with project specialists
 
-## Projects, tasks, and specialists
+## Specialists that stay with the project
 
-A **project** is a folder or repository on your computer. A **thread** is a task conversation within that project. Its coordinator is the agent you talk to; it can create workers for parts of that task.
+A **project** is a folder or repository on your computer. Its **project specialists** are long-lived agents with their own responsibilities, instructions, and conversations. Use the repository study to propose specialists for the project's actual domains, then keep working with those agents as the project evolves.
 
-A **project specialist** is a persistent collaborator, such as a Reviewer, with its own instructions and conversation across tasks. Start solo if you do not need one. Add a specialist from the project's Agents section, or ask the app to study the repository and propose a team. Review the selected roles and models before preparing them: each selected agent can start its own model-backed study.
+From the project's actions menu, choose **Propose agents from repository**, or choose **Suggest agents** on its start screen. Review the proposed focus and assignment details, select the specialists you want, and apply their assignments. Each selected specialist runs a study of its assigned area. [Generate project specialists](getting-started.md#generate-project-specialists) walks through the model and permission choices.
 
-If the sidebar groups several copies of a repository, choose the checkout when opening the project or starting a new thread. Each choice shows its computer and folder path. Project-agent sections use the same checkout labels; agents belong to that folder even when another copy of the repository is open.
+Open a specialist from the project's Agents section to ask questions, give it work in its domain, or inspect its progress. If a later proposal changes an existing assignment, the proposal shows the change before you apply it. Applying the update preserves that agent's conversation and connections, and starts a fresh study when it is idle.
 
-## Connect and request a review
+If the sidebar groups several copies of a repository, choose the checkout when opening the project or starting a new thread. Each choice shows its computer and folder path. Project-agent sections use the same checkout labels; specialists belong to that folder even when another copy of the repository is open.
 
-Select the project agents to include when starting a task, or use **Connections** on an existing conversation. You can also drag one agent or thread onto another to connect them. A connection allows messages; it does not merge histories, automatically request a review, or move anyone's checkout.
+## Peer specialists within and across projects
 
-Peer messaging requires **Full access** in the current native policy. A Read-only specialist can inspect files and answer you directly, but cannot send a report to another agent. If you want the coordinator to request and receive a peer review, use a specialist with Full access and be aware that this also permits edits and commands. Giving it review-only instructions does not enforce a restriction on edits.
+Connect specialists when their work needs to meet. They can coordinate design, share findings, resolve an interface change, or review each other's work. Connections can join agents in the same project or agents in different projects.
 
-Ask the coordinator to request a review and name what should be reviewed. For a worktree task, include the worktree or exact commit. Project specialists work in the project's checkout; task workers use their task's worktree. Check the displayed workspace and branch before reading files, running commands, or committing.
+Open a specialist's **Connections** and choose **Connect an agent**, or **Manage connections** if it already has peers. Search by agent or project name, choose a peer, and confirm **Connect agents**. You can also drag an agent onto another agent in the sidebar and confirm the connection. In this preview, both must use the same connected computer. Specialists in different projects on that computer can peer; specialists on different computers cannot.
 
-Open the specialist from the sidebar to inspect its conversation. Follow attention links for questions or approvals. Read the returned review in the requesting task, and ask for a summary of any unresolved findings. Disconnect collaborators when you no longer want that messaging relationship.
+For example, connect a service's API specialist to the client specialist in a separate application project. Ask one to agree a response format with its peer before making the change. For work inside one repository, connect the specialists responsible for the affected domains in the same way.
+
+A connection allows peer messages when permissions permit. It does not send a task by itself, merge conversations, share every past message, or move either agent into the other's checkout. State the objective and ask the agent to coordinate with the named peers. Include the exact branch, commit, or worktree when that matters to the work.
+
+Peer replies require **Full access**, which also permits commands and file changes. A **Read-only** specialist can inspect files and answer you directly, but cannot send a report to another agent. Review-only instructions do not enforce read-only access. Check each agent's permissions before connecting it for two-way collaboration.
+
+Use **Connections** to open a peer's conversation or **Manage connections** to disconnect it. Inspect the connection status: a saved connection can be offline. Follow attention links for questions or approvals, and read the replies in the requesting agent's conversation.
+
+## Use task threads and workers
+
+A **thread** is a focused task conversation within a project. Its **coordinator** is the agent you talk to in that conversation. Select the project specialists to connect before sending the first message, or use **Connections** on an existing thread. The same connection controls can also join existing threads to other threads or specialists, including in another project on the same connected computer.
+
+The coordinator can create **workers** for parts of that task. These are task-scoped helpers; the project's specialists keep their separate responsibilities and conversations across tasks. Open the thread's agent menu to inspect its coordinator and workers.
+
+Project specialists work in their project's checkout. Task workers use the task's checkout or worktree. A peer connection does not move files, switch branches, or change either checkout. Check the displayed workspace and branch before reading files, running commands, or committing.
 
 ## Deliver a specialist's work
 
 The agent header identifies its **Project checkout** or **Thread worktree**, with the path and branch. A project specialist's **Delivery task** opens a saved task in that same checkout so you can inspect changes, test, commit, and create a pull request. It keeps a link to the source specialist and its latest objective or outcome. Review that handoff and add any findings needed from earlier conversation; the entire transcript is not copied, and creating the task does not send a model message automatically.
 
-For browser work with a Full access specialist, select an existing task in the exact same checkout or choose **Create browser workspace**. Send its first message, then use **Share browser and return** to grant access and return to the specialist. The browser is shared only after that action. Use **Stop sharing** when finished. Read-only agents cannot use browser tools in this prototype.
+For browser work with a Full access specialist, select an existing task in the exact same checkout or choose **Create browser workspace**. Send its first message, then use **Share browser and return** to grant access and return to the specialist. The browser is shared only after that action. Use **Stop sharing** when finished. Read-only agents cannot use browser tools in this preview.
 
 ## Permissions
 
-Read the specialist's effective access mode before giving it work. "Reviewer" is a role name, not a filesystem restriction. Project-agent permissions are separate from a thread's permissions. Choose **Read-only** for direct advice without edits, commands, or peer messaging, or deliberately allow **Full access** when it should collaborate with other agents or run tools. Project agents do not currently support Supervised mode. Reconnecting or changing a role does not change its access; create another agent to choose a different mode. [Permissions](permission-modes.md) explains the distinction.
+Project-agent permissions are separate from a thread's permissions. A specialist's name, domain, or assignment does not restrict its tools. Choose **Read-only** for direct advice without edits, commands, or peer messaging, or **Full access** when it should collaborate with other agents or run tools. Project agents do not currently support Supervised mode. Reconnecting or changing an assignment does not change its access; create another agent to choose a different mode. [Permissions](permission-modes.md) explains the distinction.
 
 ## Follow-up messages
 

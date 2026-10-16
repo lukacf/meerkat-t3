@@ -16,6 +16,7 @@ const model = (slug: string, isDefault = false) => ({
   name: slug,
   isDefault,
   isCustom: false,
+  credentialState: "connected" as const,
   capabilities: {},
 });
 function provider(instance: string, overrides: Partial<ServerProvider> = {}): ServerProvider {

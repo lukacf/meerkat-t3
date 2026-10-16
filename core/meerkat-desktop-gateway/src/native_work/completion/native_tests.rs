@@ -52,7 +52,7 @@ async fn native_run_start_completion_uses_real_receipt_and_survives_cold_read() 
     let machine = Arc::new(MeerkatMachine::persistent(
         store.clone(),
         Arc::new(meerkat_store::MemoryBlobStore::new()),
-    ));
+    ).unwrap());
     let session = SessionId::new();
     machine
         .register_session_with_executor(session.clone(), Box::new(ResultExecutor(session.clone())))
@@ -69,6 +69,9 @@ async fn native_run_start_completion_uses_real_receipt_and_survives_cold_read() 
             idempotency_key: None,
             supersession_key: None,
             correlation_id: None,
+            authority_association: None,
+            ingress_context: None,
+            retained_resume: None,
         },
         content: "Initial worker task".into(),
         typed_turn_appends: vec![],
@@ -122,7 +125,7 @@ async fn native_run_start_completion_uses_real_receipt_and_survives_cold_read() 
     .await
     .unwrap()
     .is_none());
-    let cold = MeerkatMachine::persistent_without_blobs(store.clone());
+    let cold = MeerkatMachine::persistent_without_blobs(store.clone()).unwrap();
     let restored = read_runs(&cold, store.as_ref(), &target(&session), &[frame])
         .await
         .unwrap()
@@ -146,6 +149,9 @@ async fn native_run_start_completion_uses_real_receipt_and_survives_cold_read() 
             idempotency_key: Some(IdempotencyKey::new(console.id.clone())),
             supersession_key: None,
             correlation_id: None,
+            authority_association: None,
+            ingress_context: None,
+            retained_resume: None,
         },
         content: "Later console task".into(),
         typed_turn_appends: vec![],

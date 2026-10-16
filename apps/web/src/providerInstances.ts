@@ -84,6 +84,25 @@ export function isProviderInstancePickerVisible(entry: ProviderInstanceEntry): b
   return entry.enabled;
 }
 
+/** Settings can repair an unhealthy native instance, but cannot target a donor runtime. */
+export function resolveMeerkatAccountInstance(input: {
+  entries: ReadonlyArray<ProviderInstanceEntry>;
+  requestedInstanceId?: ProviderInstanceId | null | undefined;
+  requireExactInstance?: boolean;
+}): ProviderInstanceId | undefined {
+  const requested = input.entries.find((entry) => entry.instanceId === input.requestedInstanceId);
+  if (requested?.driverKind === "meerkat") {
+    return requested.enabled ? requested.instanceId : undefined;
+  }
+  // A saved conversation must never move its account lookup into another native state root.
+  if (input.requireExactInstance) return undefined;
+  const native = input.entries.filter((entry) => entry.driverKind === "meerkat" && entry.enabled);
+  return (
+    native.find((entry) => entry.isDefault)?.instanceId ??
+    (native.length === 1 ? native[0]?.instanceId : undefined)
+  );
+}
+
 /**
  * Project the wire `ServerProvider[]` into instance entries, one per
  * configured instance. Preserves the server's ordering (which sources

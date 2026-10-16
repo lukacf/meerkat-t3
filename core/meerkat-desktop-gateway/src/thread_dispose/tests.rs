@@ -74,7 +74,8 @@ fn input(root: &std::path::Path) -> CreateMobInput {
         label: "Disposal proof".into(),
         role: "coordinator".into(),
         coordinator_identity: "ingress".into(),
-        model: "gpt-5.6-sol".into(), initial_llm: None,
+        model: "gpt-5.6-sol".into(),
+        initial_llm: None,
         instructions: "Use the controlled test provider.".into(),
         thread_id: Some("disposal-thread".into()),
         include_native_workers: false,
@@ -156,7 +157,15 @@ fn late_child_input_is_interrupted_while_the_same_shutdown_future_is_pending() {
             while_interrupting_inputs(
                 async {
                     wait_for_input.await.unwrap();
-                    cleanup_child.shutdown().await.unwrap();
+                    // Let the native owner collect its own child settlement
+                    // receipt. A separate child shutdown would make the later
+                    // durable stand-down unable to prove that child's outcome.
+                    let report = cleanup_runtime.shutdown().await;
+                    assert!(report.cleanup_completed(), "{report:?}");
+                    assert!(matches!(
+                        report.child_mob_stand_down,
+                        meerkat_mobkit::ChildMobStandDownOutcome::Released { .. }
+                    ));
                     while !changes.is_closed() {
                         if changes.changed().await.is_err() {
                             break;
@@ -213,15 +222,14 @@ fn late_child_input_is_interrupted_while_the_same_shutdown_future_is_pending() {
             .unwrap()
             .unwrap();
         assert!(child.machine_state_changes().is_closed());
-        // The helper already proved this child's native acknowledgment/exit.
-        // Retain that exact progress when checking the enclosing runtime.
+        // The helper already proved the enclosing native shutdown receipt.
+        // Retain that exact progress while awaiting the parent actor exit.
         let disposal = NativeRuntimeDisposal::default();
-        disposal
-            .progress
-            .lock()
-            .await
-            .children_closed
-            .insert(child_id.to_string());
+        {
+            let mut progress = disposal.progress.lock().await;
+            progress.runtime_phases_completed = true;
+            progress.native_child_root_released = true;
+        }
         disposal.shutdown(runtime).await.unwrap();
         assert!(runtime.mob_handle().machine_state_changes().is_closed());
     });
@@ -296,6 +304,7 @@ fn parent_exit_between_observation_and_redundant_shutdown_is_not_a_refusal() {
         let runtime = mob.runtime.as_ref().unwrap();
         let parent = runtime.mob_handle();
         let mut changes = parent.machine_state_changes();
+        let mut actor_task = parent.actor_task_watch();
         assert!(!changes.is_closed());
         // This is the actual successful parent phase report preceding our
         // extra actor-closure check. Force the observation-to-command race.
@@ -307,11 +316,13 @@ fn parent_exit_between_observation_and_redundant_shutdown_is_not_a_refusal() {
         }
         let result = parent.shutdown().await;
         assert!(matches!(result, Err(MobError::ActorCommandChannelClosed)));
-        finish_parent_shutdown(&mut changes, result).await.unwrap();
+        finish_parent_shutdown(&mut actor_task, result)
+            .await
+            .unwrap();
         assert!(changes.is_closed());
         assert!(
             finish_parent_shutdown(
-                &mut changes,
+                &mut actor_task,
                 Err(MobError::Internal("unrelated refusal".into()))
             )
             .await
@@ -339,32 +350,33 @@ fn redundant_parent_reply_loss_requires_exact_actor_exit() {
         let mob = registry.create_local(spec).await.unwrap();
         let runtime = mob.runtime.as_ref().unwrap();
         let parent = runtime.mob_handle();
-        let mut changes = parent.machine_state_changes();
+        let changes = parent.machine_state_changes();
+        let mut actor_task = parent.actor_task_watch();
         assert!(!changes.is_closed());
 
         // Inject the typed reply loss at the narrow post-phase boundary to
         // deterministically hold the observation-to-exit race open. A dropped
         // reply must not itself complete cleanup while this actor is alive.
         let mut finish = Box::pin(finish_parent_shutdown(
-            &mut changes,
+            &mut actor_task,
             Err(MobError::ActorReplyChannelClosed),
         ));
         assert!(matches!(futures_util::poll!(&mut finish), Poll::Pending));
 
         // The real runtime must acknowledge its phases, and this exact parent
-        // must close its publisher before the pending boundary can complete.
+        // must return from its actor task before the pending boundary can complete.
         assert!(runtime.shutdown().await.cleanup_completed());
         tokio::time::timeout(Duration::from_secs(15), finish)
             .await
             .unwrap()
             .unwrap();
         assert!(changes.is_closed());
-        finish_parent_shutdown(&mut changes, Err(MobError::ActorReplyChannelClosed))
+        finish_parent_shutdown(&mut actor_task, Err(MobError::ActorReplyChannelClosed))
             .await
             .unwrap();
         assert!(
             finish_parent_shutdown(
-                &mut changes,
+                &mut actor_task,
                 Err(MobError::Internal("mob actor reply channel closed".into())),
             )
             .await

@@ -50,7 +50,7 @@ describe("getProviderSummary", () => {
     const native = { ...provider, driver: ProviderDriverKind.make("meerkat") };
     expect(getProviderSummary(native)).toEqual({
       headline: "Credentials detected · ChatGPT",
-      detail: "Your first task will confirm access to the selected model.",
+      detail: "Your first request will confirm access to the selected model.",
     });
     expect(getProviderSummary({ ...native, message: "Host-managed account." }).detail).toBe(
       "Host-managed account.",

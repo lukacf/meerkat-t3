@@ -208,7 +208,9 @@ const makeTest = Effect.fn("ServerConfig.makeTest")(function* (
   const baseDir =
     typeof baseDirOrPrefix === "string"
       ? baseDirOrPrefix
-      : yield* fs.makeTempDirectoryScoped({ prefix: baseDirOrPrefix.prefix });
+      : yield* fs
+          .makeTempDirectoryScoped({ prefix: baseDirOrPrefix.prefix })
+          .pipe(Effect.flatMap((directory) => fs.realPath(directory)));
   const derivedPaths = yield* deriveServerPaths(baseDir, devUrl);
   yield* ensureServerDirectories(derivedPaths);
 

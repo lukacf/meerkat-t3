@@ -58,9 +58,10 @@ impl MobConfigStore {
             // Read exact membership from the owning native registry on every
             // build. A child is inserted before it can spawn a member; this
             // snapshot does not wait for child actors or cache their IDs.
-            // This state is composed without persistent child restoration.
-            // A persistent composition must provision realm links before
-            // restoration instead of recursing from a config read.
+            // Bind this reader after native bootstrap restores saved members
+            // through their persisted auth bindings. New selections then use
+            // these parent links. Binding it during restoration would recurse
+            // from this config read into the same child-registry restore.
             for realm in read_children().await.map_err(ConfigError::Validation)? {
                 self.parent_realm(&mut config, &realm)?;
             }

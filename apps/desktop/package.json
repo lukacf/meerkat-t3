@@ -8,7 +8,7 @@
     "ensure:electron": "node scripts/ensure-electron-runtime.mjs",
     "start": "node scripts/start-electron.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "vp test run --passWithNoTests",
+    "test": "node scripts/ensure-electron-runtime.mjs && vp test run --passWithNoTests",
     "smoke-test": "node scripts/smoke-test.mjs"
   },
   "dependencies": {
@@ -40,5 +40,5 @@
     "tailwindcss": "^4.0.0",
     "vite-plus": "catalog:"
   },
-  "productName": "Meerkat T3 (Prototype)"
+  "productName": "MeerkaT3"
 }

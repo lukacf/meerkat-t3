@@ -24,68 +24,47 @@ use crate::{
     derive_project_locator, object_params, optional_string, required_string, GatewayError,
 };
 
+mod accounts;
+
 #[derive(Clone)]
 pub struct DesktopProviderAuth {
     persistence: Result<ProviderAuthPersistence, String>,
     authority: meerkat_runtime::ProviderAuthRuntimeAuthority,
+    global_config_path: std::path::PathBuf,
+    copilot_accounts: std::sync::Arc<accounts::CopilotAccounts>,
+    // Order removal with profile/key edits and new sign-in admission, including
+    // device start awaiting HTTP. OAuth completion uses native lifecycle fencing
+    // so revocation can still cancel a token exchange already in progress.
+    account_mutations: std::sync::Arc<tokio::sync::Mutex<()>>,
+    auth_http: Result<reqwest::Client, String>,
 }
 
 impl DesktopProviderAuth {
     pub fn new() -> Self {
-        let persistence = TokenStoreBackend::default_keyring_auto()
+        let persistence = desktop_token_backend()
             .and_then(TokenStoreBackend::open_with_refresh_authority)
             .map_err(|error| error.to_string());
         Self {
             persistence,
             authority: meerkat_runtime::MeerkatMachine::ephemeral()
                 .provider_auth_runtime_authority(),
+            global_config_path: accounts::default_global_config_path(),
+            copilot_accounts: Default::default(),
+            account_mutations: Default::default(),
+            auth_http: accounts::auth_http_client(),
         }
     }
 
     pub async fn status(&self, params: Option<&Value>) -> Result<Value, GatewayError> {
-        let params = object_params(params)?;
-        let project_path = required_string(params, "projectPath")?;
-        let state_root = optional_string(params, "stateRoot")
-            .or_else(|| optional_string(params, "configStateRoot"));
-        let locator = derive_project_locator(&project_path, state_root.as_deref())?;
-        let realm_config = load_effective_realm_config(&locator.project_path, &locator.state_root)
-            .await
-            .map_err(auth_policy_error)?;
-        let persistence = self.persistence()?;
-        let store = persistence.token_store();
-        let mut connections = Vec::new();
-
-        for provider in [Provider::OpenAI, Provider::Anthropic, Provider::Gemini] {
-            let candidates = match resolve_auth_binding_candidates_for_provider(
-                &realm_config.effective,
-                provider,
-                None,
-                Some(&realm_config.realm_id),
-                true,
-            ) {
-                Ok(candidates) => candidates,
-                Err(_) => continue,
-            };
-            let mut statuses = Vec::with_capacity(candidates.len());
-            for target in candidates {
-                statuses.push(self.connection_status(store.as_ref(), &target).await?);
-            }
-            if let Some(status) = select_effective_connection_status(statuses) {
-                connections.push(status);
-            }
-        }
-
-        Ok(json!({
-            "contractVersion": "desktop-provider-auth.v1",
-            "projectPath": locator.project_path,
-            "stateRoot": locator.state_root,
-            "realmId": realm_config.realm_id,
-            "connections": connections,
-        }))
+        self.accounts_status(object_params(params)?).await
     }
 
     pub async fn login_start(&self, params: Option<&Value>) -> Result<Value, GatewayError> {
+        let _mutation = self.account_mutations.lock().await;
         let params = object_params(params)?;
+        if params.contains_key("bindingId") || !params.contains_key("projectPath") {
+            return self.account_login_start(params).await;
+        }
         let project_path = required_string(params, "projectPath")?;
         let provider_name = required_string(params, "provider")?;
         let redirect_uri = required_string(params, "redirectUri")?;
@@ -154,6 +133,9 @@ impl DesktopProviderAuth {
 
     pub async fn login_complete(&self, params: Option<&Value>) -> Result<Value, GatewayError> {
         let params = object_params(params)?;
+        if params.contains_key("bindingId") || !params.contains_key("projectPath") {
+            return self.account_login_complete(params).await;
+        }
         let project_path = required_string(params, "projectPath")?;
         let provider_name = required_string(params, "provider")?;
         let redirect_uri = required_string(params, "redirectUri")?;
@@ -238,7 +220,11 @@ impl DesktopProviderAuth {
     }
 
     pub async fn logout(&self, params: Option<&Value>) -> Result<Value, GatewayError> {
+        let _mutation = self.account_mutations.lock().await;
         let params = object_params(params)?;
+        if params.contains_key("bindingId") || !params.contains_key("projectPath") {
+            return self.account_clear(params).await;
+        }
         let project_path = required_string(params, "projectPath")?;
         let provider_name = required_string(params, "provider")?;
         let state_root = optional_string(params, "stateRoot")
@@ -290,12 +276,30 @@ impl DesktopProviderAuth {
             .and_then(|method| method.persisted_auth_mode())
             .is_some_and(persisted_auth_mode_is_oauth_login)
             && target.auth_profile.constraints.allow_interactive_login;
+        let mut credential_observation = None;
         let (state, expires_at, account_id, has_refresh_token) = match &target.auth_profile.source {
             CredentialSourceSpec::ManagedStore | CredentialSourceSpec::PlatformDefault => {
                 let key = TokenKey::from_credential_identity(&target.credential_identity);
-                match store.load(&key).await {
-                    Ok(Some(tokens))
+                // A status poll must not start an OS credential read. Only a
+                // completed observation can prove that credentials are absent.
+                let read = meerkat_core::CredentialStatusRead::from_observation(
+                    store.observe_status(&key).await.map_err(|error| {
+                        GatewayError::policy(
+                            "Could not read provider credentials",
+                            Some(json!({
+                                "provider": target.auth_profile.provider.as_str(),
+                                "error": error.to_string(),
+                            })),
+                        )
+                    })?,
+                );
+                credential_observation = read.observation();
+                match read.into_tokens() {
+                    Some(tokens)
                         if meerkat_core::tokens_lifecycle_published(&tokens)
+                            && meerkat_providers::NormalizedAuthMethod::from_auth_profile(&target.auth_profile)
+                                .and_then(meerkat_providers::NormalizedAuthMethod::persisted_auth_mode)
+                                == Some(tokens.auth_mode)
                             && tokens.primary_secret.is_some() =>
                     {
                         (
@@ -305,17 +309,24 @@ impl DesktopProviderAuth {
                             tokens.refresh_token.is_some(),
                         )
                     }
-                    Ok(Some(_)) => ("reauth_required", None, None, false),
-                    Ok(None) => ("needs_auth", None, None, false),
-                    Err(error) => {
-                        return Err(GatewayError::policy(
-                            "Could not read provider credentials",
-                            Some(json!({
-                                "provider": target.auth_profile.provider.as_str(),
-                                "error": error.to_string(),
-                            })),
+                    Some(_) => ("reauth_required", None, None, false),
+                    None if credential_observation.is_some() => {
+                        // A native lease can remain usable even though the OS
+                        // store deliberately withholds secrets from polling.
+                        let lease = self.authority.generated_auth_lease_handle();
+                        let snapshot = lease.snapshot(&meerkat_core::handles::LeaseKey::from_credential_identity(
+                            &target.credential_identity,
                         ));
+                        let state = match meerkat_core::auth::AuthStatusPhase::from_lease_snapshot(Utc::now(), &snapshot) {
+                            meerkat_core::auth::AuthStatusPhase::Valid
+                            | meerkat_core::auth::AuthStatusPhase::Expiring => "connected",
+                            meerkat_core::auth::AuthStatusPhase::ReauthRequired
+                            | meerkat_core::auth::AuthStatusPhase::RefreshFailed => "reauth_required",
+                            _ => "unknown",
+                        };
+                        (state, None, None, false)
                     }
+                    None => ("needs_auth", None, None, false),
                 }
             }
             CredentialSourceSpec::Env { env, fallback } => {
@@ -348,6 +359,7 @@ impl DesktopProviderAuth {
             "authMethod": target.auth_profile.auth_method,
             "source": source_kind,
             "state": state,
+            "credentialObservation": credential_observation,
             "supportsInteractiveLogin": interactive,
             "expiresAt": expires_at,
             "accountId": account_id,
@@ -418,6 +430,30 @@ impl DesktopProviderAuth {
             )
         })
     }
+}
+
+pub(crate) fn desktop_token_backend()
+-> Result<TokenStoreBackend, meerkat_providers::auth_store::TokenStoreError> {
+    // Isolated native integration tests must never address the user's keychain.
+    // Release builds reject this override. Debug builds choose a native file
+    // backend together with its native refresh-lock authority.
+    #[cfg(debug_assertions)]
+    if let Some(root) = std::env::var_os("MEERKAT_DESKTOP_TEST_AUTH_ROOT") {
+        let root = std::path::PathBuf::from(root);
+        if !root.is_absolute() {
+            return Err(meerkat_providers::auth_store::TokenStoreError::Unavailable(
+                "test credential root must be absolute".into(),
+            ));
+        }
+        return Ok(TokenStoreBackend::File { root });
+    }
+    #[cfg(not(debug_assertions))]
+    if std::env::var_os("MEERKAT_DESKTOP_TEST_AUTH_ROOT").is_some() {
+        return Err(meerkat_providers::auth_store::TokenStoreError::Unavailable(
+            "test credential override requires a debug build".into(),
+        ));
+    }
+    TokenStoreBackend::default_keyring_auto()
 }
 
 fn select_effective_connection_status(statuses: Vec<Value>) -> Option<Value> {
@@ -567,6 +603,10 @@ auth_profile = "desktop_openai"
 
             let store = Arc::new(EphemeralTokenStore::new());
             let auth = DesktopProviderAuth {
+                global_config_path: accounts::default_global_config_path(),
+                copilot_accounts: Default::default(),
+                account_mutations: Default::default(),
+                auth_http: accounts::auth_http_client(),
                 persistence: Ok(ProviderAuthPersistence::new(
                     store.clone(),
                     Arc::new(InMemoryCoordinator::new()),

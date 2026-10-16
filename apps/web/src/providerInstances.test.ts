@@ -1,4 +1,9 @@
-import { ProviderDriverKind, ProviderInstanceId, type ServerProvider } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 import {
   applyProviderInstanceSettings,
@@ -8,8 +13,10 @@ import {
   isProviderInstancePickerReady,
   isProviderInstancePickerVisible,
   resolveDefaultProviderModelSelection,
+  resolveMeerkatAccountInstance,
   resolveSelectableProviderInstance,
 } from "./providerInstances";
+import { providerAccountSettingsSearch } from "./components/settings/providerAccountTarget";
 
 function provider(input: {
   provider: ProviderDriverKind;
@@ -45,6 +52,107 @@ const model = (slug: string, isCustom = false, isDefault = false) => ({
   isCustom,
   ...(isDefault ? { isDefault: true } : {}),
   capabilities: {},
+});
+
+describe("resolveMeerkatAccountInstance", () => {
+  const native = (instanceId: string, enabled = true) =>
+    provider({
+      provider: ProviderDriverKind.make("meerkat"),
+      instanceId,
+      enabled,
+      status: "error",
+      availability: "unavailable",
+    });
+  const donor = provider({
+    provider: ProviderDriverKind.make("antigravity"),
+    instanceId: "antigravity",
+    enabled: false,
+    availability: "unavailable",
+  });
+
+  it("opens native settings when the first setup-capable entry is disabled Antigravity", () => {
+    const instanceId = resolveMeerkatAccountInstance({
+      entries: deriveProviderInstanceEntries([donor, native("meerkat")]),
+    });
+    expect(instanceId).toBe("meerkat");
+    const search = providerAccountSettingsSearch({
+      environmentId: EnvironmentId.make("device-a"),
+      instanceId: instanceId!,
+      projectId: undefined,
+      fallback: {},
+    });
+    expect(search.instanceId).toBe("meerkat");
+    expect(search.environmentId).toBe("device-a");
+  });
+
+  it("repairs a stale donor link using the sole configured custom native instance", () => {
+    expect(
+      resolveMeerkatAccountInstance({
+        entries: deriveProviderInstanceEntries([donor, native("work-runtime")]),
+        requestedInstanceId: donor.instanceId,
+      }),
+    ).toBe("work-runtime");
+  });
+
+  it("preserves the requested custom native instance despite an unhealthy probe", () => {
+    expect(
+      resolveMeerkatAccountInstance({
+        entries: deriveProviderInstanceEntries([native("meerkat"), native("work-runtime")]),
+        requestedInstanceId: ProviderInstanceId.make("work-runtime"),
+      }),
+    ).toBe("work-runtime");
+  });
+
+  it("does not redirect an explicitly disabled native instance", () => {
+    expect(
+      resolveMeerkatAccountInstance({
+        entries: deriveProviderInstanceEntries([native("meerkat"), native("work-runtime", false)]),
+        requestedInstanceId: ProviderInstanceId.make("work-runtime"),
+      }),
+    ).toBeUndefined();
+  });
+
+  it("does not guess among multiple custom native instances", () => {
+    expect(
+      resolveMeerkatAccountInstance({
+        entries: deriveProviderInstanceEntries([native("home-runtime"), native("work-runtime")]),
+        requestedInstanceId: donor.instanceId,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("uses the configured native default for an untargeted settings entry", () => {
+    expect(
+      resolveMeerkatAccountInstance({
+        entries: deriveProviderInstanceEntries([native("work-runtime"), native("meerkat")]),
+      }),
+    ).toBe("meerkat");
+  });
+
+  it.each([undefined, "antigravity", "missing-runtime"])(
+    "does not move an exact conversation target (%s) to another instance",
+    (requestedInstanceId) => {
+      expect(
+        resolveMeerkatAccountInstance({
+          entries: deriveProviderInstanceEntries([donor, native("meerkat")]),
+          requestedInstanceId: requestedInstanceId
+            ? ProviderInstanceId.make(requestedInstanceId)
+            : undefined,
+          requireExactInstance: true,
+        }),
+      ).toBeUndefined();
+    },
+  );
+
+  it("checks driver metadata rather than interpreting an opaque native instance ID", () => {
+    expect(
+      resolveMeerkatAccountInstance({
+        entries: deriveProviderInstanceEntries([native("antigravity")]),
+        requestedInstanceId: ProviderInstanceId.make("antigravity"),
+        requireExactInstance: true,
+      }),
+    ).toBe("antigravity");
+  });
 });
 
 describe("isProviderInstancePickerReady", () => {

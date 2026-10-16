@@ -116,7 +116,11 @@ export function SidebarUpdateReleaseNotes({
                 {`${state.omittedReleaseCount} older ${state.omittedReleaseCount === 1 ? "release" : "releases"} on GitHub`}
               </ReleaseLink>
             ) : (
-              <Link to="/help" search={{ topic: "updates" }} className="text-xs text-primary underline underline-offset-2">
+              <Link
+                to="/help"
+                search={{ topic: "updates" }}
+                className="text-xs text-primary underline underline-offset-2"
+              >
                 How to update this prototype
               </Link>
             )}

@@ -70,7 +70,7 @@ const checkForUpdatesFromMenu = Effect.gen(function* () {
     yield* electronDialog.showMessageBox({
       type: "info",
       title: "You're up to date!",
-      message: `Meerkat T3 ${updateState.currentVersion} is currently the newest version available.`,
+      message: `MeerkaT3 ${updateState.currentVersion} is currently the newest version available.`,
       buttons: ["OK"],
     });
   } else if (updateState.status === "error") {
@@ -112,15 +112,24 @@ const exportSupportReport = Effect.gen(function* () {
   const dialog = yield* ElectronDialog.ElectronDialog;
   const result = yield* diagnostics.exportReport;
   if (result.status === "cancelled") return;
-  yield* dialog.showMessageBox(result.status === "saved" ? {
-    type: "info", title: "Support report saved",
-    message: "Send this file to your prototype distributor.",
-    detail: result.filePath ?? "", buttons: ["OK"],
-  } : {
-    type: "error", title: "Report could not be saved",
-    message: "Try another folder. If this continues, report the app version and what happened to your prototype distributor.",
-    buttons: ["OK"],
-  });
+  yield* dialog.showMessageBox(
+    result.status === "saved"
+      ? {
+          type: "info",
+          title: "Support report saved",
+          message:
+            "Review this file before attaching it to an issue at https://github.com/lukacf/meerkat-t3/issues.",
+          detail: result.filePath ?? "",
+          buttons: ["OK"],
+        }
+      : {
+          type: "error",
+          title: "Report could not be saved",
+          message:
+            "Try another folder. If this continues, include the app version and describe what happened at https://github.com/lukacf/meerkat-t3/issues.",
+          buttons: ["OK"],
+        },
+  );
 });
 
 /** @public Service construction is part of the canonical Effect module API. */
@@ -278,8 +287,11 @@ export const make = Effect.gen(function* () {
       {
         role: "help",
         submenu: [
-          { label: "Meerkat T3 Guide", click: helpClick },
-          { label: "Export support report...", click: () => runMenuEffect("export-support-report", exportSupportReport) },
+          { label: "MeerkaT3 Guide", click: helpClick },
+          {
+            label: "Export support report...",
+            click: () => runMenuEffect("export-support-report", exportSupportReport),
+          },
           { type: "separator" },
           {
             label: "Check for Updates...",

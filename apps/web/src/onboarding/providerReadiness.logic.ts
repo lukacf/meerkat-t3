@@ -1,37 +1,4 @@
-import {
-  ClaudeSettings,
-  CodexSettings,
-  type ExecutionEnvironmentPlatformOs,
-  type ServerProvider,
-  type ServerSettings,
-} from "@t3tools/contracts";
-import * as Option from "effect/Option";
-import * as Schema from "effect/Schema";
-
-const decodeClaudeSettings = Schema.decodeUnknownOption(ClaudeSettings);
-const decodeCodexSettings = Schema.decodeUnknownOption(CodexSettings);
-const SAFE_SHELL_BINARY_PATTERN = /^[A-Za-z0-9_./:\\-]+$/;
-
-function quoteProviderBinary(
-  binaryPath: string,
-  fallback: string,
-  platform: ExecutionEnvironmentPlatformOs,
-): string {
-  if (
-    SAFE_SHELL_BINARY_PATTERN.test(binaryPath) &&
-    (platform === "windows" || !binaryPath.includes("\\"))
-  ) {
-    return binaryPath;
-  }
-  if (platform === "windows") return `& '${binaryPath.replaceAll("'", "''")}'`;
-  if (platform === "darwin" || platform === "linux") {
-    if (binaryPath.startsWith("~/") || binaryPath.startsWith("~\\")) {
-      return `~/'${binaryPath.slice(2).replaceAll("'", `'"'"'`)}'`;
-    }
-    return `'${binaryPath.replaceAll("'", `'"'"'`)}'`;
-  }
-  return fallback;
-}
+import type { ServerProvider } from "@t3tools/contracts";
 
 export function getOnboardingProviderState(provider: ServerProvider | undefined) {
   if (provider === undefined) return "checking";
@@ -43,136 +10,16 @@ export function getOnboardingProviderState(provider: ServerProvider | undefined)
   return "attention";
 }
 
-/** Native instances remain visible before credentials or runtime setup succeeds. */
-export function selectOnboardingProviderSetup(
+/** Donor harnesses cannot satisfy model access in this application. */
+export function isOnboardingModelAccessReady(
   providers: ReadonlyArray<ServerProvider> | null | undefined,
-) {
-  const enabled =
-    providers?.filter((provider) => provider.enabled && provider.status !== "disabled") ?? [];
-  const meerkatProviders = enabled.filter((provider) => provider.driver === "meerkat");
-  return {
-    meerkatProviders,
-    showCliProviders:
-      meerkatProviders.length === 0 || enabled.some((provider) => provider.driver !== "meerkat"),
-  };
-}
-
-export function getMeerkatOnboardingPresentation(provider: ServerProvider) {
-  const state = getOnboardingProviderState(provider);
-  if (provider.availability === "unavailable" || state === "install") {
-    return {
-      ready: false,
-      label: "Runtime unavailable",
-      detail:
-        provider.message ??
-        "The bundled Meerkat runtime could not start. Retry the check or open Providers to fix this instance, then return to setup.",
-    };
-  }
-  if (state === "ready") {
-    return {
-      ready: true,
-      label: provider.auth.status === "authenticated" ? "Credentials detected" : "Runtime ready",
-      detail: "Continue to choose a project. Your first task will confirm model access.",
-    };
-  }
-  if (state === "signIn") {
-    return {
-      ready: false,
-      label: "Needs credentials",
-      detail: "Add an API key for your model provider to start working.",
-    };
-  }
-  return {
-    ready: false,
-    label: state === "disabled" ? "Disabled" : "Needs attention",
-    detail:
-      provider.message ??
-      "Retry the check or open Providers to fix this instance, then return to setup.",
-  };
-}
-
-const PROVIDER_STATE_PRIORITY = {
-  checking: 0,
-  disabled: 1,
-  install: 2,
-  attention: 3,
-  signIn: 4,
-  ready: 5,
-} as const;
-
-/** Select the most usable configured instance for each provider driver. */
-export function selectOnboardingProvidersByDriver(
-  providers: ReadonlyArray<ServerProvider> | null | undefined,
-) {
-  const providersByDriver = new Map<string, ServerProvider>();
-
-  for (const provider of providers ?? []) {
-    const existing = providersByDriver.get(provider.driver);
-    if (
-      existing === undefined ||
-      PROVIDER_STATE_PRIORITY[getOnboardingProviderState(provider)] >
-        PROVIDER_STATE_PRIORITY[getOnboardingProviderState(existing)]
-    ) {
-      providersByDriver.set(provider.driver, provider);
-    }
-  }
-
-  return providersByDriver;
-}
-
-/**
- * Official standalone installers. Neither needs Node or npm, and both land in
- * the paths the server's provider maintenance recognizes as native, so the
- * one-click updater in Settings keeps working after install.
- */
-const NATIVE_INSTALL_COMMANDS = {
-  claudeAgent: {
-    windows: "irm https://claude.ai/install.ps1 | iex",
-    posix: "curl -fsSL https://claude.ai/install.sh | bash",
-  },
-  codex: {
-    windows: "irm https://chatgpt.com/codex/install.ps1 | iex",
-    posix: "curl -fsSL https://chatgpt.com/codex/install.sh | sh",
-  },
-} as const;
-
-/**
- * Install command for the setup terminal, keyed on the environment's platform
- * (not the client's): a Windows desktop driving a WSL server gets the shell
- * script. Unknown platforms get the shell script too, since the terminal there
- * is a POSIX shell in practice.
- */
-export function resolveOnboardingProviderInstallCommand(
-  driver: keyof typeof NATIVE_INSTALL_COMMANDS,
-  platform: ExecutionEnvironmentPlatformOs,
-): string {
-  const commands = NATIVE_INSTALL_COMMANDS[driver];
-  return platform === "windows" ? commands.windows : commands.posix;
-}
-
-/** Use the selected provider instance's binary when the setup terminal opens its login flow. */
-export function resolveOnboardingProviderLoginCommand(
-  provider: ServerProvider,
-  settings: ServerSettings,
-  platform: ExecutionEnvironmentPlatformOs,
-): string {
-  const instance = settings.providerInstances[provider.instanceId];
-
-  if (provider.driver === "claudeAgent") {
-    const config = decodeClaudeSettings(
-      instance ? (instance.config ?? {}) : settings.providers.claudeAgent,
-    );
-    const binaryPath = Option.isSome(config) ? config.value.binaryPath : "claude";
-    return `${quoteProviderBinary(binaryPath, "claude", platform)} auth login`;
-  }
-
-  if (provider.driver === "codex") {
-    const config = decodeCodexSettings(
-      instance ? (instance.config ?? {}) : settings.providers.codex,
-    );
-    const binaryPath = Option.isSome(config) ? config.value.binaryPath : "codex";
-    return `${quoteProviderBinary(binaryPath, "codex", platform)} login`;
-  }
-
-  return provider.driver;
+): boolean {
+  return (
+    providers?.some(
+      (provider) =>
+        provider.driver === "meerkat" &&
+        getOnboardingProviderState(provider) === "ready" &&
+        provider.models.some((model) => model.credentialState === "connected"),
+    ) ?? false
+  );
 }

@@ -72,6 +72,8 @@ export const ServerProviderModel = Schema.Struct({
   name: TrimmedNonEmptyString,
   shortName: Schema.optional(TrimmedNonEmptyString),
   subProvider: Schema.optional(TrimmedNonEmptyString),
+  accountLabel: Schema.optional(TrimmedNonEmptyString),
+  catalogTier: Schema.optional(Schema.Literals(["recommended", "supported", "custom"])),
   credentialState: Schema.optional(
     Schema.Literals(["connected", "needs_auth", "reauth_required", "host_managed", "unknown"]),
   ),

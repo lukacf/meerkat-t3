@@ -11,9 +11,15 @@ vi.mock("../ui/toast", () => ({
 }));
 
 vi.mock("@tanstack/react-router", () => ({
-  Link: ({ to, search, children }: { to: string; search: { topic: string }; children: ReactNode }) => (
-    <a href={`${to}?topic=${search.topic}`}>{children}</a>
-  ),
+  Link: ({
+    to,
+    search,
+    children,
+  }: {
+    to: string;
+    search: { topic: string };
+    children: ReactNode;
+  }) => <a href={`${to}?topic=${search.topic}`}>{children}</a>,
 }));
 
 import { SidebarUpdateReleaseNotes } from "./SidebarUpdateReleaseNotes";
@@ -85,11 +91,13 @@ describe("SidebarUpdateReleaseNotes", () => {
 
   it("links to bundled update guidance when no release repository is configured", () => {
     vi.stubEnv("VITE_MEERKAT_RELEASE_REPOSITORY", "");
-    const anchors = collectAnchors(renderNotes({
-      ...baseState,
-      releaseNotes: [{ version: "0.0.36-nightly.3", items: ["Change 3"], totalItems: 2 }],
-      omittedReleaseCount: 1,
-    }));
+    const anchors = collectAnchors(
+      renderNotes({
+        ...baseState,
+        releaseNotes: [{ version: "0.0.36-nightly.3", items: ["Change 3"], totalItems: 2 }],
+        omittedReleaseCount: 1,
+      }),
+    );
     expect(anchors.map(({ props }) => props.href)).toEqual(["/help?topic=updates"]);
     expect(textContent(anchors[0]?.props.children)).toBe("How to update this prototype");
   });

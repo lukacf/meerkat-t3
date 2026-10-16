@@ -13,6 +13,8 @@ import { isLocalEnvironmentDisabled } from "../../localEnvironment";
 import { useCompleteOnboarding } from "../../onboarding/firstRun";
 import {
   isFirstRunWorkspaceProvenanceAuthoritative,
+  isWorkspaceOnboardingStep,
+  onboardingResumeTarget,
   isFreshFirstRunWorkspace,
   resolveFirstRunDecision,
   resolveHostedFirstRunDecision,
@@ -86,7 +88,9 @@ export function FirstRunGate({
   const completeOnboarding = useCompleteOnboarding();
   const onboardingProgress = useClientSettings((settings) => settings.onboardingProgress);
   const providerRecovery =
-    hydrated && onboardingProgress !== null && pathname === "/settings/providers";
+    hydrated &&
+    onboardingProgress !== null &&
+    (pathname === "/settings/providers" || pathname === "/help");
   const resumed = useRef(false);
   const onboardingCompletedAt = useClientSettings((settings) => settings.onboardingCompletedAt);
   const bootstrapped = useAllEnvironmentShellsBootstrapped();
@@ -109,7 +113,7 @@ export function FirstRunGate({
   const { stalled } = gateState;
   const decision =
     hydrated && onboardingProgress
-      ? onboardingProgress.step === "first-task"
+      ? isWorkspaceOnboardingStep(onboardingProgress.step)
         ? "app"
         : "wizard"
       : gateState.decision;
@@ -206,8 +210,8 @@ export function FirstRunGate({
       resumed.current ||
       providerRecovery ||
       !hydrated ||
-      onboardingProgress?.step !== "first-task" ||
-      !onboardingProgress.projectRef ||
+      !isWorkspaceOnboardingStep(onboardingProgress?.step) ||
+      !onboardingProgress?.projectRef ||
       !environmentCatalogReady ||
       !bootstrapped
     )
@@ -221,25 +225,8 @@ export function FirstRunGate({
     )
       return;
     resumed.current = true;
-    if (
-      onboardingProgress.threadId &&
-      threads.some(
-        (thread) =>
-          thread.environmentId === environmentId && thread.id === onboardingProgress.threadId,
-      )
-    ) {
-      void navigate({
-        to: "/$environmentId/$threadId",
-        params: { environmentId, threadId: onboardingProgress.threadId },
-        replace: true,
-      });
-    } else {
-      void navigate({
-        to: "/$environmentId/projects/$projectId/start",
-        params: { environmentId, projectId },
-        replace: true,
-      });
-    }
+    const target = onboardingResumeTarget(onboardingProgress, threads);
+    if (target) void navigate(target);
   }, [
     bootstrapped,
     environmentCatalogReady,
@@ -261,9 +248,9 @@ export function FirstRunGate({
     (environment) => environment.environmentId === onboardingProgress?.projectRef?.environmentId,
   );
   const missingSetupProject =
-    onboardingProgress?.step === "first-task" &&
+    isWorkspaceOnboardingStep(onboardingProgress?.step) &&
     environmentCatalogReady &&
-    onboardingProgress.projectRef &&
+    onboardingProgress?.projectRef &&
     (setupEnvironment?.connection.phase !== "connected" ||
       (bootstrapped &&
         !projects.some(
@@ -281,7 +268,7 @@ export function FirstRunGate({
         >
           <p className="text-sm font-medium">Setup is saved</p>
           <p className="text-xs text-muted-foreground">
-            Return to setup after fixing your provider.
+            Your progress is saved. Return to setup when you are ready.
           </p>
           <Button size="sm" onClick={() => void navigate({ to: "/welcome" })}>
             Back to setup
@@ -295,7 +282,7 @@ export function FirstRunGate({
         >
           <p className="text-sm font-medium">Your setup project is unavailable</p>
           <p className="text-xs text-muted-foreground">
-            Reconnect its computer or choose another project to finish your first task.
+            Reconnect its computer or choose another project to continue setup.
           </p>
           <div className="flex gap-2">
             <Button size="sm" onClick={() => void navigate({ to: "/welcome" })}>

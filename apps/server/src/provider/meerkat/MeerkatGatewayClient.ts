@@ -162,7 +162,9 @@ export function createMeerkatGatewayClient(
   let shutdownError: Error | undefined;
   let spawnFailedWithoutChild = false;
   let cleanupConfirmed = false;
-  let nativeShutdown: { cleanupCompleted: boolean; trigger: ReturnType<typeof shutdownTrigger> } | undefined;
+  let nativeShutdown:
+    | { cleanupCompleted: boolean; trigger: ReturnType<typeof shutdownTrigger> }
+    | undefined;
   let closeResolved = false;
   let resolveClose: () => void = () => {};
   const closed = new Promise<void>((resolve) => {
@@ -192,7 +194,9 @@ export function createMeerkatGatewayClient(
     // Keep the first failure for every later close caller.
     if (error.kind !== "closed") shutdownError ??= error;
     for (const [id] of pending) {
-      finishPending(id)?.reject(new MeerkatGatewayTransportError(error.kind, error.message, true, error.details));
+      finishPending(id)?.reject(
+        new MeerkatGatewayTransportError(error.kind, error.message, true, error.details),
+      );
     }
     for (const listener of closeListeners) listener(error);
     closeListeners.clear();

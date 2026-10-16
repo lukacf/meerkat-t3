@@ -6,7 +6,6 @@ import { Textarea } from "../ui/textarea";
 import { ProjectAgentModelFields } from "./ProjectAgentModelFields";
 import { ProjectAgentPermissions } from "./ProjectAgentPermissions";
 import {
-  PROJECT_AGENT_PRESETS,
   customProjectAgentRole,
   projectAgentPreferredOptions,
   projectAgentReasoningControl,
@@ -151,10 +150,11 @@ export function ProjectAgentSetup({
         <div>
           <div className="mb-2 flex items-center gap-2">
             <BotIcon className="size-5 text-muted-foreground" />
-            <h2 className="text-lg font-semibold">Add a project agent</h2>
+            <h2 className="text-lg font-semibold">Add a project specialist</h2>
           </div>
           <p className="mt-2 text-sm text-muted-foreground">
-            Give a specialist its own conversation and a lasting role in your project.
+            Assign a part of this project to a long-lived specialist. Its responsibilities and
+            conversation stay with it across tasks.
           </p>
         </div>
         {!scopeReady && (
@@ -193,50 +193,11 @@ export function ProjectAgentSetup({
             </Button>
           </div>
         )}
-        <div className="space-y-2">
-          <span className="text-xs font-medium text-muted-foreground">Start with a role</span>
-          <div className="flex flex-wrap gap-2">
-            {PROJECT_AGENT_PRESETS.map((preset) => (
-              <Button
-                key={preset.label}
-                type="button"
-                size="sm"
-                variant={role === preset.role ? "secondary" : "outline"}
-                disabled={locked}
-                onClick={() => {
-                  updateDraft({
-                    custom: false,
-                    label: preset.label,
-                    role: preset.role,
-                    instructions: preset.instructions,
-                  });
-                }}
-              >
-                {preset.label}
-              </Button>
-            ))}
-            <Button
-              type="button"
-              size="sm"
-              variant={
-                !PROJECT_AGENT_PRESETS.some((preset) => preset.role === role)
-                  ? "secondary"
-                  : "outline"
-              }
-              disabled={locked}
-              onClick={() => {
-                updateDraft({ custom: true, label: "", role: "", instructions: "" });
-              }}
-            >
-              Custom agent
-            </Button>
-          </div>
-        </div>
         <label className="block space-y-2 text-sm">
-          <span>Name</span>
+          <span>Specialist name</span>
           <Input
             value={label}
-            placeholder="e.g. Design reviewer"
+            placeholder="e.g. Search and indexing"
             autoFocus
             maxLength={120}
             disabled={locked}
@@ -250,10 +211,10 @@ export function ProjectAgentSetup({
           />
         </label>
         <label className="block space-y-2 text-sm">
-          <span>Instructions</span>
+          <span>Assignment</span>
           <Textarea
             value={instructions}
-            placeholder="What should this agent own, and how should it work?"
+            placeholder="What should this specialist own in the project?"
             rows={6}
             maxLength={32000}
             disabled={locked}
@@ -261,7 +222,8 @@ export function ProjectAgentSetup({
             required
           />
           <span className="block text-xs text-muted-foreground">
-            Include its responsibilities, useful files, and any constraints.
+            Describe its responsibilities, relevant files, and how it should work with other
+            specialists.
           </span>
         </label>
         <ProjectAgentModelFields
@@ -342,7 +304,7 @@ export function ProjectAgentSetup({
             }
           >
             <PlusIcon />
-            {pending ? "Creating agent..." : "Create agent"}
+            {pending ? "Creating specialist..." : "Create specialist"}
           </Button>
         </div>
       </form>

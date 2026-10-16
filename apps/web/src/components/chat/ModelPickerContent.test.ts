@@ -8,7 +8,6 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { deriveProviderInstanceEntries } from "../../providerInstances";
 import {
-  adjacentModelPickerProvider,
   resolveModelPickerSelectedModel,
   shouldIncludeModelPickerOption,
   shouldOfferModelPickerSetup,
@@ -33,6 +32,25 @@ function entry(status: ServerProvider["status"], driver = "opencode") {
 }
 
 describe("shouldIncludeModelPickerOption", () => {
+  it("keeps the native catalog visible before connecting an account", () => {
+    const providerEntry = entry("warning", "meerkat");
+    expect(
+      shouldIncludeModelPickerOption({
+        entry: providerEntry,
+        option: { slug: "anthropic:example", name: "Example", credentialState: "needs_auth" },
+        activeInstanceId: providerEntry.instanceId,
+        activeModel: "anthropic:example",
+      }),
+    ).toBe(true);
+    expect(
+      shouldIncludeModelPickerOption({
+        entry: { ...providerEntry, isAvailable: false },
+        option: { slug: "anthropic:example", name: "Example", credentialState: "connected" },
+        activeInstanceId: providerEntry.instanceId,
+        activeModel: "anthropic:example",
+      }),
+    ).toBe(false);
+  });
   it.each(["ready", "error"] as const)(
     "never offers the internal Antigravity default marker as a model when %s",
     (status) => {
@@ -226,76 +244,5 @@ describe("shouldOfferModelPickerSetup", () => {
         [],
       ),
     ).toBe(true);
-  });
-});
-
-describe("adjacentModelPickerProvider", () => {
-  const codex = entry("ready", "codex");
-  const claude = entry("ready", "claudeAgent");
-  const unavailable = entry("error");
-  const input = {
-    entries: [codex, unavailable, claude],
-    disabledInstanceIds: undefined,
-    selectableUnavailableInstanceIds: undefined,
-  };
-
-  it("wraps through favorites and ready instances, skipping unavailable providers", () => {
-    expect(
-      adjacentModelPickerProvider({ ...input, selectedInstanceId: codex.instanceId, direction: 1 }),
-    ).toBe(claude.instanceId);
-    expect(
-      adjacentModelPickerProvider({ ...input, selectedInstanceId: "favorites", direction: -1 }),
-    ).toBe(claude.instanceId);
-    expect(
-      adjacentModelPickerProvider({
-        ...input,
-        selectedInstanceId: claude.instanceId,
-        direction: 1,
-      }),
-    ).toBe("favorites");
-  });
-
-  it("keeps thread locks and the selected unavailable catalog", () => {
-    expect(
-      adjacentModelPickerProvider({
-        ...input,
-        disabledInstanceIds: new Set([claude.instanceId]),
-        selectedInstanceId: codex.instanceId,
-        direction: 1,
-      }),
-    ).toBe("favorites");
-    expect(
-      adjacentModelPickerProvider({
-        ...input,
-        selectableUnavailableInstanceIds: new Set([unavailable.instanceId]),
-        selectedInstanceId: codex.instanceId,
-        direction: 1,
-      }),
-    ).toBe(unavailable.instanceId);
-  });
-
-  it("handles an empty catalog and a removed selection in either direction", () => {
-    expect(
-      adjacentModelPickerProvider({
-        ...input,
-        entries: [],
-        selectedInstanceId: codex.instanceId,
-        direction: -1,
-      }),
-    ).toBe("favorites");
-    expect(
-      adjacentModelPickerProvider({
-        ...input,
-        selectedInstanceId: unavailable.instanceId,
-        direction: 1,
-      }),
-    ).toBe("favorites");
-    expect(
-      adjacentModelPickerProvider({
-        ...input,
-        selectedInstanceId: unavailable.instanceId,
-        direction: -1,
-      }),
-    ).toBe(claude.instanceId);
   });
 });

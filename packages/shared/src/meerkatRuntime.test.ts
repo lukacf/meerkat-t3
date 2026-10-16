@@ -87,6 +87,14 @@ describe("Meerkat runtime bundle", () => {
     const old = capabilities();
     old.methods = old.methods.filter((method) => method !== "mobs.v1.domainRevise");
     expect(() => validateMeerkatHealth(health(), old)).toThrow("mobs.v1.domainRevise");
+    const oldAuth = capabilities();
+    oldAuth.methods = oldAuth.methods.filter((method) => !method.startsWith("auth.v1.device"));
+    expect(() => validateMeerkatHealth(health(), oldAuth)).toThrow("auth.v1.deviceStart");
+    const passiveAuthOnly = capabilities();
+    passiveAuthOnly.methods = passiveAuthOnly.methods.filter(
+      (method) => method !== "auth.v1.check",
+    );
+    expect(() => validateMeerkatHealth(health(), passiveAuthOnly)).toThrow("auth.v1.check");
     expect(() =>
       assertMeerkatBundleBuild(identity(), {
         format: 1,

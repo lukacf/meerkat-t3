@@ -309,15 +309,19 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
   });
 
   it("switches desktop packaging product names to nightly for nightly builds", () => {
-    assert.equal(resolveDesktopProductName("0.0.17"), "Meerkat T3 (Prototype)");
-    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "Meerkat T3 (Nightly)");
+    assert.equal(resolveDesktopProductName("0.0.17"), "MeerkaT3");
+    assert.equal(resolveDesktopProductName("0.0.17-nightly.20260413.42"), "MeerkaT3 (Nightly)");
+    assert.equal(
+      resolveDesktopProductName("0.0.17-nightly.20260413.42", "internal-validation"),
+      "MeerkaT3 (Internal Validation)",
+    );
   });
 
   it("stages Meerkat package identity without inventing a homepage or inheriting the donor", () => {
     assert.deepStrictEqual(resolveDesktopPackageIdentity(), {
       name: "meerkat-t3",
-      description: "Meerkat T3 desktop development environment",
-      author: "Meerkat T3 contributors",
+      description: "MeerkaT3 desktop development environment",
+      author: "MeerkaT3 contributors",
     });
     assert.notProperty(resolveDesktopPackageIdentity("pingdotgg/t3code"), "homepage");
     assert.equal(
@@ -512,7 +516,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           false,
           "arm64",
         );
-        assert.equal(internal.productName, "Meerkat T3 (Internal Validation)");
+        assert.equal(internal.productName, "MeerkaT3 (Internal Validation)");
         assert.equal(
           internal.artifactName,
           "Meerkat-T3-INTERNAL-VALIDATION-${version}-${arch}.${ext}",
@@ -536,7 +540,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         if (platform === "mac") {
           assert.equal(
             (internal.dmg as Record<string, unknown>).title,
-            "Meerkat T3 (Internal Validation) 0.0.96 Installer",
+            "MeerkaT3 (Internal Validation) 0.0.96 Installer",
           );
         }
       }
@@ -571,7 +575,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           url: "http://localhost:45678",
         },
       ]);
-      assert.equal(internal.productName, "Meerkat T3 (Internal Validation)");
+      assert.equal(internal.productName, "MeerkaT3 (Internal Validation)");
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(
@@ -966,7 +970,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         "**/*.map",
       ]);
       assert.deepStrictEqual(mac.dmg, {
-        title: "Meerkat T3 (Prototype) 1.2.3 Installer",
+        title: "MeerkaT3 1.2.3 Installer",
         background: "dmg/dmg-background-latest.png",
         window: { width: 640, height: 432 },
         contents: [
@@ -982,7 +986,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       // Linux must register the renderer schemes so the generated .desktop
       // entry advertises MimeType=x-scheme-handler/t3code; for OAuth deep links.
       assert.deepStrictEqual((linux.linux as Record<string, unknown>).protocols, [
-        { name: "Meerkat T3", schemes: ["meerkat-t3", "meerkat-t3-dev"] },
+        { name: "MeerkaT3", schemes: ["meerkat-t3", "meerkat-t3-dev"] },
       ]);
       assert.deepStrictEqual(mac.files, [...DESKTOP_FILE_EXCLUSIONS, ...MAC_FILE_EXCLUSIONS]);
       assert.deepStrictEqual(linux.files, [...DESKTOP_FILE_EXCLUSIONS, ...LINUX_FILE_EXCLUSIONS]);
@@ -1999,7 +2003,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         const text = yield* fs.readFileString(guidePath);
         assert.strictEqual(text, renderMacInstallGuide(source));
         assert.include(text, "https://support.apple.com/en-us/102445");
-        assert.include(text, "Your first task (in-app Help)");
+        assert.include(text, "Start with your project (in-app Help)");
         assert.include(text, "Recovery and troubleshooting (in-app Help)");
         assert.notInclude(text, "](getting-started.md)");
         assert.notInclude(text, "**");
@@ -2040,7 +2044,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         const dmgContents = (config.dmg as { contents: ReadonlyArray<{ path?: string }> }).contents;
         assert.strictEqual(yield* fs.readFileString(dmgContents[1]!.path!), text);
         const appOutDir = path.join(stageAppDir, "dist/mac-arm64");
-        const packagedApp = path.join(appOutDir, "Meerkat T3 (Prototype).app");
+        const packagedApp = path.join(appOutDir, "MeerkaT3.app");
         yield* fs.makeDirectory(packagedApp, { recursive: true });
         yield* fs.writeFileString(path.join(packagedApp, "fixture.txt"), "unchanged app fixture");
         yield* fs.writeFileString(path.join(stageAppDir, "unrelated.txt"), "must not ship");
@@ -2058,7 +2062,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         );
         assert.deepStrictEqual((yield* fs.readDirectory(appOutDir)).sort(), [
           MAC_INSTALL_GUIDE_NAME,
-          "Meerkat T3 (Prototype).app",
+          "MeerkaT3.app",
         ]);
         assert.strictEqual(
           yield* fs.readFileString(path.join(appOutDir, MAC_INSTALL_GUIDE_NAME)),
@@ -2391,7 +2395,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       assert.equal(mac.type, "distribution");
       assert.notProperty(mac, "sign");
       assert.deepStrictEqual(mac.protocols, [
-        { name: "Meerkat T3", schemes: ["meerkat-t3", "meerkat-t3-dev"] },
+        { name: "MeerkaT3", schemes: ["meerkat-t3", "meerkat-t3-dev"] },
       ]);
     }).pipe(Effect.provide(ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })))),
   );
@@ -2447,7 +2451,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           pattern.test("/app/Contents/Frameworks/Electron Framework.framework/Electron Framework"),
         ),
       );
-      assert.isFalse(ignored.some((pattern) => pattern.test("/app/Contents/MacOS/Meerkat T3")));
+      assert.isFalse(ignored.some((pattern) => pattern.test("/app/Contents/MacOS/MeerkaT3")));
       assert.notProperty(mac, "sign");
       assert.notProperty(mac, "type");
       assert.notProperty(mac, "entitlements");

@@ -12,6 +12,7 @@ const {
   registerSchemesMock,
   setDesktopNameMock,
   mkdirSyncMock,
+  readFileSyncMock,
   writeFileSyncMock,
   setPathMock,
 } = vi.hoisted(() => ({
@@ -21,6 +22,7 @@ const {
   registerSchemesMock: vi.fn(),
   setDesktopNameMock: vi.fn(),
   mkdirSyncMock: vi.fn(),
+  readFileSyncMock: vi.fn(),
   writeFileSyncMock: vi.fn(),
   setPathMock: vi.fn(),
 }));
@@ -30,6 +32,8 @@ vi.mock("electron", () => ({
     setPath: setPathMock,
     setDesktopName: setDesktopNameMock,
     getVersion: () => "0.0.37",
+    isPackaged: true,
+    getAppPath: () => "/packaged/app.asar",
     commandLine: {
       appendSwitch: appendSwitchMock,
       getSwitchValue: getSwitchValueMock,
@@ -42,7 +46,7 @@ vi.mock("electron", () => ({
 }));
 
 vi.mock("node:fs", () => ({
-  readFileSync: () => "{}",
+  readFileSync: readFileSyncMock,
   mkdirSync: mkdirSyncMock,
   writeFileSync: writeFileSyncMock,
 }));
@@ -58,6 +62,7 @@ describe("DesktopPreReadyPlatform", () => {
     registerSchemesMock.mockReset();
     setDesktopNameMock.mockReset();
     mkdirSyncMock.mockReset();
+    readFileSyncMock.mockReset().mockReturnValue("{}");
     writeFileSyncMock.mockReset();
     setPathMock.mockReset();
   });
@@ -78,7 +83,9 @@ describe("DesktopPreReadyPlatform", () => {
         );
 
         assert.equal(options.userDataPath, "/tmp/isolated-profile");
-        assert.deepEqual(mkdirSyncMock.mock.calls, [["/tmp/isolated-profile", { recursive: true }]]);
+        assert.deepEqual(mkdirSyncMock.mock.calls, [
+          ["/tmp/isolated-profile", { recursive: true }],
+        ]);
         assert.deepEqual(appendSwitchMock.mock.calls, [["user-data-dir", "/tmp/isolated-profile"]]);
         assert.deepEqual(setPathMock.mock.calls, [["userData", "/tmp/isolated-profile"]]);
         assert.deepEqual(yield* Effect.promise(() => nextTurn), [
@@ -153,13 +160,35 @@ describe("DesktopPreReadyPlatform", () => {
             const identity = yield* Effect.promise(() => portalIdentity);
             assert.equal(identity.desktopName, "ai.rkat.MeerkatT3.desktop");
             assert.include(identity.desktopEntry ?? "", 'Exec="/Applications/current.AppImage" %U');
-            assert.include(identity.desktopEntry ?? "", "Name=Meerkat T3 (Prototype)");
+            assert.include(identity.desktopEntry ?? "", "Name=MeerkaT3");
             assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/meerkat-t3;");
           }),
         ).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())));
       },
     );
   }
+
+  it.effect("keeps validation purpose in the early Linux desktop entry", () => {
+    readFileSyncMock.mockImplementation((path: string) =>
+      path === "/packaged/app.asar/package.json"
+        ? JSON.stringify({ meerkatArtifactPurpose: "internal-validation" })
+        : "{}",
+    );
+    return DesktopPreReadyPlatform.make.pipe(
+      Effect.provideService(HostProcessPlatform, "linux"),
+      Effect.provide(DesktopConfig.layerTest({})),
+      Effect.tap(() =>
+        Effect.sync(() => {
+          assert.isTrue(
+            writeFileSyncMock.mock.calls.some(([, contents]) =>
+              String(contents).includes("Name=MeerkaT3 (Internal Validation)"),
+            ),
+          );
+          assert.deepEqual(setDesktopNameMock.mock.calls, [["ai.rkat.MeerkatT3.desktop"]]);
+        }),
+      ),
+    );
+  });
 
   it.effect("keeps startup available when the early desktop entry cannot be written", () => {
     getSwitchValueMock.mockReturnValue("");

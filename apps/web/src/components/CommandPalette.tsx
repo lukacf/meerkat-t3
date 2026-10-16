@@ -2089,7 +2089,7 @@ function OpenCommandPaletteDialog(props: {
     kind: "action",
     value: "action:onboarding",
     searchTerms: ["setup", "onboarding", "welcome", "resume", "first task", "meerkat"],
-    title: "Set up Meerkat",
+    title: "Set up your workspace",
     icon: <SettingsIcon className={ITEM_ICON_CLASS} />,
     run: async () => {
       await navigate({ to: "/welcome" });

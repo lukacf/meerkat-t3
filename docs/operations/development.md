@@ -1,201 +1,133 @@
 # Development
 
+The supported contributor path is an Apple Silicon Mac with the local Electron,
+web, and server stack. This repository includes the Rust gateway source; a separate
+Meerkat App checkout is not required. The native dependency set is locked to Meerkat
+and Meta 0.9.1 in `core/Cargo.lock`.
+
 ## First checkout
 
-Install `vp` using the [root README](../../README.md#install-vp). The checkout requires Node 24;
-Bun is optional. From the repository root:
+Install Git, Xcode Command Line Tools (`xcode-select --install`), Rust 1.97.0 through
+[rustup](https://rustup.rs/), Node 24 matching `package.json`, and pnpm 11.10.0.
+Use the package-manager version declared in `package.json` rather than regenerating
+the lock with another version. Vite+ is installed as a repository dependency.
 
 ```sh
-vp i
-vp run dev
+git clone https://github.com/lukacf/meerkat-t3.git
+cd meerkat-t3
+pnpm install --frozen-lockfile
+pnpm native:build
+pnpm dev:desktop
 ```
 
-Open the pairing URL printed by the dev runner. The bare origin does not authenticate
-a new browser.
+`native:build` builds the locked in-repository gateway and stages a runtime bundle
+only after its binary identity, capabilities, target, helper handshake, and cleanup
+have been verified. Run it again after changing native source or its lockfile.
+Generated binaries and runtime manifests are not committed.
 
-Prefer a container? See [Dev container](../internals/devcontainer.md) for VS Code and Codespaces setup.
+On first launch, add a model account in Settings before starting agent work. An
+account is needed for live model requests, not for compiling the app or running the
+loopback integration tests below. Never copy credentials into a test fixture.
 
-## Choosing a dev process
+For the local browser client, use `pnpm dev`. Open the complete pairing URL printed
+by the dev runner; the bare origin does not authenticate a new browser.
 
-Use `vp run dev` for server and web, or `vp run dev:desktop` for the Electron client.
-`dev:server` and `dev:web` start those processes separately.
-See the [mobile README](../../apps/mobile/README.md) for native builds and Metro.
+## Development state and processes
 
-Flags go directly after the task name, for example `vp run dev --home-dir /tmp/t3code-dev`.
-Add `--browser` to open a browser automatically.
-
-### State and ports
-
-Linked worktrees default to their own `.t3/userdata`, even when `T3CODE_HOME` is set.
-The main checkout defaults to `~/.t3/dev/userdata`. An explicit `--home-dir` wins in both cases.
-Never run a development server against the live `~/.t3/userdata`.
-See [test data](../../AGENTS.md#test-data) for copying a consistent database snapshot.
-
-Read ports from the `[dev-runner]` output. Worktrees derive stable preferences from their paths,
-but occupied ports can shift them. `T3CODE_PORT_OFFSET` or `T3CODE_DEV_INSTANCE` can select a
-different preference when needed.
-
-### Sharing and remote debugging
-
-`vp run dev --share` publishes the web port over the machine's tailnet and prints a pairing URL
-for that origin. Give the tester the complete URL, including its token. The dev runner removes
-its mapping on exit.
-
-Leave `VITE_HTTP_URL` and `VITE_WS_URL` unset. Vite proxies the backend through the browser's
-origin so the same build works over localhost and remote connections.
-
-Shared runs enable bundled dev to avoid a network round trip for each import level.
-`T3CODE_BUNDLED_DEV=0` opts out when debugging bundler differences. Two reload traps matter
-when changing this setup:
-
-- The web entry must dynamically import the app so React refresh initializes before application
-  chunks. Static imports can work on first load and fail after a route split.
-- Bundled dev rebuilds Tailwind through watched files. Its ordinary Vite hot-update hook expects
-  a server/module graph that Rolldown does not provide.
-
-The workarounds live in the [web entry](../../apps/web/src/bootstrap.ts) and
-[Tailwind plugin](../../apps/web/vite/tailwind.ts).
-
-#### Reusable dev credential
-
-Use this only on a hostname where you trust every service. Browsers send cookies to all ports
-on that hostname. Any service you visit there can receive the reusable admin credential,
-including services unrelated to T3 Code. If you run untrusted services on that hostname, keep
-normal per-environment pairing instead.
-
-To use one browser profile across web dev worktrees on the same hostname, generate one fixed
-value once:
+The main checkout defaults to `~/.meerkat-t3/dev`. A linked worktree defaults to its
+own `.t3/userdata`, even when `T3CODE_HOME` is set. Choose a completely separate
+profile explicitly when testing recovery or an existing installation:
 
 ```sh
-openssl rand -hex 32
+pnpm dev --home-dir /tmp/meerkat-t3-dev
 ```
 
-Put that value in the main checkout's gitignored `.env`:
+Never point development at an installed user's profile. Prefer synthetic projects
+and fixture data. A real profile includes private conversations and may refer to
+credential stores outside that directory.
 
-```dotenv
-T3CODE_DEV_AUTH_TOKEN=<the value generated above>
-```
+Read ports from the `[dev-runner]` output; occupied ports can shift the preference.
+Stop only the process you started and whose PID you retained. Closing the last
+Electron window on macOS is not the same as quitting the app.
 
-The `t3.json` Setup Worktree action links that file to each worktree's `.env`. The dev runner reads repository env files at startup. `.env.local` and inherited process
-environment values override `.env`, so no per-worktree export is needed after setup.
+`pnpm dev:server` and `pnpm dev:web` run the two services separately. Keep
+`VITE_HTTP_URL` and `VITE_WS_URL` unset: Vite proxies backend requests through the
+browser's origin. Hardcoding localhost breaks authentication and remote clients.
 
-For a manual worktree or launcher without that link, export the same fixed value instead:
+### Sharing a development instance
+
+`pnpm dev --share` publishes the web port on the machine's tailnet and prints an
+administrative pairing link. Give that complete link only to the intended tester.
+The dev runner removes its mapping on exit. Sharing is not enabled for the desktop
+dev command; use the browser stack for this test.
+
+A fixed `T3CODE_DEV_AUTH_TOKEN` in a gitignored `.env` can reuse a development browser
+credential across worktrees on one trusted hostname. It is an administrative secret,
+not a public config value. Cookies reach services on other ports of that hostname;
+use ordinary per-environment pairing if any of those services are untrusted. See
+[environment authentication](../internals/environment-auth.md#reusable-dev-credential).
+
+## Focused checks
+
+Run checks from the package that owns the changed code. Before invoking desktop
+Vitest directly, run `pnpm --filter @t3tools/desktop ensure:electron` once. The
+package's normal `test` command does this automatically, before parallel test
+imports can race to extract Electron:
 
 ```sh
-export T3CODE_DEV_AUTH_TOKEN="<the value generated above>"
+pnpm --dir apps/server exec vp test run src/cli/triagePrompt.test.ts
+pnpm --filter t3 typecheck
+pnpm --filter @t3tools/web typecheck
+pnpm --filter @t3tools/desktop typecheck
+pnpm exec vp lint path/to/changed-file.ts
+pnpm exec vp fmt --check path/to/changed-file.ts
 ```
 
-Do not generate a new value at startup. Start or restart `vp run dev --share` after configuration,
-then open its printed startup pairing URL once per browser profile on that hostname. Later web dev
-servers on the same hostname accept the shared cookie across ports. The cookie expires after 30
-days. Reload an old tab if its URL now serves a replacement environment.
-
-The token and startup pairing URLs are reusable administrative secrets. Never put them in a
-commit, pull request, or public output. Every server still seeds its own auth database record at
-startup and keeps its own SQLite data, signing key, and revocation state. Desktop and non-dev
-servers ignore the value. See [environment authentication](../internals/environment-auth.md#reusable-dev-credential)
-for the security model.
-
-## Checks
-
-Run checks for the files and packages you changed:
+Native tests use the repository wrapper so concurrent checkouts do not share a
+Cargo target directory:
 
 ```sh
-vp test run <files>
-vp lint <files>
-vp run --filter <package> typecheck
+scripts/repo-cargo test --locked \
+  -p meerkat-desktop-contracts -p meerkat-desktop-gateway -p meerkat-desktop-stdio \
+  -- --test-threads=2
 ```
 
-Use `vp run lint:mobile` for native mobile changes. CI owns the full suite; see
-[ci.yml](../../.github/workflows/ci.yml) for its current jobs.
-The [manual Windows lane](../../.github/workflows/windows-tests.yml) is available for focused
-Windows investigation while that suite is not a required gate.
-
-### Unused code
-
-`vp run knip:check` checks unused files and dependencies across the repo, then
-unused runtime exports in `apps/server`, `apps/desktop`, `apps/web`, and every internal package under
-`packages/`. CI enforces both checks.
-Exported types and Effect schemas are allowed without consumers. The schema preprocessor
-recognizes schema types, including aliases and schema classes; functions that create or decode
-schemas remain checked. Canonical Effect service construction APIs stay exported with an explicit
-`@public` annotation, which Knip recognizes. Completely unused files remain checked too.
-Named exports in web UI component modules are kept as complete component sets. Knip ignores
-unused exports in `apps/web/src/components/ui/*.tsx`, while still reporting an entire unused file.
-Use `vp run knip --workspace apps/web` to audit one workspace, including exports,
-or `vp run knip:production --workspace apps/web` to find code kept alive only by tests.
-The full export audit still has findings and is not a repo-wide CI gate. Extend the
-export check's workspace selectors as more workspaces become clean. Review callers before
-deleting code; production mode can also report development scripts and test fixtures.
-Runtime-discovered entrypoints and dependency exceptions belong in [knip.jsonc](../../knip.jsonc).
-
-## Desktop artifacts
-
-Local artifact builds are unsigned by default and write to `release/`:
+The wrapper prints its cache and target paths with `scripts/repo-cargo --print-env`.
+Build a debug executable for the actual Node-to-native boundary tests:
 
 ```sh
-vp run dist:desktop:dmg
-vp run dist:desktop:linux
-vp run dist:desktop:win
+scripts/repo-cargo build --locked -p meerkat-desktop-stdio
+native_target_dir="$(scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')"
+T3CODE_TEST_MEERKAT_BINARY="$native_target_dir/debug/meerkat-desktop-stdio" \
+  pnpm --dir apps/server exec vp test run \
+  src/provider/meerkat/MeerkatAuth.native.test.ts \
+  src/provider/meerkat/MeerkatGatewayClient.native.test.ts \
+  src/provider/meerkat/MeerkatGatewayClient.restart.native.test.ts
 ```
 
-DMGs default to the host architecture. Use `--arch` to choose another target and `--keep-stage`
-to retain packaging files for inspection. Run `vp run dist:desktop:artifact --help` for other
-options.
+These suites use temporary state and loopback provider fixtures. An optional
+`T3CODE_TEST_MEERKAT_PREVIOUS_BINARY` selects a specific previous executable for
+cross-version migration testing. Its absence exercises same-version restart; it
+does not qualify an upgrade from an older release.
 
-### Linux AppImage prerequisites
+Tests named `*.server.native.test.ts` and packaged-app acceptance tests require
+additional explicit built-server or app paths. Read each test's entry conditions;
+a skipped native suite is not evidence that its scenario passed. Tests must not
+inherit paid provider credentials or modify an installed user's profile.
 
-Build on Linux because the browser-secret helper links against the host's libsecret. Install
-Rust, C/C++ build tools, libsecret development headers, pkg-config, and ImageMagick.
-
-Ubuntu and Debian:
+## Build and distribution
 
 ```sh
-sudo apt-get update
-sudo apt-get install cargo rustc build-essential libsecret-1-dev pkg-config imagemagick
+pnpm build:desktop
 ```
 
-Fedora:
+This builds the supported desktop stack without launching it or publishing a
+release. It is separate from packaging an installable archive. Mac packaging also
+requires matching resource-monitor and native-license bundles; see the
+[distribution guide](meerkat-distribution.md). Do not bypass incomplete notices to
+produce a public artifact.
 
-```sh
-sudo dnf install rust cargo gcc gcc-c++ make libsecret-devel pkgconf-pkg-config ImageMagick
-```
-
-Arch Linux:
-
-```sh
-sudo pacman -S rust base-devel libsecret pkgconf imagemagick
-```
-
-The C toolchain, pkg-config, and libsecret headers are also needed for Linux desktop development.
-
-### macOS DMG prerequisites
-
-Install the Xcode Command Line Tools with `xcode-select --install` and install Rust.
-For a cross-architecture or universal build, add the requested Rust targets:
-
-```sh
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-```
-
-### Windows installer prerequisites
-
-Install Rust, Python 3, and Visual Studio Build Tools with **Desktop development with C++**.
-Include the Windows SDK and the MSVC build tools and Spectre-mitigated libraries for the target
-architecture. Add its Rust target:
-
-```powershell
-rustup target add x86_64-pc-windows-msvc
-# For an ARM64 installer:
-rustup target add aarch64-pc-windows-msvc
-```
-
-NSIS is downloaded by electron-builder. WSL support additionally needs the Linux CLI archive
-passed as `--wsl-runtime`; see the
-[release runbook](./release.md#windows-payload-topology-and-update-validation).
-
-### Signing and passkeys
-
-Add `--signed` after configuring the platform credentials in the
-[release runbook](./release.md). macOS passkeys need a signed, provisioned app; follow the
-[Connect setup](./connect-setup.md#desktop-passkeys) for local signing and renderer HMR.
+The [CI workflow](../../.github/workflows/ci.yml) runs supported workspace checks and
+native integration on GitHub-hosted runners without provider secrets. The inherited
+mobile, hosted relay, marketing, Linux, and Windows trees are not part of the preview
+release contract. Their presence does not imply a working MeerkaT3 installer.

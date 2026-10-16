@@ -3,6 +3,7 @@ import { memo } from "react";
 import { InfoIcon, XIcon } from "lucide-react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button, InlineButton } from "../ui/button";
+import { ErrorDetailsDialog } from "./ErrorDetailsDialog";
 import { formatProviderDriverKindLabel } from "../../providerModels";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 
@@ -54,10 +55,22 @@ export function hasProviderSetup(status: ServerProvider): boolean {
   );
 }
 
-/** Keep the environment's error intact in both the banner and model picker. */
+/** Model access summaries also appear in the model picker. */
 export function getProviderStatusMessage(status: ServerProvider): string {
+  const providerName =
+    status.driver === "meerkat"
+      ? "Model access"
+      : status.displayName?.trim() || formatProviderDriverKindLabel(status.driver);
+  if (status.driver === "meerkat") {
+    if (!status.installed || status.availability === "unavailable")
+      return "Model access is unavailable on this computer. Check Settings > Providers.";
+    if (status.auth.status === "unauthenticated")
+      return "Connect an account in Settings > Providers to use its models.";
+    return status.status === "ready"
+      ? "No models are available for the connected accounts."
+      : "Could not check model access. Open Settings > Providers to retry.";
+  }
   if (status.message) return status.message;
-  const providerName = status.displayName?.trim() || formatProviderDriverKindLabel(status.driver);
   if (!status.installed && hasProviderSetup(status)) {
     return `Open provider setup to install ${formatProviderDriverKindLabel(status.driver)} on this environment.`;
   }
@@ -89,19 +102,28 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
     return null;
   }
 
-  const providerName = status.displayName?.trim() || formatProviderDriverKindLabel(status.driver);
+  const providerName =
+    status.driver === "meerkat"
+      ? "Model access"
+      : status.displayName?.trim() || formatProviderDriverKindLabel(status.driver);
   const isUnauthenticated = status.status === "error" && status.auth.status === "unauthenticated";
   const incompatible = status.status === "ready" ? getIncompatibleVersion(status) : null;
-  const title = isUnauthenticated
-    ? `${providerName} is unauthenticated`
-    : incompatible
-      ? `${providerName} ${status.version ?? ""} is ${incompatible.status === "broken" ? "known to be broken" : "unsupported"}`
-      : `${providerName} provider status`;
+  const title =
+    status.driver === "meerkat"
+      ? status.auth.status === "unauthenticated"
+        ? "Connect an account"
+        : "Model access needs attention"
+      : isUnauthenticated
+        ? `${providerName} is unauthenticated`
+        : incompatible
+          ? `${providerName} ${status.version ?? ""} is ${incompatible.status === "broken" ? "known to be broken" : "unsupported"}`
+          : `${providerName} provider status`;
   const message = incompatible?.message ?? getProviderStatusMessage(status);
+  const details = status.driver === "meerkat" && status.message !== message ? status.message : null;
   const isWarning = status.status === "warning" || incompatible !== null;
 
   return (
-    <div className="pointer-events-auto mx-auto w-fit max-w-[calc(100%-2rem)] pt-3">
+    <div className="pointer-events-auto mx-auto w-fit max-w-[min(48rem,calc(100%-2rem))] pt-3">
       <Alert
         variant={isWarning ? "warning" : "error"}
         role={incompatible && incompatible.status !== "broken" ? "status" : "alert"}
@@ -111,15 +133,28 @@ export const ProviderStatusBanner = memo(function ProviderStatusBanner({
         <InfoIcon />
         <AlertTitle>{title}</AlertTitle>
         <AlertDescription>
-          <Tooltip>
-            <TooltipTrigger render={<div className="line-clamp-3" />}>{message}</TooltipTrigger>
-            <TooltipPopup side="top" className="whitespace-pre-wrap">
-              {message}
-            </TooltipPopup>
-          </Tooltip>
+          {status.driver === "meerkat" ? (
+            <>
+              <p>{message}</p>
+              {details ? (
+                <ErrorDetailsDialog
+                  key={getProviderStatusBannerKey(status)}
+                  description={message}
+                  details={details}
+                />
+              ) : null}
+            </>
+          ) : (
+            <Tooltip>
+              <TooltipTrigger render={<div className="line-clamp-3" />}>{message}</TooltipTrigger>
+              <TooltipPopup side="top" className="whitespace-pre-wrap">
+                {message}
+              </TooltipPopup>
+            </Tooltip>
+          )}
           {onOpenProviderSetup && hasProviderSetup(status) ? (
             <InlineButton onClick={() => onOpenProviderSetup(status.instanceId)}>
-              Open provider setup
+              {status.driver === "meerkat" ? "Open provider settings" : "Open provider setup"}
             </InlineButton>
           ) : null}
         </AlertDescription>

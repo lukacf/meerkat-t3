@@ -2817,18 +2817,18 @@ export function resolveDesktopProductName(
   version: string,
   artifactPurpose: NativeNoticeArtifactPurpose = "release",
 ): string {
-  if (artifactPurpose === "internal-validation") return "Meerkat T3 (Internal Validation)";
+  if (artifactPurpose === "internal-validation") return "MeerkaT3 (Internal Validation)";
   return resolveDesktopUpdateChannel(version) === "nightly"
-    ? "Meerkat T3 (Nightly)"
-    : (desktopPackageJson.productName ?? "Meerkat T3");
+    ? "MeerkaT3 (Nightly)"
+    : (desktopPackageJson.productName ?? "MeerkaT3");
 }
 
 export function resolveDesktopPackageIdentity(repository?: string) {
   const configured = resolveMeerkatReleaseRepository(repository);
   return {
     name: "meerkat-t3",
-    description: "Meerkat T3 desktop development environment",
-    author: "Meerkat T3 contributors",
+    description: "MeerkaT3 desktop development environment",
+    author: "MeerkaT3 contributors",
     ...(configured
       ? { homepage: `https://github.com/${configured.owner}/${configured.repo}` }
       : {}),
@@ -2925,11 +2925,11 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       category: "public.app-category.developer-tools",
       extendInfo: {
         NSScreenCaptureUsageDescription:
-          "Meerkat T3 captures the active window when you use the window capture shortcut.",
+          "MeerkaT3 captures the active window when you use the window capture shortcut.",
       },
       protocols: [
         {
-          name: "Meerkat T3",
+          name: "MeerkaT3",
           schemes: ["meerkat-t3", "meerkat-t3-dev"],
         },
       ],
@@ -2993,13 +2993,13 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       category: "Development",
       synopsis: "Desktop GUI for coding agents",
       // Required by the .deb control file.
-      maintainer: "Meerkat T3 contributors",
+      maintainer: "MeerkaT3 contributors",
       // electron-builder turns these into MimeType=x-scheme-handler/<scheme>;
       // in the .desktop entry (Exec already gets %U), so browsers can hand
       // t3code:// OAuth callbacks to the app.
       protocols: [
         {
-          name: "Meerkat T3",
+          name: "MeerkaT3",
           schemes: ["meerkat-t3", "meerkat-t3-dev"],
         },
       ],
@@ -4281,7 +4281,7 @@ const buildDesktopArtifactCli = Command.make("build-desktop-artifact", {
     Flag.optional,
   ),
 }).pipe(
-  Command.withDescription("Build a desktop artifact for Meerkat T3."),
+  Command.withDescription("Build a desktop artifact for MeerkaT3."),
   Command.withHandler((input) => Effect.flatMap(resolveBuildOptions(input), buildDesktopArtifact)),
 );
 

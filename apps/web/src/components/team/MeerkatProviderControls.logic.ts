@@ -21,6 +21,7 @@ export function meerkatAuthWorkspaceMatches(
 ): boolean {
   if (!scope.threadTarget) return overview !== null;
   return (
+    !!overview?.workspace &&
     overview?.workspace?.projectId === scope.projectId &&
     overview.workspace.threadId === scope.threadTarget.threadId &&
     overview.workspace.cwd === scope.threadTarget.expectedCwd

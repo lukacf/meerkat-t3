@@ -54,6 +54,7 @@ const instance = (refresh: Effect.Effect<ServerProvider>): ProviderInstance => (
 const testLayer = (
   instances: Ref.Ref<ReadonlyArray<ProviderInstance>>,
   unavailable: Ref.Ref<ReadonlyArray<ServerProvider>>,
+  manifestLayer = ModelManifest.layerTest,
 ) =>
   ProviderRegistryLive.pipe(
     Layer.provide(
@@ -70,7 +71,7 @@ const testLayer = (
         subscribeChanges: Effect.flatMap(PubSub.unbounded<void>(), PubSub.subscribe),
       }),
     ),
-    Layer.provide(ModelManifest.layerTest),
+    Layer.provide(manifestLayer),
     Layer.provide(
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-provider-refresh-current-" }),
     ),
@@ -78,6 +79,59 @@ const testLayer = (
   );
 
 describe("provider refresh after settings reconciliation", () => {
+  it.effect("keeps native snapshot refresh independent of the remote model manifest", () =>
+    Effect.gen(function* () {
+      const nativeId = ProviderInstanceId.make("meerkat");
+      const nativeDriver = ProviderDriverKind.make("meerkat");
+      const nativeProvider = { ...provider, instanceId: nativeId, driver: nativeDriver };
+      const refreshedProvider = { ...nativeProvider, checkedAt: "2026-10-08T15:00:00.000Z" };
+      const nativeInstance = instance(Effect.succeed(refreshedProvider));
+      const disabledProvider = { ...provider, enabled: false };
+      const disabledInstance = instance(Effect.succeed(disabledProvider));
+      const current = yield* Ref.make<ReadonlyArray<ProviderInstance>>([
+        {
+          ...nativeInstance,
+          instanceId: nativeId,
+          driverKind: nativeDriver,
+          continuationIdentity: { driverKind: nativeDriver, continuationKey: "native-fixture" },
+          snapshot: {
+            ...nativeInstance.snapshot,
+            getSnapshot: Effect.succeed(nativeProvider),
+          },
+        },
+        {
+          ...disabledInstance,
+          enabled: false,
+          snapshot: {
+            ...disabledInstance.snapshot,
+            getSnapshot: Effect.succeed(disabledProvider),
+          },
+        },
+      ]);
+      const unavailable = yield* Ref.make<ReadonlyArray<ServerProvider>>([]);
+      let remoteRefreshes = 0;
+      const manifestLayer = Layer.succeed(ModelManifest.ModelManifest, {
+        current: Effect.succeed(ModelManifest.BUNDLED_MODEL_MANIFEST),
+        refresh: Effect.sync(() => {
+          remoteRefreshes += 1;
+          return ModelManifest.BUNDLED_MODEL_MANIFEST;
+        }),
+        forceRefresh: Effect.die("A native snapshot must not force a donor catalog refresh"),
+        refreshInBackground: Effect.die("Native discovery owns its model catalog"),
+      });
+      yield* Effect.gen(function* () {
+        const registry = yield* ProviderRegistry;
+        expect(
+          (yield* registry.getProviders).find((item) => item.instanceId === nativeId)?.checkedAt,
+        ).toBe(nativeProvider.checkedAt);
+        expect(
+          (yield* registry.refresh()).find((item) => item.instanceId === nativeId)?.checkedAt,
+        ).toBe(refreshedProvider.checkedAt);
+      }).pipe(Effect.provide(testLayer(current, unavailable, manifestLayer)));
+      expect(remoteRefreshes).toBe(0);
+    }),
+  );
+
   for (const target of ["instance", "kind", "all"] as const) {
     it.effect(
       `refreshes the replacement driver before change notifications arrive (${target})`,

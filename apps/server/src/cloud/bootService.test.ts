@@ -170,8 +170,10 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       const failed = command === control.failCommand;
       if (!failed && command === "loginctl enable-linger --no-ask-password 501")
         control.linger = "yes";
-      if (!failed && command === "systemctl --user enable meerkat-t3.service") control.enabled = true;
-      if (!failed && command === "systemctl --user restart meerkat-t3.service") control.active = true;
+      if (!failed && command === "systemctl --user enable meerkat-t3.service")
+        control.enabled = true;
+      if (!failed && command === "systemctl --user restart meerkat-t3.service")
+        control.active = true;
       if (
         control.stateAfterStop !== undefined &&
         (command === "systemctl --user stop meerkat-t3.service" ||
@@ -449,7 +451,10 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
           ),
         ).toEqual(
           platform === "linux"
-            ? ["systemctl --user stop meerkat-t3.service", "systemctl --user restart meerkat-t3.service"]
+            ? [
+                "systemctl --user stop meerkat-t3.service",
+                "systemctl --user restart meerkat-t3.service",
+              ]
             : [
                 "launchctl bootout --wait gui/501/ai.rkat.meerkat-t3.service",
                 `launchctl bootstrap gui/501 ${plan.unitPath}`,

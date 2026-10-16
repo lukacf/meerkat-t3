@@ -267,7 +267,7 @@ describe("desktop update UI helpers", () => {
         availableVersion: "1.1.0",
         downloadedVersion: "1.1.1",
       }),
-    ).toContain("Install update 1.1.1 and restart Meerkat T3?");
+    ).toContain("Install update 1.1.1 and restart MeerkaT3?");
   });
 
   it("falls back to generic install confirmation copy when no version is available", () => {
@@ -276,7 +276,7 @@ describe("desktop update UI helpers", () => {
         availableVersion: null,
         downloadedVersion: null,
       }),
-    ).toContain("Install update and restart Meerkat T3?");
+    ).toContain("Install update and restart MeerkaT3?");
   });
 
   it("keeps the same install confirmation copy across desktop platforms", () => {
@@ -286,7 +286,7 @@ describe("desktop update UI helpers", () => {
         downloadedVersion: "1.1.0",
       }),
     ).toBe(
-      "Install update 1.1.0 and restart Meerkat T3?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
+      "Install update 1.1.0 and restart MeerkaT3?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.",
     );
   });
 });
@@ -349,7 +349,9 @@ describe("canCheckForUpdate", () => {
 
 describe("getDesktopUpdateButtonTooltip", () => {
   it("reports up to date only after a successful update check", () => {
-    expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "idle" })).toBe("Check for updates");
+    expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "idle" })).toBe(
+      "Check for updates",
+    );
     expect(getDesktopUpdateButtonTooltip({ ...baseState, status: "checking" })).toBe(
       "Checking for updates",
     );

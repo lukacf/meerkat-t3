@@ -63,7 +63,7 @@ await initializeMeerkatProfile(prototypeHome, {
 });
 console.log(`Meerkat profile: ${prototypeHome}`);
 console.log(
-  "Open a project's Connections menu to set up API-key credentials or sign in with a configured OAuth profile. Existing conversations and settings stay in this profile.",
+  "Open Settings > Providers to sign in with an account or add an API key. Existing conversations and settings stay in this profile.",
 );
 if (mode === "configure") process.exit(0);
 

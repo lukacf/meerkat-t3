@@ -1,6 +1,6 @@
 //! Read finalized native input receipts. Console admissions retain their own
 //! identity; unkeyed run-start work retains its native session/input/run tuple.
-use crate::mobkit_registry::{ConsoleExpectedTarget, MobkitMobRuntime};
+use crate::mobkit_registry::{storage_upgrade::ConsoleRead, ConsoleExpectedTarget, MobkitMobRuntime};
 use crate::GatewayError;
 use meerkat_core::{
     event::{AgentEvent, InteractionFailureReason},
@@ -16,7 +16,7 @@ use meerkat_runtime::{
     MeerkatMachine, RuntimeStore, SessionServiceRuntimeExt,
 };
 use serde_json::{json, Map, Value};
-use std::{collections::HashSet, path::PathBuf};
+use std::{collections::HashSet, sync::Arc};
 
 #[derive(Clone, Debug, PartialEq)]
 enum CompletionIdentity {
@@ -108,14 +108,14 @@ fn terminal(
 pub(super) async fn read(
     mob: &MobkitMobRuntime,
     expected: &ConsoleExpectedTarget,
-    path: PathBuf,
+    console_read: Arc<ConsoleRead>,
 ) -> Result<Option<Completion>, GatewayError> {
     let Some(runtime) = mob.session_runtime.as_ref() else {
         return Ok(None);
     };
     let (inputs, runs) = tokio::try_join!(
-        crate::native_history::recent_work_inputs(path.clone(), expected.clone()),
-        crate::native_history::recent_work_runs(path, expected.clone()),
+        crate::native_history::recent_work_inputs(console_read.clone(), expected.clone()),
+        crate::native_history::recent_work_runs(console_read, expected.clone()),
     )?;
     let console = read_inputs(runtime, expected, &inputs).await?;
     let native = if let Some(store) = &mob.checkpoint_runtime_store {

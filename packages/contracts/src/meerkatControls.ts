@@ -7,7 +7,8 @@ export const MeerkatControlScope = Schema.Struct({
   instanceId: ProviderInstanceId,
 });
 export const MeerkatAuthScope = Schema.Struct({
-  ...MeerkatControlScope.fields,
+  instanceId: ProviderInstanceId,
+  projectId: Schema.optional(ProjectId),
   threadTarget: Schema.optional(
     Schema.Struct({
       threadId: ThreadId,
@@ -73,12 +74,78 @@ export const MeerkatAuthConnection = Schema.Struct({
   bindingId: Schema.String,
   profileId: Schema.String,
   source: Schema.String,
-  state: Schema.Literals(["connected", "needs_auth", "reauth_required", "host_managed"]),
+  state: Schema.Literals(["connected", "needs_auth", "reauth_required", "host_managed", "unknown"]),
+  credentialObservation: Schema.optional(
+    Schema.NullOr(
+      Schema.Literals([
+        "not_observed",
+        "pending",
+        "unavailable",
+        "denied",
+        "interaction_required",
+        "owner_busy",
+      ]),
+    ),
+  ),
   supportsInteractiveLogin: Schema.Boolean,
+  authMethod: Schema.optional(Schema.String),
+  backendKind: Schema.optional(Schema.String),
+  loginFlow: Schema.optional(Schema.NullOr(Schema.Literals(["browser", "device"]))),
+  editable: Schema.optional(Schema.Boolean),
+  supportsSecretUpdate: Schema.optional(Schema.Boolean),
+  supportsDefault: Schema.optional(Schema.Boolean),
+  supportsRemoval: Schema.optional(Schema.Boolean),
+  isDefault: Schema.optional(Schema.Boolean),
+  expiresAt: Schema.optional(Schema.NullOr(Schema.String)),
+  accountId: Schema.optional(Schema.NullOr(Schema.String)),
+  accountLabel: Schema.optional(Schema.String),
+  credentialAccount: Schema.optional(
+    Schema.Struct({ realm: TrimmedNonEmptyString, account: TrimmedNonEmptyString }),
+  ),
+  hasRefreshToken: Schema.optional(Schema.Boolean),
+  fields: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  modelsVerified: Schema.optional(Schema.Boolean),
+  models: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        id: TrimmedNonEmptyString,
+        displayName: Schema.String,
+        tier: Schema.String,
+        recommended: Schema.Boolean,
+      }),
+    ),
+  ),
 });
 export type MeerkatAuthConnection = typeof MeerkatAuthConnection.Type;
+export const MeerkatAuthMethod = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  provider: TrimmedNonEmptyString,
+  displayName: TrimmedNonEmptyString,
+  authMethod: TrimmedNonEmptyString,
+  backendKind: TrimmedNonEmptyString,
+  flow: Schema.Literals(["browser", "device", "secret", "host"]),
+  callback: Schema.optional(
+    Schema.Struct({
+      redirectHost: Schema.Literals(["localhost", "127.0.0.1"]),
+      path: TrimmedNonEmptyString,
+      ports: Schema.Array(Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 65535 }))),
+    }),
+  ),
+  description: Schema.String,
+  secretLabel: Schema.optional(TrimmedNonEmptyString),
+  fields: Schema.Array(
+    Schema.Struct({
+      key: TrimmedNonEmptyString,
+      label: TrimmedNonEmptyString,
+      required: Schema.Boolean,
+      secret: Schema.Boolean,
+    }),
+  ),
+});
+export type MeerkatAuthMethod = typeof MeerkatAuthMethod.Type;
 export const MeerkatAuthOverview = Schema.Struct({
   connections: Schema.Array(MeerkatAuthConnection),
+  methods: Schema.optional(Schema.Array(MeerkatAuthMethod)),
   workspace: Schema.optional(
     Schema.Struct({
       projectId: ProjectId,
@@ -89,24 +156,56 @@ export const MeerkatAuthOverview = Schema.Struct({
 });
 export const MeerkatAuthActionInput = Schema.Struct({
   ...MeerkatAuthScope.fields,
-  provider: Schema.Literals(["openai", "anthropic", "gemini"]),
-  action: Schema.Literals(["start", "complete", "status", "cancel", "logout"]),
+  provider: TrimmedNonEmptyString,
+  action: Schema.Literals([
+    "start",
+    "complete",
+    "status",
+    "cancel",
+    "logout",
+    "configure",
+    "check",
+    "delete",
+    "default",
+    "deviceStart",
+    "devicePoll",
+  ]),
+  realmId: Schema.optional(TrimmedNonEmptyString),
+  bindingId: Schema.optional(TrimmedNonEmptyString),
+  profileId: Schema.optional(TrimmedNonEmptyString),
+  methodId: Schema.optional(TrimmedNonEmptyString),
+  fields: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  secret: Schema.optional(Schema.String.check(Schema.isMaxLength(32_000))),
   flowId: Schema.optional(TrimmedNonEmptyString),
   callbackUrl: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(8_000))),
 });
 export type MeerkatAuthActionInput = typeof MeerkatAuthActionInput.Type;
+export const MeerkatAuthDefaultActivation = Schema.Struct({
+  status: Schema.Literals(["updated", "unchanged", "needs_selection"]),
+  // Only native defaults changed by this operation. Unchanged does not imply selected.
+  providers: Schema.Array(TrimmedNonEmptyString),
+});
+export type MeerkatAuthDefaultActivation = typeof MeerkatAuthDefaultActivation.Type;
 export const MeerkatAuthFlow = Schema.Struct({
   flowId: Schema.NullOr(Schema.String),
   authorizeUrl: Schema.NullOr(Schema.String),
   status: Schema.Literals(["waiting", "connected", "cancelled", "disconnected", "failed"]),
   message: Schema.NullOr(Schema.String),
+  connection: Schema.optional(MeerkatAuthConnection),
+  defaultActivation: Schema.optional(MeerkatAuthDefaultActivation),
+  credentialsSaved: Schema.optional(Schema.Boolean),
+  userCode: Schema.optional(Schema.String),
+  verificationUri: Schema.optional(Schema.String),
+  verificationUriComplete: Schema.optional(Schema.NullOr(Schema.String)),
+  expiresAt: Schema.optional(Schema.String),
+  intervalSeconds: Schema.optional(Schema.Number),
 });
 export type MeerkatAuthFlow = typeof MeerkatAuthFlow.Type;
 
 export class MeerkatControlError extends Schema.TaggedError<MeerkatControlError>()(
   "MeerkatControlError",
   {
-    projectId: ProjectId,
+    projectId: Schema.optional(ProjectId),
     message: Schema.String,
   },
 ) {}

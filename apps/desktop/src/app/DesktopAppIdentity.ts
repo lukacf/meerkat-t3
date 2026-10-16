@@ -73,9 +73,11 @@ export const resolveUserDataPath = Effect.gen(function* () {
     }
     // Startup prepares this synchronously before Clerk. Later identity reads
     // must also preserve the override without probing the normal app profile.
-    yield* fileSystem.makeDirectory(override, { recursive: true }).pipe(
-      Effect.mapError((cause) => new DesktopUserDataDirectoryError({ path: override, cause })),
-    );
+    yield* fileSystem
+      .makeDirectory(override, { recursive: true })
+      .pipe(
+        Effect.mapError((cause) => new DesktopUserDataDirectoryError({ path: override, cause })),
+      );
     return override;
   }
   const legacyPath = environment.path.join(

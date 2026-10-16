@@ -291,7 +291,8 @@ const run = Effect.scoped(
           item.thread.latestTurn &&
           item.thread.latestTurn.requestedAt >= turnStartedAt &&
           ["completed", "error", "interrupted"].includes(item.thread.latestTurn.state)
-        ) return Deferred.succeed(threadCompleted, item.thread.latestTurn.state);
+        )
+          return Deferred.succeed(threadCompleted, item.thread.latestTurn.state);
         return Effect.void;
       }),
       Effect.forkScoped({ startImmediately: true }),

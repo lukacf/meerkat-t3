@@ -1,13 +1,7 @@
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
-import type {
-  EnvironmentId,
-  MeerkatProjectAgentAccessMode,
-  ModelSelection,
-  ProjectId,
-} from "@t3tools/contracts";
+import type { EnvironmentId, ModelSelection, ProjectId } from "@t3tools/contracts";
 import { Link, useNavigate } from "@tanstack/react-router";
-import { BookOpenIcon, BotIcon, ChevronDownIcon, PlusIcon } from "lucide-react";
-import { useState } from "react";
+import { BookOpenIcon, BotIcon, PlusIcon } from "lucide-react";
 import { useProjects } from "../../state/entities";
 import { useProjectClone } from "../../state/projectClones";
 import { useEnvironments } from "../../state/environments";
@@ -15,25 +9,13 @@ import { meerkatTeamEnvironment, useVisibleTeamRefresh } from "../../state/meerk
 import { useEnvironmentQuery } from "../../state/query";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../ui/popover";
-import { ProjectAgentPermissions, projectAgentPermissionLabel } from "./ProjectAgentPermissions";
-import { readRestoreReviewWorkBlock, useRestoreReviewWorkBlock } from "./useRestoreReview";
-import {
-  PROJECT_AGENT_PRESETS,
-  existingProjectAgentPreset,
-  projectAgentPreferredOptions,
-  projectAgentReasoningControl,
-  resolveProjectAgentModel,
-} from "./projectAgentSetup.logic";
+import { useRestoreReviewWorkBlock } from "./useRestoreReview";
+import { projectAgentPreferredOptions, resolveProjectAgentModel } from "./projectAgentSetup.logic";
 import { useProviderWorkspaceReadiness } from "../../hooks/useProviderWorkspaceReadiness";
-import { getAgentModelSendBlock } from "./agentModelReadiness";
-import { appAtomRegistry } from "../../rpc/atomRegistry";
-import { environmentServerConfigsAtom } from "../../state/server";
 import {
   ProjectAgentCreationRecovery,
   useProjectAgentCreation,
 } from "./ProjectAgentCreationRecovery";
-import { findProjectAgentCreationPreset } from "./projectAgentCreationDraftStore";
 import { modelCredentialRequirement } from "../../modelCredentials";
 import type { ProjectHomeAccountSetup } from "../chat/composerModelReadiness";
 
@@ -68,7 +50,6 @@ export function ProjectStart({
   );
   const { provider, model } = resolveProjectAgentModel(providers, modelSelection, null, null);
   const options = projectAgentPreferredOptions(modelSelection, provider, model);
-  const reasoning = projectAgentReasoningControl(model, options);
   const preferredModel = provider?.models.find((entry) => entry.slug === modelSelection?.model);
   const accountGuidanceInComposer =
     accountSetup !== null &&
@@ -82,10 +63,9 @@ export function ProjectStart({
     !workspace.pendingInstanceIds.has(accountSetup.instanceId) &&
     (provider.status === "ready" || provider.status === "warning") &&
     provider.auth.status !== "unknown" &&
-    (modelCredentialRequirement(preferredModel) !== null ||
+    (modelCredentialRequirement(preferredModel, true) !== null ||
       (provider.auth.status === "unauthenticated" &&
-        preferredModel?.credentialState !== "connected" &&
-        preferredModel?.credentialState !== "host_managed"));
+        preferredModel?.credentialState !== "connected"));
   const clone = useProjectClone(scopeProjectRef(environmentId, projectId));
   const repositoryReady = clone === null || clone.phase === "done";
   const agentsQuery = useEnvironmentQuery(
@@ -104,9 +84,6 @@ export function ProjectStart({
   useVisibleTeamRefresh(agentsQuery, true);
   useVisibleTeamRefresh(proposalQuery, true);
   const agents = agentsQuery.data?.agents.filter((entry) => !entry.archived) ?? [];
-  const [addOpen, setAddOpen] = useState(false);
-  const [accessMode, setAccessMode] = useState<MeerkatProjectAgentAccessMode>("read-only");
-  const [error, setError] = useState<string | null>(null);
   const restoreBlock = useRestoreReviewWorkBlock(environmentId);
   const openAgent = (agentId: string) =>
     navigate({
@@ -123,71 +100,6 @@ export function ProjectStart({
       creation.state.pendingIds.includes(attempt.input.requestId),
     )?.input.label ?? null;
 
-  async function introduce(preset: (typeof PROJECT_AGENT_PRESETS)[number]) {
-    if (
-      disabled ||
-      !project ||
-      !repositoryReady ||
-      creation.state.pendingIds.length > 0 ||
-      !agentsQuery.data ||
-      agentsQuery.error
-    )
-      return;
-    if (!creation.store.getState().refresh()) return;
-    const saved = findProjectAgentCreationPreset(creation.store.getState().attempts, preset);
-    if (saved) {
-      await creation.retry(saved.input.requestId);
-      return;
-    }
-    if (!provider || !model) return;
-    const existing = existingProjectAgentPreset(
-      agentsQuery.data.agents,
-      provider.instanceId,
-      preset,
-    );
-    if (existing) {
-      await openAgent(existing.agentId);
-      return;
-    }
-    const restoreBlock = readRestoreReviewWorkBlock(environmentId);
-    if (restoreBlock) {
-      setError(restoreBlock);
-      return;
-    }
-    if (reasoning.unavailable) {
-      setError(
-        "The saved reasoning level is unavailable. Choose a supported level in the composer.",
-      );
-      return;
-    }
-    const input = {
-      projectId,
-      instanceId: provider.instanceId,
-      model: model.slug,
-      ...(options !== undefined ? { options } : {}),
-      accessMode,
-      ...preset,
-    };
-    const modelBlock = getAgentModelSendBlock({
-      instanceId: provider.instanceId,
-      selection: {
-        instanceId: provider.instanceId,
-        model: model.slug,
-        ...(options !== undefined ? { options } : {}),
-      },
-      currentModel: undefined,
-      steering: false,
-      cwd: project.workspaceRoot,
-      serverConfig: appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId),
-    });
-    if (modelBlock) {
-      setError(modelBlock.reason);
-      return;
-    }
-    setError(null);
-    await creation.dispatch(creation.store.getState().beginPreset(input));
-  }
-
   const setup = proposalQuery.data;
   const proposalLabel = setup?.proposal
     ? "Review proposed team"
@@ -195,7 +107,6 @@ export function ProjectStart({
       ? "Continue setup"
       : "Suggest agents";
   const openCustomAgent = () => {
-    setAddOpen(false);
     void navigate({
       to: "/$environmentId/projects/$projectId/agents/new",
       params: { environmentId, projectId },
@@ -222,8 +133,8 @@ export function ProjectStart({
         {agentsQuery.isPending && !agentsQuery.data
           ? "Loading project agents..."
           : agents.length === 0
-            ? "Add specialists that know this project and collaborate across threads."
-            : "Your specialists are available across threads in this project."}
+            ? "Generate specialists for this repository's domains, then connect them to work together."
+            : "Your specialists keep their conversations across tasks and can peer with agents in other projects."}
       </p>
       {agents.length > 0 ? (
         <div className="flex flex-wrap gap-1.5">
@@ -276,90 +187,15 @@ export function ProjectStart({
           <BookOpenIcon />
           {proposalLabel}
         </Button>
-        <Popover open={addOpen} onOpenChange={setAddOpen}>
-          <PopoverTrigger
-            render={
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={disabled || pending !== null || !repositoryReady || !provider}
-              />
-            }
-          >
-            <PlusIcon /> Add agent <ChevronDownIcon />
-          </PopoverTrigger>
-          <PopoverPopup width="sm" align="start">
-            <PopoverTitle>Add a project agent</PopoverTitle>
-            <div className="mt-3">
-              <ProjectAgentPermissions
-                value={accessMode}
-                onChange={setAccessMode}
-                disabled={pending !== null}
-              />
-            </div>
-            <div className="my-3 space-y-1">
-              {PROJECT_AGENT_PRESETS.map((preset) => {
-                const saved = findProjectAgentCreationPreset(creation.state.attempts, preset);
-                const existing = existingProjectAgentPreset(
-                  agentsQuery.data?.agents ?? [],
-                  provider?.instanceId,
-                  preset,
-                );
-                return (
-                  <button
-                    key={preset.role}
-                    type="button"
-                    className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-accent disabled:opacity-50"
-                    disabled={
-                      disabled ||
-                      (!existing && !saved?.accepted && restoreBlock !== null) ||
-                      pending !== null ||
-                      !repositoryReady ||
-                      (!saved && !model) ||
-                      !agentsQuery.data ||
-                      agentsQuery.error !== null
-                    }
-                    onClick={() => {
-                      setAddOpen(false);
-                      void introduce(preset);
-                    }}
-                  >
-                    <BotIcon className="size-4 text-muted-foreground" />
-                    {saved
-                      ? `${saved.accepted ? "Open" : "Retry"} ${saved.input.label}`
-                      : existing
-                        ? `Open ${existing.label}`
-                        : preset.label}
-                    {existing ? (
-                      <span className="ml-auto text-xs text-muted-foreground">
-                        {projectAgentPermissionLabel(existing.accessMode)}
-                      </span>
-                    ) : null}
-                    {existing?.archived ? (
-                      <span className="ml-auto text-xs text-muted-foreground">Archived</span>
-                    ) : null}
-                  </button>
-                );
-              })}
-              <button
-                type="button"
-                className="flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-sm hover:bg-accent"
-                onClick={openCustomAgent}
-              >
-                <PlusIcon className="size-4 text-muted-foreground" /> Custom agent
-              </button>
-            </div>
-            {provider && model ? (
-              <p className="text-xs text-muted-foreground">
-                New agents use {model.name}
-                {reasoning.descriptor || reasoning.unavailable
-                  ? ` · ${reasoning.label} reasoning`
-                  : ""}
-                .
-              </p>
-            ) : null}
-          </PopoverPopup>
-        </Popover>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={disabled || pending !== null || !repositoryReady || !provider}
+          onClick={openCustomAgent}
+        >
+          <PlusIcon />
+          Add agent
+        </Button>
         {pending ? (
           <span role="status" className="text-xs text-muted-foreground">
             Creating {pending}...
@@ -404,9 +240,9 @@ export function ProjectStart({
           )}
         </p>
       ) : null}
-      {agentsQuery.error || proposalQuery.error || creation.error || error ? (
+      {agentsQuery.error || proposalQuery.error || creation.error ? (
         <p role="alert" className="text-xs text-warning-foreground">
-          {creation.error ?? error ?? agentsQuery.error ?? proposalQuery.error}
+          {creation.error ?? agentsQuery.error ?? proposalQuery.error}
         </p>
       ) : null}
     </section>

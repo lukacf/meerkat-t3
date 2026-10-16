@@ -1,5 +1,10 @@
 # Relay observability
 
+> Scope: this page is reference material for the inherited relay service. It is not a
+> supported MeerkaT3 preview service or release path. The supported local Mac stack
+> is described in [development](../operations/development.md) and
+> [distribution](../operations/meerkat-distribution.md).
+
 > For maintainers. Using T3 Code? See [docs/user](../user/).
 
 The relay Alchemy stack owns a shared Axiom trace setup:

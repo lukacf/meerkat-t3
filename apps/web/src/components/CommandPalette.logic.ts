@@ -431,7 +431,11 @@ export function filterCommandPaletteGroups(input: {
       });
     }
     if (input.agentSearchItems?.length) {
-      searchableGroups.push({ value: "agents-search", label: "Agent conversations", items: input.agentSearchItems });
+      searchableGroups.push({
+        value: "agents-search",
+        label: "Agent conversations",
+        items: input.agentSearchItems,
+      });
     }
   }
 

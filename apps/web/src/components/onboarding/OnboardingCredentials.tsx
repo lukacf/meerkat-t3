@@ -1,9 +1,9 @@
-import type { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
+import type { EnvironmentId } from "@t3tools/contracts";
 import { isElectron } from "../../env";
 import { usePrimarySessionState } from "../../environments/primary";
 import { useEnvironments, type EnvironmentPresentation } from "../../state/environments";
 import { useEnvironmentSessionState } from "../../state/session";
-import { MeerkatCredentialsEditor } from "../settings/MeerkatCredentialsEditor";
+import { ProviderAccountsPanel } from "../settings/ProviderAccountsPanel";
 import {
   classifyProviderEnvironmentAccess,
   resolvePrimaryOperateAccess,
@@ -13,7 +13,6 @@ import {
 
 interface CredentialProps {
   readonly environmentId: EnvironmentId;
-  readonly instanceId: ProviderInstanceId;
   readonly onPendingChange: (pending: boolean) => void;
   readonly onErrorChange: (hasError: boolean) => void;
 }
@@ -21,7 +20,7 @@ interface CredentialProps {
 export function OnboardingCredentials(props: CredentialProps) {
   const { environments } = useEnvironments();
   const environment = environments.find((entry) => entry.environmentId === props.environmentId);
-  if (!environment) return <p role="status">Reconnect this computer to set up credentials.</p>;
+  if (!environment) return <p role="status">Reconnect this computer to configure providers.</p>;
   if (environment.entry.target._tag === "PrimaryConnectionTarget") {
     return isElectron ? (
       <CredentialEditor {...props} environment={environment} operateAccess="granted" />
@@ -67,7 +66,6 @@ function RemoteCredentialEditor(
 
 function CredentialEditor({
   environmentId,
-  instanceId,
   environment,
   operateAccess,
   onPendingChange,
@@ -85,17 +83,16 @@ function CredentialEditor({
     return (
       <p className="text-sm text-muted-foreground" role="status">
         {access.kind === "read-only"
-          ? "This connection is read-only. Reconnect with permission to manage this computer, or ask its owner to configure a provider."
+          ? "This connection is read-only. Reconnect with permission to manage this computer, or ask its owner to configure providers."
           : "Waiting for this computer and its provider settings..."}
       </p>
     );
   }
   return (
     <div className="rounded-lg border border-border p-3">
-      <MeerkatCredentialsEditor
+      <ProviderAccountsPanel
         environmentId={environmentId}
-        environmentLabel={environment.label}
-        instanceId={instanceId}
+        compact
         onPendingChange={onPendingChange}
         onErrorChange={onErrorChange}
       />

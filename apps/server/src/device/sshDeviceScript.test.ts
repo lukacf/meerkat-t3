@@ -25,9 +25,16 @@ it.effect("finds Android Studio Java for a non-interactive SSH session", () =>
           "#!/bin/sh\necho test-java\n",
           { mode: 0o755 },
         );
-        const result = await exec("/bin/sh", ["-c", `${remoteDeviceEnvironment}\njava`], {
-          env: { HOME: home, PATH: "/nonexistent", JAVA_HOME: "" },
-        });
+        // The script adds host package-manager paths. Simulate a machine without
+        // Java there so the fallback test does not depend on the runner's installs.
+        const withoutInstalledJava = "command() { return 1; }";
+        const result = await exec(
+          "/bin/sh",
+          ["-c", `${withoutInstalledJava}\n${remoteDeviceEnvironment}\njava`],
+          {
+            env: { HOME: home, PATH: "/nonexistent", JAVA_HOME: "" },
+          },
+        );
         expect(result.stdout.trim()).toBe("test-java");
       } finally {
         await NodeFSP.rm(home, { recursive: true, force: true });

@@ -3,9 +3,9 @@
 use meerkat_mobkit::ConsoleFrame;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{json, Value};
-use std::path::{Path, PathBuf};
+use std::{path::Path, sync::Arc};
 
-use crate::mobkit_registry::ConsoleExpectedTarget;
+use crate::mobkit_registry::{storage_upgrade::ConsoleRead, ConsoleExpectedTarget};
 use crate::{
     console_expected_target, normalize_project_path, normalize_state_root_path, object_params,
     optional_string, required_mob_id, required_nonempty_string, stable_slug, GatewayError,
@@ -50,11 +50,14 @@ pub async fn read(params: Option<&Value>) -> Result<Value, GatewayError> {
         Some("since") => true,
         _ => return Err(GatewayError::invalid("Unknown history window mode", None)),
     };
-    let path = state
-        .join("mobkit")
-        .join(stable_slug(&mob_id))
-        .join("console.sqlite");
+    let console_read = crate::mobkit_registry::storage_upgrade::read_console(
+        &state.join("mobkit").join(stable_slug(&mob_id)),
+    )?;
     tokio::task::spawn_blocking(move || {
+        // Move the whole locator into the worker so cancellation cannot drop
+        // its migration guard while this physical read is still running.
+        let console_read = console_read;
+        let path = &console_read.path;
         let session = expected.session_id.as_deref().ok_or_else(|| {
             GatewayError::conflict("This worker has no recorded native session", None)
         })?;
@@ -68,14 +71,14 @@ pub async fn read(params: Option<&Value>) -> Result<Value, GatewayError> {
         let page = if !path.is_file() && transcript.is_some() {
             json!({"frames":[],"exhausted":true})
         } else {
-            read_log(&path, &expected, limit as usize, before, after, since)?
+            read_log(path, &expected, limit as usize, before, after, since)?
         };
         let mut response =
             json!({"mobId": mob_id, "identity": expected.identity, "timeline": page});
         if let Some(transcript) = transcript {
             response["transcript"] = transcript;
         }
-        if !path.is_file() || has_unattributed_frames(&path, &expected)? {
+        if !path.is_file() || has_unattributed_frames(path, &expected)? {
             response["historyStatus"] = json!("partial");
         }
         Ok(response)
@@ -91,13 +94,14 @@ pub async fn read(params: Option<&Value>) -> Result<Value, GatewayError> {
 
 /// Recent canonical frames after the durable exact-session causal join. The
 /// selected page may omit older session anchors, so callers must not rejoin it
-/// using only frames visible in the page.
+/// using only frames visible in the page. Each blocking read retains its own
+/// migration guard even if the calling status future times out or is cancelled.
 pub(crate) async fn recent_frames(
-    path: PathBuf,
+    console_read: Arc<ConsoleRead>,
     expected: ConsoleExpectedTarget,
 ) -> Result<Vec<ConsoleFrame>, GatewayError> {
     tokio::task::spawn_blocking(move || {
-        let mut page = read_log(&path, &expected, 100, None, None, false)?;
+        let mut page = read_log(&console_read.path, &expected, 100, None, None, false)?;
         serde_json::from_value(page["frames"].take()).map_err(|error| {
             GatewayError::policy(
                 "Cannot decode the durable native console history",
@@ -117,10 +121,11 @@ pub(crate) async fn recent_frames(
 /// Bounded console admissions for work reconciliation. Read these separately
 /// from the activity page so a verbose tool run cannot evict its input anchor.
 pub(crate) async fn recent_work_inputs(
-    path: PathBuf,
+    console_read: Arc<ConsoleRead>,
     expected: ConsoleExpectedTarget,
 ) -> Result<Vec<ConsoleFrame>, GatewayError> {
     tokio::task::spawn_blocking(move || {
+        let path = &console_read.path;
         let session = expected.session_id.as_deref().ok_or_else(|| {
             GatewayError::conflict("Native work needs its exact session", None)
         })?;
@@ -148,10 +153,11 @@ pub(crate) async fn recent_work_inputs(
 /// whether their contributing input produced completed work. The separate
 /// identity-indexed query keeps a long tool stream from evicting this anchor.
 pub(crate) async fn recent_work_runs(
-    path: PathBuf,
+    console_read: Arc<ConsoleRead>,
     expected: ConsoleExpectedTarget,
 ) -> Result<Vec<ConsoleFrame>, GatewayError> {
     tokio::task::spawn_blocking(move || {
+        let path = &console_read.path;
         let session = expected.session_id.as_deref().ok_or_else(|| {
             GatewayError::conflict("Native work needs its exact session", None)
         })?;

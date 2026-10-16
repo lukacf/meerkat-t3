@@ -537,16 +537,19 @@ describe("resuming setup", () => {
       }),
     ).toEqual({ decision: "wizard", persistCompletion: false });
   });
-  it("opens the workspace for the first task without marking setup complete", () => {
-    expect(
-      resolveFirstRunDecision({
-        ...freshWorkspace,
-        progressStep: "first-task",
-        projectCount: 3,
-        workspaceFresh: false,
-      }),
-    ).toEqual({ decision: "app", persistCompletion: false });
-  });
+  it.each(["first-task", "project-agents"] as const)(
+    "opens the workspace for %s without marking setup complete",
+    (progressStep) => {
+      expect(
+        resolveFirstRunDecision({
+          ...freshWorkspace,
+          progressStep,
+          projectCount: 3,
+          workspaceFresh: false,
+        }),
+      ).toEqual({ decision: "app", persistCompletion: false });
+    },
+  );
   it("resumes model access after a hosted computer has been paired", () => {
     expect(
       resolveHostedFirstRunDecision({

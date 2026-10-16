@@ -1,5 +1,7 @@
 # SnapShots
 
+> **Inherited T3 reference.** This page describes the original T3 Code feature retained in the source. It is not part of the supported MeerkaT3 preview setup. Use [Installation](install.md) and [Providers and accounts](accounts.md) for MeerkaT3. Original T3 commands and downloads install a separate product.
+
 A SnapShot captures the window you are working in and attaches it to your current draft. The
 attachment carries the app name and window title, and when available the app icon and the window's
 accessibility data (its controls, text, and their positions in the image). Agents can use that data

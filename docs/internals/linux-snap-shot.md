@@ -1,5 +1,10 @@
 # Linux window capture
 
+> Scope: this page is reference material for the inherited Linux capture implementation. It is not a
+> supported MeerkaT3 preview service or release path. The supported local Mac stack
+> is described in [development](../operations/development.md) and
+> [distribution](../operations/meerkat-distribution.md).
+
 Wayland only. Each capture picks one backend in `LinuxSnapShot.ts` (Hyprland helper, Niri IPC, KDE
 helper, Screenshot portal with active-window target, GNOME extension, then the Electron picker) and
 never falls back to another on failure, cancellation, or denial. A stale `NIRI_SOCKET` or a reachable

@@ -131,7 +131,7 @@ export function AgentModelControls({
       : `${value.model} (${checkingWorkspace ? "checking" : "unavailable"})`
     : (currentModelName ?? "Current model");
   const changeOption = (id: string, option: string | boolean) => {
-    if (!model || modelCredentialRequirement(model)) return;
+    if (!model || modelCredentialRequirement(model, true)) return;
     onChange({
       instanceId,
       model: model.slug,
@@ -176,7 +176,7 @@ export function AgentModelControls({
               if (slug === "current") onChange(undefined);
               else {
                 const next = provider?.models.find((entry) => entry.slug === slug);
-                if (next && !modelCredentialRequirement(next))
+                if (next && !modelCredentialRequirement(next, true))
                   onChange({ instanceId, model: next.slug });
               }
             }}
@@ -200,21 +200,21 @@ export function AgentModelControls({
                   {selectedLabel}
                 </SelectItem>
               ) : null}
-              {modelsWithCredentialsFirst(provider?.models ?? []).map((entry) => (
+              {modelsWithCredentialsFirst(provider?.models ?? [], true).map((entry) => (
                 <SelectItem
                   key={entry.slug}
                   value={entry.slug}
-                  disabled={Boolean(modelCredentialRequirement(entry))}
+                  disabled={Boolean(modelCredentialRequirement(entry, true))}
                 >
                   {entry.name}
-                  {modelCredentialRequirement(entry) ? " (connect account)" : ""}
+                  {modelCredentialRequirement(entry, true) ? " (connect account)" : ""}
                 </SelectItem>
               ))}
             </SelectPopup>
           </Select>
           {(!provider?.models.length ||
             (value && !model) ||
-            provider.models.some((entry) => modelCredentialRequirement(entry))) && (
+            provider.models.some((entry) => modelCredentialRequirement(entry, true))) && (
             <p className="text-xs text-muted-foreground">
               {checkingWorkspace
                 ? "Checking models for this workspace."
@@ -264,7 +264,7 @@ export function AgentModelControls({
             return (
               <Select
                 key={descriptor.id}
-                disabled={disabled || Boolean(modelCredentialRequirement(model))}
+                disabled={disabled || Boolean(modelCredentialRequirement(model, true))}
                 value={selectedValue}
                 onValueChange={(option) => {
                   if (option === "current") onChange(undefined);

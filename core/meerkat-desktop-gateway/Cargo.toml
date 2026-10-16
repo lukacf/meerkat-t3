@@ -24,11 +24,13 @@ rusqlite.workspace = true
 meerkat-desktop-contracts = { path = "../meerkat-desktop-contracts" }
 meerkat.workspace = true
 meerkat-core.workspace = true
+meerkat-mcp.workspace = true
 meerkat-contracts.workspace = true
 meerkat-mobkit.workspace = true
 meerkat-mob.workspace = true
 meerkat-runtime.workspace = true
 meerkat-providers.workspace = true
+meerkat-copilot.workspace = true
 meerkat-store.workspace = true
 meerkat-models.workspace = true
 meerkat-sqlite.workspace = true
@@ -39,3 +41,4 @@ libc = "0.2"
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
+tempfile = "3"

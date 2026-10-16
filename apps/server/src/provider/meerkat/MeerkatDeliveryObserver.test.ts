@@ -96,22 +96,24 @@ describe("Meerkat durable output delivery", () => {
     }),
   );
 
-  it.effect("publishes a fresh health snapshot after a forgotten conversation is observed again", () =>
-    Effect.gen(function* () {
-      const f = fixture();
-      yield* f.observer.poll();
-      f.observer.forget(target.threadId);
-      f.setFailRead(true);
-      f.observer.observe(target);
-      expect(f.health).toEqual([undefined]);
-      yield* f.observer.poll();
-      expect(f.health.at(-1)).toContain("offline");
-      f.setFailRead(false);
-      yield* f.observer.poll();
-      yield* f.observer.poll();
-      expect(f.health).toHaveLength(3);
-      expect(f.health.at(-1)).toBeUndefined();
-    }),
+  it.effect(
+    "publishes a fresh health snapshot after a forgotten conversation is observed again",
+    () =>
+      Effect.gen(function* () {
+        const f = fixture();
+        yield* f.observer.poll();
+        f.observer.forget(target.threadId);
+        f.setFailRead(true);
+        f.observer.observe(target);
+        expect(f.health).toEqual([undefined]);
+        yield* f.observer.poll();
+        expect(f.health.at(-1)).toContain("offline");
+        f.setFailRead(false);
+        yield* f.observer.poll();
+        yield* f.observer.poll();
+        expect(f.health).toHaveLength(3);
+        expect(f.health.at(-1)).toBeUndefined();
+      }),
   );
 
   it.effect("does not reintroduce stale failure after the observation is forgotten", () =>

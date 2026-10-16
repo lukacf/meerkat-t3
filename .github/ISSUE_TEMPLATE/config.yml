@@ -1,5 +1,8 @@
-blank_issues_enabled: false
+blank_issues_enabled: true
 contact_links:
-  - name: Feature request
-    url: https://github.com/pingdotgg/t3code/discussions/categories/ideas
-    about: Suggest an improvement or new capability in Discussions.
+  - name: Security vulnerability
+    url: https://github.com/lukacf/meerkat-t3/security/advisories/new
+    about: Report a vulnerability privately. Do not include secrets in public issues.
+  - name: Usage and troubleshooting
+    url: https://github.com/lukacf/meerkat-t3/blob/main/SUPPORT.md
+    about: Find the user guides and learn what to include in a support report.

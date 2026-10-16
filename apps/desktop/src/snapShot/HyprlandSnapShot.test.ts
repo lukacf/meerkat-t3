@@ -85,7 +85,11 @@ it("discovery neither installs a helper nor requests a screenshot", async () => 
 });
 it("installs offline at a stable executable path and probes only capabilities", async () => {
   await setup.perform("install-hyprland-helper");
-  expect((await NodeFSP.stat(hyprlandCaptureExecutable(paths))).mode & 0o777).toBe(0o755);
+  const mode = (await NodeFSP.stat(hyprlandCaptureExecutable(paths))).mode;
+  // A restrictive umask can remove group/world read and execute permissions.
+  // The helper must remain usable by its owner and never writable by others.
+  expect(mode & 0o700).toBe(0o700);
+  expect(mode & 0o022).toBe(0);
   expect(await setup.state()).toMatchObject({ status: "ready", feedbackAvailable: true });
   expect(execute.mock.calls.map(([file, args]) => [file, args])).toEqual([
     [hyprlandCaptureExecutable(paths), ["check"]],

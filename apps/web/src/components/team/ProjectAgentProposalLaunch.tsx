@@ -1,3 +1,4 @@
+import { ProjectAgentsGuide } from "../onboarding/ProjectAgentsGuide";
 import {
   CommandId,
   type EnvironmentId,
@@ -277,6 +278,7 @@ export function ProjectAgentProposalLaunch({
       </WorkspacePageHeader>
       <main className="min-h-0 flex-1 overflow-auto p-6">
         <div className="mx-auto max-w-xl space-y-6 py-4">
+          <ProjectAgentsGuide environmentId={environmentId} projectId={projectId} />
           <div>
             <h2 className="text-xl font-semibold">Find the right agents for this repository</h2>
             <p className="mt-2 text-sm text-muted-foreground">

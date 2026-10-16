@@ -1,50 +1,62 @@
-# Meerkat T3
+# MeerkaT3
 
-Meerkat T3 is a desktop workspace for coding with Meerkat and MobKit. Start with a task in a project, inspect the changes, and bring in persistent specialists when you need a second opinion. It builds on the open-source T3 Code interface.
+A desktop development workspace for long-lived project specialists. MeerkaT3 studies your repository, proposes agents for its domains, and lets you connect them to work together within and across projects.
 
-## Current availability
-
-This is an **invite-only private preview for Apple Silicon Macs**. The Meerkat runtime is included. You do not need to install Meerkat, MobKit, Rust, or another coding-agent CLI to use the packaged app.
-
-The canonical source is the private [lukacf/meerkat-t3 repository](https://github.com/lukacf/meerkat-t3). Source and preview downloads are available only to invited collaborators. Sign in with an account granted repository access, then use its [Releases](https://github.com/lukacf/meerkat-t3/releases) page for previews, exact versions/checksums, and installation instructions shared by the maintainer. No public distribution is available. Updates are manual; no automatic update feed is configured. This build uses ad-hoc signing without Developer ID signing or notarization. Follow the [installation instructions](docs/user/install.md), including the per-app macOS approval steps if prompted.
-
-The original T3 website, package-manager packages, hosted web app, and mobile apps are separate products. They do not install this Meerkat prototype. Other operating systems and remote/mobile use are not part of the supported pilot.
+Your API specialist can coordinate a contract change with the client specialist in another repository. Each keeps its own responsibilities and conversation, working in its owning project's checkout. Task threads bring those specialists together for a particular change, with temporary workers when needed.
 
 ## Start here
 
-1. [Install the prototype](docs/user/install.md) on a supported Mac.
-2. [Connect a model account](docs/user/accounts.md). The self-service path uses a provider API key and that provider's billing. A chat-app subscription alone is not an API credential.
-3. [Complete your first task](docs/user/getting-started.md), then optionally [ask a project specialist to review it](docs/user/agents.md).
+The current preview targets **Apple Silicon Macs running macOS 13 or later**. This repository contains the source; a public desktop download has not yet been published.
 
-The same guide is available offline from **Help > Meerkat T3 Guide** in the app, or the sidebar's **Help** button.
+- **Evaluate the source:** follow [Build from source](docs/operations/development.md). Development requires the documented toolchain and native runtime build.
+- **Already have a preview build:** follow [Install MeerkaT3](docs/user/install.md), then the [first-project guide](docs/user/getting-started.md). The packaged app includes its agent runtime.
 
-## How T3 fits into Meerkat
+Once the app is running:
 
-Meerkat Core runs the agents, and this prototype uses MobKit for application-level coordination. MobKit is being renamed Meerkat Meta in the wider ecosystem. T3 brings the runtime into a project workspace with conversations, specialist agents, and change review.
+1. **Connect a model account** in Settings > Providers. Sign in or add an API key using the methods offered for your account. Available models depend on that account's access.
+2. **Open or create a project.** Start a repository study, review the proposed specialists and their assignments, and prepare the ones you need.
+3. **Connect the specialists.** Drag one agent onto another, or use Connections. Connections can cross projects on the same computer.
+4. **Give a specialist an objective.** Ask it to coordinate with the relevant peers, inspect the resulting changes, run your project's checks, and commit the work you want to keep.
 
-Connect focuses on optional integration discovery and setup. Recall provides shared knowledge grounded in source evidence. These are separate ecosystem components; neither is required to start using this prototype. See the [Meerkat documentation](https://docs.rkat.ai/introduction) for platform concepts and other ways to build with Meerkat.
+The [user guide](docs/README.md#use-meerkat3) covers the complete workflow and is also available offline through **Help > MeerkaT3 Guide**.
 
-## Help and maintenance
+## Work that stays with the project
 
-- [Permissions and access](docs/user/permission-modes.md)
-- [Messages, steering, and queued work](docs/user/agents.md#follow-up-messages)
-- [Recovery and troubleshooting](docs/user/troubleshooting.md)
-- [Updating this prototype](docs/user/updating.md)
-- [Data and privacy](docs/user/telemetry.md)
-- [All documentation](docs/README.md)
+| Concept            | Use it for                                                                                             |
+| ------------------ | ------------------------------------------------------------------------------------------------------ |
+| Project specialist | A durable responsibility in your repository, with its own instructions and conversation.               |
+| Peer connection    | Collaboration between specialists or task coordinators, within one project or across related projects. |
+| Task thread        | A focused change, with a coordinator and selected project specialists.                                 |
+| Worker             | A helper created for part of a task, alongside the project's long-lived specialists.                   |
 
-For preview support, use this repository's [issues](https://github.com/lukacf/meerkat-t3/issues) or contact the person who provided your build. Include its version and the steps that failed, without API keys or private project data. Do not report Meerkat-specific problems to the original T3 maintainers.
+Repository studies propose domain ownership from your code rather than requiring a preset team. You review assignments before applying them and can refine them as the project changes. Connections allow agents to exchange messages; they do not merge histories or move an agent into another checkout.
 
-## Developing the app
+The workspace includes conversations and images, steering and queued follow-ups, files, terminals, change review, Git worktrees, and pull request workflows. Read [Work with project specialists](docs/user/agents.md) for peering, permissions, and returning to saved work.
 
-This repository preserves T3 Code history and adds the Meerkat integration plus the native Rust workspace under `core/`. The donor is [pingdotgg/t3code](https://github.com/pingdotgg/t3code); this repository is the Meerkat T3 source and release destination. See [AGENTS.md](AGENTS.md), the [development runbook](docs/operations/development.md), and [architecture overview](docs/internals/overview.md). Development instructions are for contributors, not prerequisites for using the packaged app.
+## Preview scope
 
-Install the project Node dependencies with `vp i`. The accepted native build used Rust 1.97.0 on `aarch64-apple-darwin`. To build and stage the native runtime from this combined checkout, run from the repository root:
+The supported workflow is the local Mac desktop app. Windows, Linux, mobile clients, remote installation, and the original T3 hosted services are outside this preview. Retained upstream integrations are identified as reference material in the documentation.
 
-```sh
-CARGO_BUILD_JOBS=2 node scripts/build-meerkat-runtime.ts --source "$PWD" --build
-```
+Model access is configured through accounts, with recommended and supported models shown for each connection. Model credits are not included. The runtime runs locally; hosted model requests send their context to the selected provider. See [Accounts](docs/user/accounts.md), [Permissions](docs/user/permission-modes.md), and [Data and privacy](docs/user/telemetry.md).
 
-This invokes the locked Rust build and runtime handshake. `scripts/repo-cargo` manages an external target cache and requires a real Git checkout; do not assume the binary is in `core/target`. Toolchain and registry dependencies are external build prerequisites. A fresh source build is not a promise of byte-identical release binaries. See the [Meerkat distribution runbook](docs/operations/meerkat-distribution.md) for prepared native inputs, packaging and the separate publication step. Inherited donor workflows are retained as source; GitHub Actions is disabled for this destination until a maintainer deliberately configures an owned workflow.
+Preview packages use ad-hoc signing without Apple notarization and are updated manually. Source publication does not establish a binary release or an automatic update channel. Published artifacts, when available, will be listed on [MeerkaT3 Releases](https://github.com/lukacf/meerkat-t3/releases) with their versions and checksums.
 
-T3 Code attribution and its MIT license remain unchanged in [LICENSE](LICENSE). The added native Cargo packages declare MIT; their accompanying terms and attribution limits are in [core/LICENSE-MIT](core/LICENSE-MIT) and [core/NOTICE](core/NOTICE). The donor copyright is not an attribution to those native packages. The inherited provider, mobile, and server documentation describes donor features and does not expand the supported Meerkat pilot.
+## Built on Meerkat and T3 Code
+
+[Meerkat Core](https://github.com/lukacf/meerkat) owns agent execution, model access, tools, and durable session state. Meerkat Meta, formerly MobKit, provides the application-facing coordination layer. This integration uses **Meerkat and Meta 0.9.1**. The desktop workspace builds on [T3 Code](https://github.com/pingdotgg/t3code).
+
+MeerkaT3 uses the bundled Meerkat runtime for its agents. Connecting an OpenAI, Anthropic, Google, or Copilot account selects model access through that runtime; it does not require another coding-agent CLI.
+
+## Contribute and get help
+
+- [Documentation](docs/README.md) - user guides, development, and architecture.
+- [Contributing](CONTRIBUTING.md) - setup, focused checks, and change proposals.
+- [Troubleshooting](docs/user/troubleshooting.md) - interrupted work, recovery, and support reports.
+- [Issues](https://github.com/lukacf/meerkat-t3/issues) - reproducible bugs and feature proposals for this project.
+- [Security policy](SECURITY.md) - report a vulnerability privately.
+
+For a bug, include the app version, macOS version, steps to reproduce, and what happened. Review attachments before sharing; do not post credentials, private conversations, or an app profile. Please report MeerkaT3 issues here, rather than to the original T3 maintainers.
+
+## License
+
+MeerkaT3 retains T3 Code's [MIT license and attribution](LICENSE). Bundled dependencies have their own licenses; the app includes [third-party notices](docs/user/open-source-licenses.md).

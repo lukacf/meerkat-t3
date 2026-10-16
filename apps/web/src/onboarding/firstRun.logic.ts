@@ -1,4 +1,17 @@
+import type { OnboardingProgress } from "@t3tools/contracts/settings";
 import { normalizeProjectPathForComparison } from "@t3tools/shared/path";
+
+export function isWorkspaceOnboardingStep(step: string | null | undefined) {
+  return step === "first-task" || step === "project-agents";
+}
+
+/** Earlier wizard steps retain the kind of workspace journey they return to. */
+export function onboardingWorkspaceStep(progress: OnboardingProgress | null) {
+  if (progress?.step === "first-task" || progress?.step === "project-agents") return progress.step;
+  if (progress?.resumeStep) return progress.resumeStep;
+  // Before specialist onboarding, a scoped saved thread could only be the first task.
+  return progress?.projectRef && progress.threadId ? "first-task" : "project-agents";
+}
 
 export type FirstRunDecision = "pending" | "app" | "wizard";
 
@@ -37,7 +50,14 @@ interface FirstRunDecisionInput {
   readonly enabled: boolean;
   readonly hydrated: boolean;
   readonly completed: boolean;
-  readonly progressStep?: "connection" | "agents" | "projects" | "first-task" | null | undefined;
+  readonly progressStep?:
+    | "connection"
+    | "agents"
+    | "projects"
+    | "project-agents"
+    | "first-task"
+    | null
+    | undefined;
   readonly bootstrapped: boolean;
   readonly authoritative: boolean;
   readonly workspaceAuthoritative: boolean;
@@ -53,7 +73,14 @@ interface HostedFirstRunDecisionInput {
   readonly localEnvironmentDisabled?: boolean;
   readonly hydrated: boolean;
   readonly completed: boolean;
-  readonly progressStep?: "connection" | "agents" | "projects" | "first-task" | null | undefined;
+  readonly progressStep?:
+    | "connection"
+    | "agents"
+    | "projects"
+    | "project-agents"
+    | "first-task"
+    | null
+    | undefined;
   readonly catalogReady: boolean;
   readonly environmentCount: number;
 }
@@ -139,7 +166,7 @@ export function resolveFirstRunDecision(input: FirstRunDecisionInput): {
 
   if (input.progressStep) {
     return {
-      decision: input.progressStep === "first-task" ? "app" : "wizard",
+      decision: isWorkspaceOnboardingStep(input.progressStep) ? "app" : "wizard",
       persistCompletion: false,
     };
   }
@@ -186,7 +213,7 @@ export function resolveHostedFirstRunDecision(input: HostedFirstRunDecisionInput
 
   if (input.progressStep) {
     return {
-      decision: input.progressStep === "first-task" ? "app" : "wizard",
+      decision: isWorkspaceOnboardingStep(input.progressStep) ? "app" : "wizard",
       persistCompletion: false,
     };
   }
@@ -200,4 +227,36 @@ export function resolveHostedFirstRunDecision(input: HostedFirstRunDecisionInput
   return input.environmentCount === 0 && !input.localEnvironmentDisabled
     ? { decision: "wizard", persistCompletion: false }
     : { decision: "app", persistCompletion: true };
+}
+
+/** Resolve only within the saved scope; proposal entry recovers its authoritative binding. */
+export function onboardingResumeTarget(
+  progress: OnboardingProgress,
+  threads: ReadonlyArray<{ id: string; projectId: string; environmentId: string }>,
+) {
+  if (!isWorkspaceOnboardingStep(progress.step) || !progress.projectRef) return null;
+  const { environmentId, projectId } = progress.projectRef;
+  if (
+    progress.threadId &&
+    threads.some(
+      (thread) =>
+        thread.id === progress.threadId &&
+        thread.environmentId === environmentId &&
+        thread.projectId === projectId,
+    )
+  ) {
+    return {
+      to: "/$environmentId/$threadId" as const,
+      params: { environmentId, threadId: progress.threadId },
+      replace: true,
+    };
+  }
+  return {
+    to:
+      progress.step === "project-agents"
+        ? ("/$environmentId/projects/$projectId/agents/propose" as const)
+        : ("/$environmentId/projects/$projectId/start" as const),
+    params: { environmentId, projectId },
+    replace: true,
+  };
 }

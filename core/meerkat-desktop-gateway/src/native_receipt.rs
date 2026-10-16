@@ -17,12 +17,16 @@ pub async fn read(params: Option<&Value>) -> Result<Value, GatewayError> {
     let mob_id = required_mob_id(params)?;
     let expected = console_expected_target(params)?;
     let key = required_nonempty_string(params, "idempotencyKey")?;
-    let path = state.join("mobkit").join(stable_slug(&mob_id)).join("console.sqlite");
+    let console_read = crate::mobkit_registry::storage_upgrade::read_console(
+        &state.join("mobkit").join(stable_slug(&mob_id)),
+    )?;
     tokio::task::spawn_blocking(move || {
-        let receipt = read_receipt(&path, &expected, &key)?;
+        let console_read = console_read;
+        let path = &console_read.path;
+        let receipt = read_receipt(path, &expected, &key)?;
         Ok(match receipt {
             Some(receipt) => {
-                let completion = read_completion(&path, &expected, &receipt.interaction_id)?;
+                let completion = read_completion(path, &expected, &receipt.interaction_id)?;
                 json!({"mobId":mob_id,"identity":expected.identity,"found":true,"receipt":receipt,"completion":completion})
             },
             None => json!({"mobId":mob_id,"identity":expected.identity,"found":false}),

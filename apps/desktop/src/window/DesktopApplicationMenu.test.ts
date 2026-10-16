@@ -114,11 +114,15 @@ const configureMenu = (
         Layer.provideMerge(makeElectronMenuLayer(applicationMenuTemplate)),
         Layer.provideMerge(makeDesktopWindowLayer(selectedAction)),
         Layer.provideMerge(desktopUpdatesLayer),
-        Layer.provideMerge(Layer.succeed(DesktopDiagnostics.DesktopDiagnostics, {
-          exportReport: Deferred.succeed(selectedAction, "native-export").pipe(Effect.as({ status: "cancelled", filePath: null, errorCategory: null } as const)),
-          recordStartupFailure: () => Effect.void,
-          offerStartupReport: Effect.void,
-        })),
+        Layer.provideMerge(
+          Layer.succeed(DesktopDiagnostics.DesktopDiagnostics, {
+            exportReport: Deferred.succeed(selectedAction, "native-export").pipe(
+              Effect.as({ status: "cancelled", filePath: null, errorCategory: null } as const),
+            ),
+            recordStartupFailure: () => Effect.void,
+            offerStartupReport: Effect.void,
+          }),
+        ),
         Layer.provideMerge(electronDialogLayer),
         Layer.provideMerge(electronAppLayer),
         Layer.provideMerge(
@@ -134,7 +138,8 @@ describe("DesktopApplicationMenu", () => {
   it.effect("exports support reports directly without dispatching into the renderer", () =>
     Effect.gen(function* () {
       const selectedAction = yield* Deferred.make<string>();
-      const applicationMenuTemplate = yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+      const applicationMenuTemplate =
+        yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
       yield* configureMenu(selectedAction, applicationMenuTemplate);
       const template = yield* Deferred.await(applicationMenuTemplate);
       const helpMenu = template.find((item) => item.role === "help");
@@ -174,12 +179,13 @@ describe("DesktopApplicationMenu", () => {
   it.effect("opens the bundled guide without calling the updater", () =>
     Effect.gen(function* () {
       const selectedAction = yield* Deferred.make<string>();
-      const applicationMenuTemplate = yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
+      const applicationMenuTemplate =
+        yield* Deferred.make<readonly Electron.MenuItemConstructorOptions[]>();
       yield* configureMenu(selectedAction, applicationMenuTemplate);
       const template = yield* Deferred.await(applicationMenuTemplate);
       const helpMenu = template.find((item) => item.role === "help");
       if (!Array.isArray(helpMenu?.submenu)) throw new Error("Expected Help submenu.");
-      const guide = helpMenu.submenu.find((item) => item.label === "Meerkat T3 Guide");
+      const guide = helpMenu.submenu.find((item) => item.label === "MeerkaT3 Guide");
       if (typeof guide?.click !== "function") throw new Error("Expected guide action.");
       guide.click({} as Electron.MenuItem, {} as Electron.BrowserWindow, {} as KeyboardEvent);
       assert.equal(yield* Deferred.await(selectedAction), "open-help");

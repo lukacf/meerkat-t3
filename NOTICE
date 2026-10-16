@@ -1,0 +1,13 @@
+MeerkaT3 is based on T3 Code by T3 Tools Inc.
+Original project: https://github.com/pingdotgg/t3code
+The original MIT copyright notice and license are preserved in LICENSE.
+
+MeerkaT3 additions are Copyright (c) 2026 MeerkaT3 contributors and are
+licensed under the same MIT terms. The native integration's MIT notice
+is in core/LICENSE-MIT.
+
+This project is independently maintained and is not an official T3 Code
+distribution. Existing third-party notices and licenses remain applicable.
+Reference sources under .repos/ retain their upstream licensing. Desktop
+packages include notices for the JavaScript dependencies and the exact
+compiled native dependencies.

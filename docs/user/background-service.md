@@ -1,13 +1,13 @@
 # Running T3 Code in the background
 
-This inherited reference describes the original T3 CLI. It does not install or update the Meerkat prototype. The supported Meerkat pilot runs its bundled server with the [Mac app](install.md); a separate background-service installation is not included.
+> **Inherited T3 reference.** This page describes the original T3 Code feature retained in the source. It is not part of the supported MeerkaT3 preview setup. Use [Installation](install.md) and [Providers and accounts](accounts.md) for MeerkaT3. Original T3 commands and downloads install a separate product.
 
 On Linux and macOS, T3 Code can run as a service for your user so you do not need
 to keep a terminal open.
 
 ## Manage the service
 
-Install the `t3` CLI first ([Install T3 Code](./install.md#command-line)), then
+Install the `t3` CLI first ([Install T3 Code](https://github.com/pingdotgg/t3code/blob/main/docs/user/install.md#command-line)), then
 run these commands on the machine that will host T3 Code:
 
 | Task                            | Command                |
@@ -29,7 +29,7 @@ the old version until you run `t3 service restart`. Pass `--yes` from a
 script. A server you started by hand is left running; stop and start it again
 to pick up the new version. Wait for any remote update already in progress
 before updating; to match a remote client's version, follow
-[Updating T3 Code](./updating.md).
+[Updating T3 Code](https://github.com/pingdotgg/t3code/blob/main/docs/user/updating.md).
 
 Pass an exact version (`t3 update 0.0.42`) to pin one, `--channel nightly` to
 switch trains, or `--allow-downgrade` to move backwards. `preview` is a
@@ -96,4 +96,4 @@ Downloads, it may need Full Disk Access for the `t3` executable listed in
 `~/Library/LaunchAgents/com.t3tools.t3code.service.plist`.
 
 For failures after signing in to T3 Connect, see
-[connection troubleshooting](./remote-access.md#t3-connect-troubleshooting).
+[connection troubleshooting](https://github.com/pingdotgg/t3code/blob/main/docs/user/remote-access.md#t3-connect-troubleshooting).

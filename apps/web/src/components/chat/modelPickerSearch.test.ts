@@ -16,6 +16,32 @@ describe("buildModelPickerSearchText", () => {
 });
 
 describe("scoreModelPickerSearch", () => {
+  it("finds a model by its account without exposing a protocol label as the account name", () => {
+    const model = {
+      driverKind: "meerkat",
+      providerDisplayName: "Models",
+      name: "Claude Fable 5",
+      slug: "anthropic:claude-fable-5",
+      subProvider: "anthropic",
+      accountLabel: "GitHub Copilot · King",
+    };
+    expect(scoreModelPickerSearch(model, "copilot fable")).not.toBeNull();
+    expect(scoreModelPickerSearch(model, "king fable")).not.toBeNull();
+  });
+
+  it("finds an exact native ID when two rows have the same display name", () => {
+    const model = {
+      driverKind: "meerkat",
+      providerDisplayName: "Models",
+      name: "Claude Haiku 4.5",
+      slug: "anthropic:claude-haiku-4-5-20260101",
+      subProvider: "anthropic",
+    };
+    expect(scoreModelPickerSearch(model, "20260101")).not.toBeNull();
+    expect(
+      scoreModelPickerSearch({ ...model, slug: "anthropic:claude-haiku-4-5" }, "20260101"),
+    ).toBeNull();
+  });
   it("matches typo-tolerant multi-token queries", () => {
     expect(
       scoreModelPickerSearch(

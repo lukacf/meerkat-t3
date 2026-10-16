@@ -1267,7 +1267,9 @@ it.layer(layer)("AntigravityAdapter", (it) => {
       const path = yield* Path.Path;
       const h = yield* makeHarness();
       const { attachmentsDir } = yield* ServerConfig;
-      const cwd = yield* fs.makeTempDirectoryScoped({ prefix: "t3-agy-fs-" });
+      const cwd = yield* fs
+        .makeTempDirectoryScoped({ prefix: "t3-agy-fs-" })
+        .pipe(Effect.flatMap(fs.realPath));
       const outside = yield* fs.makeTempDirectoryScoped({ prefix: "t3-agy-outside-" });
       yield* fs.writeFileString(path.join(cwd, "notes.txt"), "one\ntwo\nthree\n");
       yield* h.adapter.startSession({ threadId, cwd, runtimeMode: "approval-required" });

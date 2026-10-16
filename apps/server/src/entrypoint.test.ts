@@ -9,7 +9,9 @@ import { describe, expect, it } from "vite-plus/test";
 import { isEntrypoint } from "./entrypoint.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
 
-const makeTempDir = () => NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-entrypoint-test-"));
+// Node resolves module URLs through the real path, including macOS /var aliases.
+const makeTempDir = () =>
+  NodeFS.realpathSync(NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-entrypoint-test-")));
 
 describe("isEntrypoint", () => {
   it("uses the runtime answer when Node provides one", () => {

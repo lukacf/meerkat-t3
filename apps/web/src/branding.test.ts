@@ -73,11 +73,43 @@ describe("branding", () => {
     expect(branding.APP_VERSION).toBe("1.2.3");
   });
 
-  it("labels the standalone donor build as the Meerkat prototype", async () => {
+  it("uses the public product name for a standalone production build", async () => {
+    vi.stubEnv("DEV", false);
     vi.stubEnv("VITE_HOSTED_APP_CHANNEL", "");
+    Object.defineProperty(globalThis, "window", { configurable: true, value: {} });
     const branding = await import("./branding");
-    expect(branding.APP_BASE_NAME).toBe("Meerkat T3");
-    expect(branding.APP_DISPLAY_NAME).toBe("Meerkat T3 (Prototype)");
+    expect(branding.APP_BASE_NAME).toBe("MeerkaT3");
+    expect(branding.APP_STAGE_LABEL).toBe("Latest");
+    expect(branding.APP_DISPLAY_NAME).toBe("MeerkaT3");
+  });
+
+  it("labels standalone development builds explicitly", async () => {
+    vi.stubEnv("DEV", true);
+    vi.stubEnv("VITE_HOSTED_APP_CHANNEL", "");
+    Object.defineProperty(globalThis, "window", { configurable: true, value: {} });
+    const branding = await import("./branding");
+    expect(branding.APP_STAGE_LABEL).toBe("Dev");
+    expect(branding.APP_DISPLAY_NAME).toBe("MeerkaT3 (Dev)");
+  });
+
+  it("preserves the packaged validation label over hosted metadata", async () => {
+    vi.stubEnv("VITE_HOSTED_APP_CHANNEL", "nightly");
+    Object.defineProperty(globalThis, "window", {
+      configurable: true,
+      value: {
+        desktopBridge: {
+          getAppBranding: () => ({
+            baseName: "MeerkaT3",
+            stageLabel: "Internal Validation",
+            displayName: "MeerkaT3 (Internal Validation)",
+            appVersion: "0.0.56",
+          }),
+        },
+      },
+    });
+    const branding = await import("./branding");
+    expect(branding.APP_STAGE_LABEL).toBe("Internal Validation");
+    expect(branding.APP_DISPLAY_NAME).toBe("MeerkaT3 (Internal Validation)");
   });
 
   it("normalizes hosted app channel metadata", async () => {
@@ -88,7 +120,7 @@ describe("branding", () => {
     expect(branding.HOSTED_APP_CHANNEL).toBe("nightly");
     expect(branding.HOSTED_APP_CHANNEL_LABEL).toBe("Nightly");
     expect(branding.APP_STAGE_LABEL).toBe("Nightly");
-    expect(branding.APP_DISPLAY_NAME).toBe("Meerkat T3 (Nightly)");
+    expect(branding.APP_DISPLAY_NAME).toBe("MeerkaT3 (Nightly)");
   });
 
   it("does not label the latest hosted app channel", async () => {
@@ -99,7 +131,7 @@ describe("branding", () => {
     expect(branding.HOSTED_APP_CHANNEL).toBe("latest");
     expect(branding.HOSTED_APP_CHANNEL_LABEL).toBe("Latest");
     expect(branding.APP_STAGE_LABEL).toBe("Latest");
-    expect(branding.APP_DISPLAY_NAME).toBe("Meerkat T3");
+    expect(branding.APP_DISPLAY_NAME).toBe("MeerkaT3");
   });
 
   it("ignores unknown hosted app channels", async () => {
@@ -113,6 +145,20 @@ describe("branding", () => {
 });
 
 describe("branding logic", () => {
+  it.each(["Dev", "Internal Validation"])(
+    "preserves the %s shell identity when connected to a nightly server",
+    (stageLabel) => {
+      expect(
+        resolveServerBackedAppDisplayName({
+          baseName: "MeerkaT3",
+          fallbackDisplayName: `MeerkaT3 (${stageLabel})`,
+          fallbackStageLabel: stageLabel,
+          primaryServerVersion: "0.0.56-nightly.20261010.1",
+        }),
+      ).toBe(`MeerkaT3 (${stageLabel})`);
+    },
+  );
+
   it("returns Nightly for nightly primary server versions", () => {
     expect(
       resolveServerBackedAppStageLabel({

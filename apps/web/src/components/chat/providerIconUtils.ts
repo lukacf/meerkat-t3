@@ -20,10 +20,12 @@ export const PROVIDER_ICON_BY_PROVIDER: Partial<Record<ProviderDriverKind, Icon>
 
 export type ModelEsque = {
   credentialState?: ServerProviderModel["credentialState"];
+  catalogTier?: ServerProviderModel["catalogTier"];
   slug: string;
   name: string;
   shortName?: string | undefined;
   subProvider?: string | undefined;
+  accountLabel?: string | undefined;
   aliases?: ReadonlyArray<string> | undefined;
   isDefault?: boolean | undefined;
   badge?: "new" | undefined;
@@ -50,7 +52,7 @@ export function getDisplayModelName(
   options?: { preferShortName?: boolean },
 ): string {
   const name = options?.preferShortName && model.shortName ? model.shortName : model.name;
-  return stripLeadingQualifier(name, model.subProvider);
+  return model.accountLabel ? name : stripLeadingQualifier(name, model.subProvider);
 }
 
 export function getTriggerDisplayModelName(model: ModelEsque): string {

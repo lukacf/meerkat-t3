@@ -1055,7 +1055,9 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
               expect(firstUsage.totals?.inputTokens).toBeGreaterThan(0);
               expect(firstUsage.totals?.outputTokens).toBeGreaterThan(0);
               const repeatedUsage = yield* client[WS_METHODS.meerkatUsageSnapshot]({ instanceId });
-              expect(repeatedUsage.coverage, encodeDiagnostic(repeatedUsage.issues)).toBe("complete");
+              expect(repeatedUsage.coverage, encodeDiagnostic(repeatedUsage.issues)).toBe(
+                "complete",
+              );
               expect(repeatedUsage.sessions).toBe(firstUsage.sessions);
               expect(repeatedUsage.totals).toEqual(firstUsage.totals);
               const controlTarget = { projectId, instanceId, threadId: threadId("A") };

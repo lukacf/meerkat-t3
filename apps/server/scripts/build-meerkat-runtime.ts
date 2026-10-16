@@ -102,7 +102,7 @@ export async function stageMeerkatRuntime(input: {
       if (
         identity.cargoLockSha256 !== meerkatFileHash(Buffer.from(lock)) ||
         identity.meerkatVersion !== releases.meerkat ||
-        identity.mobkitVersion !== releases["meerkat-mobkit"]
+        identity.mobkitVersion !== releases.mobkit.version
       )
         throw new Error(
           "The native executable was not built from this consumer Cargo.lock. Rebuild with --build.",
@@ -159,17 +159,21 @@ if (process.argv[1] && import.meta.url === NodeURL.pathToFileURL(process.argv[1]
     const i = args.indexOf(flag);
     return i < 0 ? undefined : args[i + 1];
   };
-  const sourceRoot = value("--source");
-  if (!sourceRoot)
-    throw new Error(
-      "Usage: node scripts/build-meerkat-runtime.ts --source <meerkat-app consumer checkout> [--build | --binary <executable>] [--output <directory>]",
+  if (args.includes("--help")) {
+    process.stdout.write(
+      "Usage: pnpm native:build [--source <checkout>] [--binary <executable>] [--output <directory>]\n" +
+        "Builds core/ from this checkout and stages the verified runtime for development.\n" +
+        "Use --binary to stage an existing executable built from the same Cargo.lock.\n",
     );
+    process.exit(0);
+  }
+  const sourceRoot = value("--source") ?? repoRoot;
   const binary = value("--binary");
   const result = await stageMeerkatRuntime({
     sourceRoot,
     output: value("--output") ?? NodePath.join(repoRoot, "apps/server/resources/meerkat-runtime"),
     ...(binary ? { binary } : {}),
-    build: args.includes("--build"),
+    build: !binary || args.includes("--build"),
   });
   process.stdout.write(
     `Provisioned Meerkat ${result.build.meerkatVersion}, MobKit ${result.build.mobkitVersion} (${result.build.platform}-${result.build.arch}).\n`,

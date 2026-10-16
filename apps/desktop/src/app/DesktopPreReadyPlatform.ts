@@ -11,7 +11,7 @@ import * as Electron from "electron";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import * as DesktopEarlyElectronStartup from "./DesktopEarlyElectronStartup.ts";
-import { resolveDesktopAppBranding } from "./DesktopEnvironment.ts";
+import { resolveDesktopAppBranding, resolveDesktopArtifactPurpose } from "./DesktopEnvironment.ts";
 import { renderUrlHandlerDesktopEntry } from "./DesktopLinuxUrlHandler.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
@@ -107,6 +107,16 @@ export const make = Effect.gen(function* () {
             NodePath.posix.join(NodeOS.homedir(), ".local", "share"),
           "applications",
         );
+        let artifactPurpose: "release" | "internal-validation" = "release";
+        if (Electron.app.isPackaged) {
+          try {
+            artifactPurpose = resolveDesktopArtifactPurpose(
+              NodeFS.readFileSync(NodePath.join(Electron.app.getAppPath(), "package.json"), "utf8"),
+            );
+          } catch {
+            // Older packages without purpose metadata use the normal branding.
+          }
+        }
         NodeFS.mkdirSync(applicationsDir, { recursive: true });
         NodeFS.writeFileSync(
           NodePath.posix.join(applicationsDir, linux.linuxDesktopEntryName),
@@ -114,6 +124,7 @@ export const make = Effect.gen(function* () {
             displayName: resolveDesktopAppBranding({
               isDevelopment: linux.isDevelopment,
               appVersion: Electron.app.getVersion(),
+              artifactPurpose,
             }).displayName,
             execTarget: process.env.APPIMAGE?.trim() || process.execPath,
             scheme: ElectronProtocol.getDesktopScheme(linux.isDevelopment),

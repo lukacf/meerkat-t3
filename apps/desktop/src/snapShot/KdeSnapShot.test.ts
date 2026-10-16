@@ -90,7 +90,11 @@ it("installs offline at a stable path and verifies permissions using the install
   await setup.perform("install-kde-helper");
   const { executable, desktop } = kdeCapturePaths(paths);
   expect(await NodeFSP.readFile(executable, "utf8")).toBe("bundled executable");
-  expect((await NodeFSP.stat(executable)).mode & 0o777).toBe(0o755);
+  const mode = (await NodeFSP.stat(executable)).mode;
+  // A restrictive umask can remove group/world read and execute permissions.
+  // The helper must remain usable by its owner and never writable by others.
+  expect(mode & 0o700).toBe(0o700);
+  expect(mode & 0o022).toBe(0);
   expect(await NodeFSP.readFile(desktop, "utf8")).toBe(kdeCaptureDesktopEntry(executable));
   expect(kdeCaptureDesktopEntry(executable)).toContain(`Exec="${executable}" check`);
   expect((await setup.state()).status).toBe("ready");

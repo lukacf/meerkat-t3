@@ -135,6 +135,22 @@ impl meerkat::LlmClient for BlockingPeerWork {
         self.evidence
             .record(json!({"event":"provider_start","start":start}));
         let _ = self.started.send(start.clone());
+        if start.peers.is_empty() && start.steering_count > 0 {
+            // A pending steer may run independently after the original peer
+            // turn is stopped. Let it finish so the queued second review can
+            // start; only the two peer turns deliberately block for Stop.
+            return Box::pin(futures_util::stream::iter([
+                Ok(meerkat::LlmEvent::TextDelta {
+                    delta: "Steering acknowledged.".into(),
+                    meta: None,
+                }),
+                Ok(meerkat::LlmEvent::Done {
+                    outcome: meerkat::LlmDoneOutcome::Success {
+                        stop_reason: meerkat_core::StopReason::EndTurn,
+                    },
+                }),
+            ]));
+        }
         Box::pin(PendingPeerStream {
             start,
             evidence: self.evidence.clone(),

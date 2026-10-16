@@ -6885,14 +6885,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   assert.deepEqual(intent, {
                     kind: "edit",
                     instanceId,
-                    driver: ProviderDriverKind.make("fork"),
+                    driver: ProviderDriverKind.make("meerkat"),
                     changes: { config: { set: { opaque: { future: [1, 2] } }, remove: ["old"] } },
                   });
                   return {
                     ...DEFAULT_SERVER_SETTINGS,
                     providerInstances: {
                       [instanceId]: {
-                        driver: ProviderDriverKind.make("fork"),
+                        driver: ProviderDriverKind.make("meerkat"),
                         config: { opaque: { future: [1, 2] } },
                         environment: [
                           {
@@ -6919,7 +6919,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
                   intent: {
                     kind: "edit",
                     instanceId,
-                    driver: ProviderDriverKind.make("fork"),
+                    driver: ProviderDriverKind.make("meerkat"),
                     changes: { config: { set: { opaque: { future: [1, 2] } }, remove: ["old"] } },
                   },
                 });
@@ -7034,97 +7034,126 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
-  for (const mode of ["all", "targeted", "background"] as const) {
-    it.effect(`provider refresh invalidates T3 caches before probing (${mode})`, () => {
-      const driver = ProviderDriverKind.make("codex");
-      const instanceIds = [ProviderInstanceId.make("codex"), ProviderInstanceId.make("codex_work")];
-      const packageNames = ["@example/personal", "@example/work"];
-      const versionCache = new Map(
-        packageNames.map((name) => [
-          name,
-          {
-            expiresAt: Number.MAX_SAFE_INTEGER,
-            version: "1.0.0",
-          },
-        ]),
-      );
-      const invalidated: string[] = [];
-      const freshMaintenance: string[] = [];
-      let manifestRefreshed = false;
-      let probed = false;
-      const instances = instanceIds.map(
-        (instanceId, index) =>
-          ({
-            instanceId,
-            driverKind: driver,
-            continuationIdentity: { driverKind: driver, continuationKey: instanceId },
-            displayName: undefined,
-            enabled: true,
-            invalidateCaches: Effect.sync(() => {
-              invalidated.push(instanceId);
-            }),
-            snapshot: {
-              resolveMaintenance: (options) =>
-                Effect.sync(() => {
-                  assert.isTrue(options?.fresh);
-                  freshMaintenance.push(instanceId);
-                  return makeManualOnlyProviderMaintenanceCapabilities({
-                    provider: driver,
-                    packageName: packageNames[index]!,
-                  });
-                }),
-              getSnapshot: Effect.never,
-              refresh: Effect.never,
-              streamChanges: Stream.empty,
-              applyUsageLimits: () => Effect.void,
-            },
-            adapter: {} as ProviderInstance["adapter"],
-            textGeneration: {} as ProviderInstance["textGeneration"],
-          }) satisfies ProviderInstance,
-      );
-      const expected =
-        mode === "background" ? [] : mode === "targeted" ? [instanceIds[1]!] : instanceIds;
-      const probe = Effect.sync(() => {
-        probed = true;
-        assert.equal(manifestRefreshed, mode !== "background");
-        assert.deepEqual(invalidated.toSorted(), expected.toSorted());
-        assert.deepEqual(freshMaintenance.toSorted(), expected.toSorted());
-        for (let index = 0; index < instanceIds.length; index++) {
-          assert.equal(
-            versionCache.has(packageNames[index]!),
-            !expected.includes(instanceIds[index]!),
-          );
-        }
-        return [];
-      });
-      return Effect.gen(function* () {
-        yield* buildAppUnderTest({
-          layers: {
-            modelManifest: {
-              forceRefresh: Effect.sync(() => {
-                manifestRefreshed = true;
-                return ModelManifest.BUNDLED_MODEL_MANIFEST;
-              }),
-            },
-            providerInstanceRegistry: { listInstances: Effect.succeed(instances) },
-            providerRegistry: { refresh: () => probe, refreshInstance: () => probe },
-          },
-        });
-        const wsUrl = yield* getWsServerUrl("/ws");
-        yield* Effect.scoped(
-          withWsRpcClient(wsUrl, (client) =>
-            client[WS_METHODS.serverRefreshProviders]({
-              ...(mode === "targeted" ? { instanceId: instanceIds[1]! } : {}),
-              ...(mode !== "background" ? { refreshModels: true } : {}),
-            }),
-          ),
+  for (const scenario of [
+    { mode: "all", drivers: ["codex", "codex"], refreshManifest: true },
+    { mode: "targeted", drivers: ["codex", "codex"], refreshManifest: true },
+    { mode: "background", drivers: ["codex", "codex"], refreshManifest: false },
+    { mode: "all", drivers: ["meerkat", "meerkat"], refreshManifest: false },
+    { mode: "targeted", drivers: ["codex", "meerkat"], refreshManifest: false },
+    { mode: "all", drivers: ["meerkat", "codex"], refreshManifest: true },
+    { mode: "background", drivers: ["meerkat", "meerkat"], refreshManifest: false },
+    {
+      mode: "all",
+      drivers: ["meerkat", "codex"],
+      enabled: [true, false],
+      refreshManifest: false,
+    },
+    {
+      mode: "targeted",
+      drivers: ["meerkat", "codex"],
+      enabled: [true, false],
+      refreshManifest: false,
+    },
+  ] as const) {
+    const { mode, drivers, refreshManifest } = scenario;
+    const enabled = "enabled" in scenario ? scenario.enabled : [true, true];
+    it.effect(
+      `provider refresh invalidates caches before probing (${mode}, ${drivers.join("/")}, enabled ${enabled.join("/")})`,
+      () => {
+        const instanceIds = drivers.map((driver, index) =>
+          ProviderInstanceId.make(`${driver}_${index}`),
         );
-        assert.isTrue(probed);
-      }).pipe(
-        Effect.provideService(ProviderVersionCache, versionCache),
-        Effect.provide(NodeHttpServer.layerTest),
-      );
-    });
+        const packageNames = ["@example/personal", "@example/work"];
+        const versionCache = new Map(
+          packageNames.map((name) => [
+            name,
+            {
+              expiresAt: Number.MAX_SAFE_INTEGER,
+              version: "1.0.0",
+            },
+          ]),
+        );
+        const invalidated: string[] = [];
+        const freshMaintenance: string[] = [];
+        let manifestRefreshed = false;
+        let probed = false;
+        const instances = instanceIds.map(
+          (instanceId, index) =>
+            ({
+              instanceId,
+              driverKind: ProviderDriverKind.make(drivers[index]!),
+              continuationIdentity: {
+                driverKind: ProviderDriverKind.make(drivers[index]!),
+                continuationKey: instanceId,
+              },
+              displayName: undefined,
+              enabled: enabled[index]!,
+              invalidateCaches: Effect.sync(() => {
+                invalidated.push(instanceId);
+              }),
+              snapshot: {
+                resolveMaintenance: (options) =>
+                  Effect.sync(() => {
+                    assert.isTrue(options?.fresh);
+                    freshMaintenance.push(instanceId);
+                    return makeManualOnlyProviderMaintenanceCapabilities({
+                      provider: ProviderDriverKind.make(drivers[index]!),
+                      packageName: packageNames[index]!,
+                    });
+                  }),
+                getSnapshot: Effect.never,
+                refresh: Effect.never,
+                streamChanges: Stream.empty,
+                applyUsageLimits: () => Effect.void,
+              },
+              adapter: {} as ProviderInstance["adapter"],
+              textGeneration: {} as ProviderInstance["textGeneration"],
+            }) satisfies ProviderInstance,
+        );
+        const expected =
+          mode === "background" ? [] : mode === "targeted" ? [instanceIds[1]!] : instanceIds;
+        const probe = Effect.sync(() => {
+          probed = true;
+          assert.equal(manifestRefreshed, refreshManifest);
+          assert.deepEqual(invalidated.toSorted(), expected.toSorted());
+          assert.deepEqual(freshMaintenance.toSorted(), expected.toSorted());
+          for (let index = 0; index < instanceIds.length; index++) {
+            assert.equal(
+              versionCache.has(packageNames[index]!),
+              !expected.includes(instanceIds[index]!),
+            );
+          }
+          return [];
+        });
+        return Effect.gen(function* () {
+          yield* buildAppUnderTest({
+            layers: {
+              modelManifest: {
+                forceRefresh: Effect.sync(() => {
+                  manifestRefreshed = true;
+                  return ModelManifest.BUNDLED_MODEL_MANIFEST;
+                }),
+              },
+              providerInstanceRegistry: { listInstances: Effect.succeed(instances) },
+              providerRegistry: { refresh: () => probe, refreshInstance: () => probe },
+            },
+          });
+          const wsUrl = yield* getWsServerUrl("/ws");
+          yield* Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              client[WS_METHODS.serverRefreshProviders]({
+                ...(mode === "targeted" ? { instanceId: instanceIds[1]! } : {}),
+                ...(mode !== "background" ? { refreshModels: true } : {}),
+              }),
+            ),
+          );
+          assert.isTrue(probed);
+        }).pipe(
+          Effect.provideService(ProviderVersionCache, versionCache),
+          Effect.provide(NodeHttpServer.layerTest),
+        );
+      },
+    );
   }
 
   it.effect("serves config on reconnect without starting provider probes", () =>

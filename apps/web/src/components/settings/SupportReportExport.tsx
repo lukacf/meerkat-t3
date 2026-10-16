@@ -28,19 +28,25 @@ export function SupportReportExport() {
         <h2 className="text-sm font-medium text-foreground">Desktop support report</h2>
         <p className="max-w-2xl text-xs leading-relaxed text-muted-foreground">
           Save this Mac&apos;s app version, bundled runtime versions, and local backend status.
-          Conversations, credentials, paths, raw logs, and remote computers are excluded.
-          Nothing is sent automatically.
+          Conversations, credentials, paths, raw logs, and remote computers are excluded. Nothing is
+          sent automatically.
         </p>
       </div>
       <Button size="sm" variant="outline" disabled={pending} onClick={() => void save()}>
         {pending ? "Saving report..." : "Export support report"}
       </Button>
-      <p className="text-xs text-muted-foreground">If the workspace cannot load, use Help &gt; Export support report in the desktop menu.</p>
+      <p className="text-xs text-muted-foreground">
+        If the workspace cannot load, use Help &gt; Export support report in the desktop menu.
+      </p>
       <div aria-live="polite" className="text-xs">
         {result?.status === "saved" ? (
-          <p className="break-all">Saved to {result.filePath}. Send this file to the person who provided your build.</p>
+          <p className="break-all">
+            Saved to {result.filePath}. Send this file to the person who provided your build.
+          </p>
         ) : result?.status === "failed" ? (
-          <p className="text-destructive">The report could not be saved. Try another folder, or use the desktop Help menu.</p>
+          <p className="text-destructive">
+            The report could not be saved. Try another folder, or use the desktop Help menu.
+          </p>
         ) : null}
       </div>
     </div>

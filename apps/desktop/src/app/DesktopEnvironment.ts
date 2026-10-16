@@ -7,6 +7,7 @@ import type {
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -101,28 +102,41 @@ export class DesktopEnvironment extends Context.Service<
   }
 >()("@t3tools/desktop/app/DesktopEnvironment") {}
 
-const APP_BASE_NAME = "Meerkat T3";
+const APP_BASE_NAME = "MeerkaT3";
 
-function resolveDesktopAppStageLabel(input: {
-  readonly isDevelopment: boolean;
-  readonly appVersion: string;
-}): DesktopAppStageLabel {
-  if (input.isDevelopment) {
-    return "Dev";
+type DesktopArtifactPurpose = "release" | "internal-validation";
+
+export function resolveDesktopArtifactPurpose(packageMetadata: string): DesktopArtifactPurpose {
+  try {
+    const metadata: unknown = JSON.parse(packageMetadata);
+    return typeof metadata === "object" &&
+      metadata !== null &&
+      "meerkatArtifactPurpose" in metadata &&
+      metadata.meerkatArtifactPurpose === "internal-validation"
+      ? "internal-validation"
+      : "release";
+  } catch {
+    return "release";
   }
-
-  return isNightlyDesktopVersion(input.appVersion) ? "Nightly" : "Prototype";
 }
 
 export function resolveDesktopAppBranding(input: {
   readonly isDevelopment: boolean;
   readonly appVersion: string;
+  readonly artifactPurpose?: DesktopArtifactPurpose;
 }): DesktopAppBranding {
-  const stageLabel = resolveDesktopAppStageLabel(input);
+  const stageLabel: DesktopAppStageLabel =
+    input.artifactPurpose === "internal-validation"
+      ? "Internal Validation"
+      : input.isDevelopment
+        ? "Dev"
+        : isNightlyDesktopVersion(input.appVersion)
+          ? "Nightly"
+          : "Latest";
   return {
     baseName: APP_BASE_NAME,
     stageLabel,
-    displayName: `${APP_BASE_NAME} (${stageLabel})`,
+    displayName: stageLabel === "Latest" ? APP_BASE_NAME : `${APP_BASE_NAME} (${stageLabel})`,
     appVersion: input.appVersion,
   };
 }
@@ -159,7 +173,11 @@ function resolveDesktopRuntimeInfo(input: {
 
 const make = Effect.fn("desktop.environment.make")(function* (
   input: MakeDesktopEnvironmentInput,
-): Effect.fn.Return<DesktopEnvironment["Service"], Config.ConfigError, Path.Path> {
+): Effect.fn.Return<
+  DesktopEnvironment["Service"],
+  Config.ConfigError,
+  Path.Path | FileSystem.FileSystem
+> {
   const path = yield* Path.Path;
   const config = yield* DesktopConfig.DesktopConfig;
   const homeDirectory = input.homeDirectory;
@@ -183,9 +201,19 @@ const make = Effect.fn("desktop.environment.make")(function* (
     input.isPackaged && input.platform === "win32"
       ? path.join(input.resourcesPath, "server.asar")
       : appRoot;
+  const fileSystem = yield* FileSystem.FileSystem;
+  // Read the packaged purpose at runtime, including when packaging reuses a
+  // compiled main bundle. app.setName must not erase its validation label.
+  const packageMetadata = input.isPackaged
+    ? yield* fileSystem.readFileString(path.join(input.appPath, "package.json")).pipe(Effect.option)
+    : Option.none<string>();
   const branding = resolveDesktopAppBranding({
     isDevelopment,
     appVersion: input.appVersion,
+    artifactPurpose: Option.match(packageMetadata, {
+      onNone: () => "release" as const,
+      onSome: resolveDesktopArtifactPurpose,
+    }),
   });
   const displayName = branding.displayName;
   const stateDir = resolveDesktopStateDir({

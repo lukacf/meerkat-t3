@@ -213,6 +213,16 @@ it.effect(
       expect(file.current).toBe("\ufeffchanged\r\n");
       expect((yield* h.store.restore(h.scope, snapshot.id, [file])).restored).toEqual([unusual]);
       expect(yield* h.read(unusual)).toBe("\ufeffbaseline\r\n");
-      expect(view.files.find((entry) => entry.path === "removed/file.txt")?.restorable).toBe(false);
+      const removed = view.files.find((entry) => entry.path === "removed/file.txt");
+      expect(removed?.restorable).toBe(false);
+      expect(removed?.reason).toContain('The parent folder "removed" is missing.');
+      expect(
+        yield* io(() =>
+          NodeFSP.stat(NodePath.join(h.workspace, "removed")).then(
+            () => true,
+            () => false,
+          ),
+        ),
+      ).toBe(false);
     }).pipe(Effect.provide(layers), Effect.scoped),
 );

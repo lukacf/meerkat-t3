@@ -1,5 +1,7 @@
 # Import browser sessions
 
+> **Inherited T3 reference.** This page describes the original T3 Code feature retained in the source. It is not part of the supported MeerkaT3 preview setup. Use [Installation](install.md) and [Providers and accounts](accounts.md) for MeerkaT3. Original T3 commands and downloads install a separate product.
+
 The desktop app can import cookies from another browser so you can reuse its signed-in sessions
 in the preview browser.
 

@@ -12,6 +12,20 @@ import * as Schema from "effect/Schema";
 
 const isProviderConfigRecord = Schema.is(Schema.Record(Schema.String, Schema.Unknown));
 
+/** Saved donor configuration remains readable, but it cannot activate another runtime. */
+export const ensureNativeProviderSettingsIntent = Effect.fnUntraced(function* (
+  intent: ProviderSettingsIntent,
+) {
+  if (intent.kind === "delete") return;
+  const driver = intent.kind === "add" ? intent.instance.driver : intent.driver;
+  if (driver !== "meerkat") {
+    return yield* new ProviderSettingsConflictError({
+      instanceId: intent.kind === "resetDefault" ? driver : intent.instanceId,
+      reason: "unsupported_driver",
+    });
+  }
+});
+
 export const providerSettingsPatch = Effect.fnUntraced(function* (
   settings: ServerSettings,
   intent: ProviderSettingsIntent,

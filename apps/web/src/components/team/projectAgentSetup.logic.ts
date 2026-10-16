@@ -48,9 +48,9 @@ export function resolveProjectAgentModel<
     provider?.models.find(
       (entry) => provider.instanceId === preferred?.instanceId && entry.slug === preferred.model,
     ) ??
-    provider?.models.find((entry) => entry.isDefault && !modelCredentialRequirement(entry)) ??
-    provider?.models.find((entry) => !modelCredentialRequirement(entry));
-  const model = modelCredentialRequirement(candidate) ? undefined : candidate;
+    provider?.models.find((entry) => entry.isDefault && !modelCredentialRequirement(entry, true)) ??
+    provider?.models.find((entry) => !modelCredentialRequirement(entry, true));
+  const model = modelCredentialRequirement(candidate, true) ? undefined : candidate;
   return { provider, model };
 }
 

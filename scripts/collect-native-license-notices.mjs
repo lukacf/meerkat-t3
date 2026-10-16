@@ -17,13 +17,144 @@ function safeRelative(value) {
   check(
     typeof value === "string" &&
       value.length > 0 &&
-      !value.includes("\\") &&
-      !value.includes("\0") &&
+      !/[\\:\p{Cc}]/u.test(value) &&
       !NodePath.posix.isAbsolute(value) &&
       value.split("/").every((part) => part !== ".." && part !== "." && part !== ""),
     `Unsafe relative path: ${String(value)}`,
   );
   return value;
+}
+
+function publicText(value) {
+  check(
+    typeof value === "string" &&
+      !/(?:^|[\s"'(:=])(?:\/\S|[A-Za-z]:[\\/]|~[\\/]|file:)|\/(?:Users|home|private|tmp|var|Library)\//u.test(
+        value,
+      ),
+    "Public provenance must not contain local filesystem paths",
+  );
+  return value;
+}
+
+function publicUrl(value) {
+  const url = new URL(value);
+  check(
+    ["https:", "http:"].includes(url.protocol) && !url.username && !url.password,
+    "Expected a public HTTP(S) source URL",
+  );
+  return value;
+}
+
+function digestRecord(record) {
+  check(record && hashPattern.test(record.sha256), "Invalid evidence digest");
+  if (record.bytes !== undefined)
+    check(Number.isSafeInteger(record.bytes) && record.bytes >= 0, "Invalid evidence size");
+  return { sha256: record.sha256, ...(record.bytes === undefined ? {} : { bytes: record.bytes }) };
+}
+
+// Publish only documented provenance fields. Private evidence remains in the
+// collector inputs and is identified by its digest, never by a local path.
+async function publicProvenance(source) {
+  check(
+    source && typeof source === "object" && !Array.isArray(source),
+    "Invalid notice provenance",
+  );
+  const result = {};
+  for (const [key, value] of Object.entries(source)) {
+    if (
+      [
+        "kind",
+        "license",
+        "licenseId",
+        "declaredLicenseExpression",
+        "extraction",
+        "attribution",
+        "reason",
+        "key",
+      ].includes(key)
+    )
+      result[key] = publicText(value);
+    else if (["repository", "sourceUrl", "declaredLink"].includes(key))
+      result[key] = publicUrl(value);
+    else if (["path", "repositoryPath", "pathInVcs"].includes(key))
+      result[key] = safeRelative(value);
+    else if (key === "commit") {
+      check(/^[a-f0-9]{7,64}$/.test(value), "Invalid upstream commit");
+      result[key] = value;
+    } else if (
+      [
+        "copiedVerbatim",
+        "notAPackageRepositoryFile",
+        "appendixFieldsSubstituted",
+        "appleSdkCaveatPreserved",
+      ].includes(key)
+    ) {
+      check(typeof value === "boolean", "Invalid provenance flag");
+      result[key] = value;
+    } else if (["applicability", "declaration"].includes(key))
+      result[key] = await publicProvenance(value);
+    else if (key === "packageManifest") {
+      const bytes = await regularBytes(value.path);
+      check(
+        sha256(bytes) === value.sha256 &&
+          (value.bytes === undefined || bytes.length === value.bytes),
+        "Workspace manifest provenance mismatch",
+      );
+      result[key] = digestRecord(value);
+    }
+  }
+  return result;
+}
+
+function publicSelectedPackage(item, locked) {
+  const pinned = locked.get(item.key);
+  check(
+    pinned &&
+      pinned.source === (item.source ?? undefined) &&
+      pinned.checksum === (item.checksum ?? undefined),
+    `Selection is outside the lock: ${item.key}`,
+  );
+  check(
+    Array.isArray(item.roles) &&
+      item.roles.every((role) => ["runtime", "build", "proc-macro"].includes(role)),
+    `Invalid selected roles: ${item.key}`,
+  );
+  return { ...pinned, roles: [...new Set(item.roles)].sort() };
+}
+
+function publicProduct(graph, locked) {
+  if (graph.profile !== undefined)
+    check(["debug", "release"].includes(graph.profile), "Unsupported build profile");
+  if (graph.selectedUnitCount !== undefined)
+    check(
+      Number.isSafeInteger(graph.selectedUnitCount) && graph.selectedUnitCount > 0,
+      "Invalid selected unit count",
+    );
+  return {
+    ...(graph.profile === undefined ? {} : { profile: graph.profile }),
+    lock: { sha256: graph.lock.sha256 },
+    root: { binarySha256: graph.root.binarySha256 },
+    unresolvedEdges: [],
+    selectedRegistryPackages: graph.selectedRegistryPackages.map((item) =>
+      publicSelectedPackage(item, locked),
+    ),
+    selectedWorkspacePackages: (graph.selectedWorkspacePackages ?? []).map((item) =>
+      publicSelectedPackage(item, locked),
+    ),
+    ...(graph.selectedUnitCount === undefined
+      ? {}
+      : { selectedUnitCount: graph.selectedUnitCount }),
+    ...(graph.unitGraph === undefined ? {} : { unitGraph: digestRecord(graph.unitGraph) }),
+    ...(graph.inputs === undefined
+      ? {}
+      : {
+          inputs: Object.fromEntries(
+            ["metadata", "buildMessages"]
+              .filter((name) => graph.inputs[name] !== undefined)
+              .map((name) => [name, digestRecord(graph.inputs[name])]),
+          ),
+        }),
+  };
 }
 
 function paxFields(bytes) {
@@ -113,12 +244,16 @@ function lockedPackages(lock) {
       const version = field("version");
       const source = field("source");
       const checksum = field("checksum");
-      check(name && version, "Unsupported Cargo.lock package entry");
+      check(
+        /^[A-Za-z0-9_-]+$/.test(name ?? "") && /^[A-Za-z0-9.+-]+$/.test(version ?? ""),
+        "Unsupported Cargo.lock package entry",
+      );
       if (source)
         check(
           source.startsWith("registry+") && hashPattern.test(checksum ?? ""),
           `Expected a checksum-pinned registry package: ${name}@${version}`,
         );
+      if (source) publicUrl(source.slice("registry+".length));
       return { key: `${name}@${version}`, name, version, source, checksum };
     });
 }
@@ -160,7 +295,18 @@ export async function collectNativeNotices(options) {
     files[relative] = sha256(data);
     return { path: relative, sha256: files[relative], bytes: Buffer.byteLength(data) };
   };
-  const bindings = { selectionSha256: sha256(selectionBytes) };
+  const publicSelection = {
+    schemaVersion: 1,
+    platform: selection.platform,
+    method:
+      "Portable compilation selection; complete build evidence is retained separately by digest",
+    provenance: {
+      sourceSelectionSha256: sha256(selectionBytes),
+      sourceInventorySha256: sha256(inventoryBytes),
+    },
+    products: {},
+  };
+  const bindings = {};
   const all = new Map();
   const selected = new Map();
   const workspace = new Map();
@@ -184,6 +330,7 @@ export async function collectNativeNotices(options) {
     const locked = new Map(
       lockedPackages(lockBytes.toString("utf8")).map((item) => [item.key, item]),
     );
+    publicSelection.products[product] = publicProduct(graph, locked);
     for (const item of locked.values()) {
       if (!item.source) {
         workspace.set(item.key, { ...item, product });
@@ -225,7 +372,8 @@ export async function collectNativeNotices(options) {
       ...item,
       selected: selected.get(item.key) ?? [],
       notices: [],
-      licenseExpression: known.licenseExpression ?? null,
+      licenseExpression:
+        known.licenseExpression == null ? null : publicText(known.licenseExpression),
     };
     packages.push(record);
     const source = known.cachedSource;
@@ -253,7 +401,9 @@ export async function collectNativeNotices(options) {
       const manifest = entries.get("Cargo.toml");
       check(manifest?.regular, `Missing crate manifest: ${item.key}`);
       record.manifestSha256 = sha256(manifest.data);
-      record.licenseExpression = packageLicense(manifest.data) ?? record.licenseExpression;
+      const declaredLicense = packageLicense(manifest.data);
+      record.licenseExpression =
+        declaredLicense === null ? record.licenseExpression : publicText(declaredLicense);
       record.archiveChecksumVerified = true;
       for (const [relative, entry] of [...entries].sort(([a], [b]) => a.localeCompare(b, "en"))) {
         if (!noticeName.test(NodePath.posix.basename(relative))) continue;
@@ -298,7 +448,7 @@ export async function collectNativeNotices(options) {
           `Supplement provenance mismatch: ${item.key}`,
         );
         const copied = await write(`supplements/${item.key}/${safeRelative(notice.name)}`, bytes);
-        record.notices.push({ ...copied, source: notice.source });
+        record.notices.push({ ...copied, source: await publicProvenance(notice.source) });
       }
     }
     if (!entries || record.notices.length === 0)
@@ -326,7 +476,7 @@ export async function collectNativeNotices(options) {
       );
       item.notices.push({
         ...(await write(`workspace/${item.key}/${safeRelative(notice.name)}`, bytes)),
-        source: notice.source,
+        source: await publicProvenance(notice.source),
       });
     }
     if (item.notices.length === 0)
@@ -343,7 +493,7 @@ export async function collectNativeNotices(options) {
     packages,
     workspacePackages: [...workspace.values()],
     missing,
-    excludedSources: overrides.excludedSources ?? [],
+    excludedSources: await Promise.all((overrides.excludedSources ?? []).map(publicProvenance)),
     limits: [
       "Selected compilation closure is not proof of retained symbols or license applicability.",
       "All-target lock entries are inventoried separately from the selected macOS graph.",
@@ -351,7 +501,9 @@ export async function collectNativeNotices(options) {
       "Non-Cargo toolchain, native/system libraries and source-availability decisions are outside this collection.",
     ],
   };
-  await write("selection.json", selectionBytes);
+  const publicSelectionBytes = `${JSON.stringify(publicSelection, null, 2)}\n`;
+  bindings.selectionSha256 = sha256(publicSelectionBytes);
+  await write("selection.json", publicSelectionBytes);
   await write("inventory.json", `${JSON.stringify(result, null, 2)}\n`);
   await write(
     "README.txt",

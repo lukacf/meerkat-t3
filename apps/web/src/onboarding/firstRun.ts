@@ -20,7 +20,7 @@ export function useCompleteOnboarding(): () => Promise<void> {
   }, []);
 }
 
-/** One persisted record owns the setup journey, including its first real task. */
+/** One persisted record owns the setup journey, including specialist setup or a saved legacy first task. */
 export async function saveOnboardingProgress(progress: OnboardingProgress): Promise<void> {
   await ensureClientSettingsHydrated();
   await persistClientSettingsUpdate((current) => ({

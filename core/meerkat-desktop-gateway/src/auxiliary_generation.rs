@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::mobkit_registry::load_effective_realm_config;
-use crate::{GatewayError, derive_project_locator, member_turn_options_from_params};
+use crate::{GatewayError, derive_project_locator, member_turn_options_with_catalog};
 
 const MAX_PROMPT_BYTES: usize = 200_000;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
@@ -51,7 +51,9 @@ struct GenerationInput {
     images: Vec<ImageInput>,
 }
 
-pub(crate) async fn generate(params: Option<&Value>) -> Result<Value, GatewayError> {
+pub(crate) async fn generate(
+    params: Option<&Value>, auth: &crate::provider_auth::DesktopProviderAuth,
+) -> Result<Value, GatewayError> {
     let input: GenerationInput = serde_json::from_value(params.cloned().unwrap_or(Value::Null))
         .map_err(|error| {
             GatewayError::invalid(format!("Invalid text generation request: {error}"), None)
@@ -61,11 +63,14 @@ pub(crate) async fn generate(params: Option<&Value>) -> Result<Value, GatewayErr
         let locator = derive_project_locator(&input.project_path, Some(&input.config_state_root))?;
         let realm = load_effective_realm_config(&locator.project_path, &locator.state_root)
             .await.map_err(|error| GatewayError::policy(error, None))?;
-        let options = member_turn_options_from_params(
+        let catalog = auth.selection_catalog(&locator.project_path, &locator.state_root).await?;
+        let options = member_turn_options_with_catalog(
             json!({"model":input.model,"provider":input.provider,"providerParams":input.provider_params})
                 .as_object().expect("object"),
             &realm.effective,
             None,
+            Some(&realm.realm_id),
+            &catalog,
         )?;
         let identity = SessionLlmIdentity {
             model: options.model.expect("explicit model was validated").to_string(),
@@ -75,9 +80,12 @@ pub(crate) async fn generate(params: Option<&Value>) -> Result<Value, GatewayErr
                 Some(TurnMetadataOverride::Set(value)) => Some(value),
                 _ => None,
             },
-            auth_binding: None,
+            auth_binding: match options.auth_binding {
+                Some(TurnMetadataOverride::Set(binding)) => Some(binding),
+                _ => None,
+            },
         };
-        let persistence = meerkat_providers::auth_store::TokenStoreBackend::default_keyring_auto()
+        let persistence = crate::provider_auth::desktop_token_backend()
             .and_then(meerkat_providers::auth_store::TokenStoreBackend::open_with_refresh_authority)
             .map_err(|error| GatewayError::policy(format!("Could not open provider credentials: {error}"), None))?;
         let factory = AgentFactory::new(&locator.state_root)
@@ -249,6 +257,13 @@ struct NoWritingHooks;
 
 #[async_trait::async_trait]
 impl meerkat_core::HookEngine for NoWritingHooks {
+    fn mandatory_topology(
+        &self,
+        _overrides: Option<&meerkat_core::config::HookRunOverrides>,
+    ) -> Result<meerkat_core::HookMandatoryTopology, meerkat_core::HookEngineError> {
+        Ok(meerkat_core::HookMandatoryTopology::none())
+    }
+
     async fn execute(
         &self,
         _invocation: meerkat_core::HookInvocation,

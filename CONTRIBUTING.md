@@ -1,76 +1,53 @@
-# Contributing
+# Contributing to MeerkaT3
 
-## Developer Setup
+Bug fixes, documentation improvements, accessibility work, and focused reliability
+changes are welcome. For substantial features or architecture changes, open an
+[issue](https://github.com/lukacf/meerkat-t3/issues) describing the problem and
+proposed direction before investing in implementation. This helps keep work aligned
+with long-lived project specialists and connected agent workflows.
 
-See the [development runbook](docs/operations/development.md#first-checkout) for the initial checkout,
-development commands, tests, and platform-specific desktop packaging prerequisites.
+## Get a working checkout
 
-## Read This First
+Follow the [development guide](docs/operations/development.md). It covers frozen
+JavaScript installation, the in-repository native runtime, isolated development
+profiles, and scoped checks. No private checkout or provider account is needed to
+build or run the local automated fixtures.
 
-We are not actively accepting contributions right now.
+Read [AGENTS.md](AGENTS.md) for layer ownership and concurrency precautions. The
+[architecture guide](docs/internals/overview.md) explains where application state
+ends and native runtime authority begins.
 
-You can still report a bug or open a PR, but please do so knowing there is a high chance we close it, defer it forever, or never look at it.
+## Send a useful change
 
-Feature requests and proposals belong in [Ideas discussions](https://github.com/pingdotgg/t3code/discussions/categories/ideas), not issues.
+Keep one coherent problem per pull request. Explain the behavior before and after,
+why the change is needed, and the checks you ran. Add a regression test for behavior
+that was broken; documentation-only and cosmetic changes do not need artificial
+code tests. Update the relevant user guide when the workflow changes.
 
-If that sounds annoying, that is because it is. This project is still early and we are trying to keep scope, quality, and direction under control.
+For visual changes, include clear before/after screenshots. For interaction or
+layout problems, show the relevant viewport and state. Review screenshots, logs,
+and reproduction archives for private project content before uploading them.
 
-PRs are automatically labeled with a `vouch:*` trust status and a `size:*` diff size based on changed lines.
+AI-assisted contributions are welcome and held to the same standard as any other
+change. Understand and verify the code you submit. Do not include private prompts,
+credentials, conversation histories, or an agent's scratch files in the repository.
 
-If you are an external contributor, expect `vouch:unvouched` until we explicitly add you to [.github/VOUCHED.td](.github/VOUCHED.td).
+CI validates the supported desktop/web/server stack and native integration. A green
+unit suite is not a substitute for testing a changed user workflow. Explain any
+check you could not run so reviewers can evaluate the remaining uncertainty.
 
-## What We Are Most Likely To Accept
+## Report problems and get help
 
-Small, focused bug fixes.
+Use [Issues](https://github.com/lukacf/meerkat-t3/issues) for bugs, questions, and
+proposals. Include the app version or source commit, operating system, steps to
+reproduce, and the observed result. The [support guide](SUPPORT.md) explains how to
+collect a useful report. Security vulnerabilities belong in the private channel
+listed in [SECURITY.md](SECURITY.md), not a public issue.
 
-Small reliability fixes.
+## License and attribution
 
-Small performance improvements.
-
-Tightly scoped maintenance work that clearly improves the project without changing its direction.
-
-## What We Are Least Likely To Accept
-
-Large PRs.
-
-Drive-by feature work.
-
-Opinionated rewrites.
-
-Anything that expands product scope without us asking for it first.
-
-If you open a 1,000+ line PR full of new features, we will probably close it quickly and remember that you ignored the clearly written instructions.
-
-## If You Still Want To Open A PR
-
-Keep it small.
-
-Explain exactly what changed.
-
-Explain exactly why the change should exist.
-
-Follow the [documentation rules](AGENTS.md#documentation). Keep internal docs for decisions and
-hard-to-discover constraints. Update user guides when how to use a feature changes; skip descriptions
-of obvious controls and cosmetic changes.
-
-Do not mix unrelated fixes together.
-
-If the PR makes anything resembling a UI change, include clear before/after images.
-
-If the change depends on motion, timing, transitions, or interaction details, include a short video.
-
-If we have to guess what changed, we are much less likely to review it.
-
-## Discuss Changes First
-
-If you are thinking about a non-trivial change, start a discussion first. Issues are reserved for bug reports.
-
-That still does not mean we will want the PR, but it gives you a chance to avoid wasting your time.
-
-## Be Realistic
-
-Opening a PR does not create an obligation on our side.
-
-We may close it. We may ignore it. We may ask you to shrink it. We may reimplement the idea ourselves later.
-
-If you are fine with that, proceed.
+Contributions are licensed under this repository's [MIT license](LICENSE).
+MeerkaT3 builds on T3 Code; retain upstream copyright and attribution when adapting
+its code or assets. Dependencies retain their own licenses. Changes to packaged
+native dependencies must regenerate the matching notice bundle as described in
+[distribution](docs/operations/meerkat-distribution.md#native-license-notices).

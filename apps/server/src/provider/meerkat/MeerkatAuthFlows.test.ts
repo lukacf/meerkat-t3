@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off - Tests reserve isolated loopback callback ports.
+import * as NodeHttp from "node:http";
+import type { MeerkatAuthMethod } from "@t3tools/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { createMeerkatAuthFlows, parseMeerkatAuthCallback } from "./MeerkatAuthFlows.ts";
 
@@ -11,7 +14,166 @@ const deferred = <A>() => {
   return { promise, resolve, reject };
 };
 
+const reserveCallbackPort = async () => {
+  const server = NodeHttp.createServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Missing fixture callback port");
+  return {
+    port: address.port,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+};
+const callbackStatus = (url: string) =>
+  new Promise<number>((resolve, reject) => {
+    NodeHttp.get(url, (response) => {
+      response.once("error", reject);
+      response.once("end", () => resolve(response.statusCode ?? 0));
+      response.resume();
+    }).once("error", reject);
+  });
+
 describe("Meerkat provider sign-in", () => {
+  it("uses the native callback host and path, falling back only to another allowed port", async () => {
+    const occupied = await reserveCallbackPort();
+    const fallback = await reserveCallbackPort();
+    await fallback.close();
+    const flows = createMeerkatAuthFlows();
+    const expectedRedirect = `http://localhost:${fallback.port}/auth/callback`;
+    const request = vi.fn(async (method: string, params: Record<string, unknown>) => {
+      expect(params.redirectUri).toBe(expectedRedirect);
+      return method === "auth.v1.loginStart"
+        ? { authorizeUrl: "https://auth.example/start", state: "native-state" }
+        : { connected: true };
+    });
+    try {
+      const flow = await flows.start(
+        "owner",
+        "scope",
+        "openai",
+        request,
+        {},
+        undefined,
+        "account",
+        async () => ({
+          redirectHost: "localhost",
+          path: "/auth/callback",
+          ports: [occupied.port, fallback.port],
+        }),
+      );
+      const wrongPath = await callbackStatus(
+        `http://127.0.0.1:${fallback.port}/oauth/callback?state=native-state&code=wrong-path`,
+      );
+      expect(wrongPath).toBe(400);
+      expect(flows.status(flow.flowId!, "owner", "scope", "openai").status).toBe("waiting");
+      expect(request).toHaveBeenCalledTimes(1);
+      const response = await callbackStatus(`${expectedRedirect}?state=native-state&code=accepted`);
+      expect(response).toBe(200);
+      expect(flows.status(flow.flowId!, "owner", "scope", "openai").status).toBe("connected");
+      expect(request).toHaveBeenLastCalledWith("auth.v1.loginComplete", {
+        provider: "openai",
+        redirectUri: expectedRedirect,
+        state: "native-state",
+        code: "accepted",
+      });
+    } finally {
+      flows.dispose();
+      await occupied.close();
+    }
+  });
+
+  it("fails before native authorization if every permitted callback port is occupied", async () => {
+    const first = await reserveCallbackPort();
+    const second = await reserveCallbackPort();
+    const flows = createMeerkatAuthFlows();
+    const request = vi.fn(async () => ({
+      authorizeUrl: "https://auth.example/start",
+      state: "native-state",
+    }));
+    try {
+      await expect(
+        flows.start("owner", "scope", "openai", request, {}, undefined, "account", async () => ({
+          redirectHost: "localhost",
+          path: "/auth/callback",
+          ports: [first.port, second.port],
+        })),
+      ).rejects.toThrow(`required local ports (${first.port}, ${second.port})`);
+      expect(request).not.toHaveBeenCalled();
+      const retry = await flows.start("owner", "scope", "openai", request, {});
+      expect(retry.status).toBe("waiting");
+    } finally {
+      flows.dispose();
+      await first.close();
+      await second.close();
+    }
+  });
+
+  it("allows an ephemeral port only when the native callback policy includes zero", async () => {
+    const flows = createMeerkatAuthFlows();
+    const request = vi.fn(async (_method: string, params: Record<string, unknown>) => {
+      const redirect = new URL(String(params.redirectUri));
+      expect(redirect.hostname).toBe("127.0.0.1");
+      expect(Number(redirect.port)).toBeGreaterThan(0);
+      expect(redirect.pathname).toBe("/callback");
+      return { authorizeUrl: "https://auth.example/start", state: "native-state" };
+    });
+    try {
+      expect(
+        (
+          await flows.start(
+            "owner",
+            "scope",
+            "google",
+            request,
+            {},
+            undefined,
+            "account",
+            async () => ({ redirectHost: "127.0.0.1", path: "/callback", ports: [0] }),
+          )
+        ).status,
+      ).toBe("waiting");
+      expect(request).toHaveBeenCalledTimes(1);
+    } finally {
+      flows.dispose();
+    }
+  });
+
+  it.each([
+    { redirectHost: "other.test", path: "/callback", ports: [0] },
+    { redirectHost: "localhost", path: "/callback", ports: [] },
+    { redirectHost: "localhost", path: "/callback", ports: [-1] },
+    { redirectHost: "localhost", path: "/callback", ports: [65_536] },
+    { redirectHost: "localhost", path: "/callback", ports: [1.5] },
+    { redirectHost: "localhost", path: "//other.test/callback", ports: [0] },
+    { redirectHost: "localhost", path: "/callback?override=true", ports: [0] },
+    { redirectHost: "localhost", path: "/callback#fragment", ports: [0] },
+    { redirectHost: "localhost", path: "/auth/../callback", ports: [0] },
+    { redirectHost: "localhost", path: "/auth\\callback", ports: [0] },
+  ])("rejects an invalid native callback policy: %j", async (policy) => {
+    const flows = createMeerkatAuthFlows();
+    const request = vi.fn();
+    try {
+      await expect(
+        flows.start(
+          "owner",
+          "scope",
+          "openai",
+          request,
+          {},
+          undefined,
+          "account",
+          async () => policy as NonNullable<MeerkatAuthMethod["callback"]>,
+        ),
+      ).rejects.toThrow("invalid sign-in callback policy");
+      expect(request).not.toHaveBeenCalled();
+    } finally {
+      flows.dispose();
+    }
+  });
+
   it("rejects unrelated callbacks", () => {
     const redirect = "http://127.0.0.1:43210/oauth/callback";
     expect(
@@ -392,6 +554,117 @@ describe("Meerkat provider sign-in", () => {
     }
   });
 
+  it("keeps an expired browser result readable and dismissible after releasing its callback", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.setSystemTime(0);
+    const flows = createMeerkatAuthFlows();
+    let redirect = "";
+    const request = vi.fn(async (_method: string, params: Record<string, unknown>) => {
+      redirect = String(params.redirectUri);
+      return { authorizeUrl: "https://auth.example/start", state: "native-state" };
+    });
+    try {
+      const flow = await flows.start("owner", "scope", "openai", request, {});
+      expect(flow.expiresAt).toBe("1970-01-01T00:05:00.000Z");
+      await vi.advanceTimersByTimeAsync(5 * 60_000);
+      const expired = flows.status(flow.flowId!, "owner", "scope", "openai");
+      expect(expired).toMatchObject({
+        flowId: flow.flowId,
+        authorizeUrl: null,
+        status: "failed",
+        message: "Sign-in expired. Start again.",
+        expiresAt: flow.expiresAt,
+      });
+      await expect(callbackStatus(redirect)).rejects.toThrow("ECONNREFUSED");
+      for (const [owner, scope, provider] of [
+        ["other-owner", "scope", "openai"],
+        ["owner", "other-scope", "openai"],
+        ["owner", "scope", "anthropic"],
+      ] as const) {
+        expect(() => flows.status(flow.flowId!, owner, scope, provider)).toThrow("unavailable");
+        expect(() => flows.cancel(flow.flowId!, owner, scope, provider)).toThrow("unavailable");
+      }
+      expect(request).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(1);
+      const cancelled = flows.cancel(flow.flowId!, "owner", "scope", "openai");
+      expect(cancelled).toEqual({
+        flowId: null,
+        authorizeUrl: null,
+        status: "cancelled",
+        message: null,
+      });
+      expect(flows.cancel(flow.flowId!, "owner", "scope", "openai")).toEqual(cancelled);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      flows.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds expired result retention without preventing dismissal after a long absence", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    const flows = createMeerkatAuthFlows();
+    const request = vi.fn(async () => ({
+      authorizeUrl: "https://auth.example/start",
+      state: "native-state",
+    }));
+    try {
+      const flow = await flows.start("owner", "scope", "openai", request, {});
+      await vi.advanceTimersByTimeAsync(10 * 60_000 - 1);
+      expect(flows.status(flow.flowId!, "owner", "scope", "openai").status).toBe("failed");
+      await vi.advanceTimersByTimeAsync(1);
+      expect(() => flows.status(flow.flowId!, "owner", "scope", "openai")).toThrow("unavailable");
+      expect(vi.getTimerCount()).toBe(0);
+      expect(flows.cancel(flow.flowId!, "owner", "scope", "openai").status).toBe("cancelled");
+      expect(flows.cancel(flow.flowId!, "owner", "scope", "openai").status).toBe("cancelled");
+      expect(request).toHaveBeenCalledTimes(1);
+      const retry = await flows.start("owner", "scope", "openai", request, {});
+      expect(retry.status).toBe("waiting");
+      expect(vi.getTimerCount()).toBe(1);
+      flows.dispose();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      flows.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retains a completed result for a bounded period and clears its callback deadline", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    const flows = createMeerkatAuthFlows();
+    let redirect = "";
+    const request = vi.fn(async (method: string, params: Record<string, unknown>) => {
+      if (method === "auth.v1.loginStart") {
+        redirect = String(params.redirectUri);
+        return { authorizeUrl: "https://auth.example/start", state: "native-state" };
+      }
+      return {};
+    });
+    try {
+      const flow = await flows.start("owner", "scope", "openai", request, {});
+      await vi.advanceTimersByTimeAsync(60_000);
+      const result = await flows.complete(
+        flow.flowId!,
+        "owner",
+        "scope",
+        "openai",
+        `${redirect}?state=native-state&code=good`,
+      );
+      expect(result.status).toBe("connected");
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(5 * 60_000 - 1);
+      expect(flows.status(flow.flowId!, "owner", "scope", "openai")).toEqual(result);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(() => flows.status(flow.flowId!, "owner", "scope", "openai")).toThrow("unavailable");
+      expect(vi.getTimerCount()).toBe(0);
+      expect(flows.cancel(flow.flowId!, "owner", "scope", "openai").status).toBe("cancelled");
+      expect(request).toHaveBeenCalledTimes(2);
+    } finally {
+      flows.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it("preserves native completion when the flow expires during readiness publication", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     const flows = createMeerkatAuthFlows();
@@ -425,7 +698,7 @@ describe("Meerkat provider sign-in", () => {
       );
       await publicationStarted;
       await vi.advanceTimersByTimeAsync(5 * 60_000);
-      expect(() => flows.status(flow.flowId!, "owner", "scope", "openai")).toThrow("unavailable");
+      expect(flows.status(flow.flowId!, "owner", "scope", "openai").status).toBe("connected");
       finishPublication();
       expect((await completion).status).toBe("connected");
     } finally {
@@ -471,7 +744,12 @@ describe("Meerkat provider sign-in", () => {
       );
       await entered.promise;
       await vi.advanceTimersByTimeAsync(5 * 60_000);
-      expect(() => flows.status(flow.flowId!, "owner", "thread", "openai")).toThrow("unavailable");
+      expect(flows.status(flow.flowId!, "owner", "thread", "openai")).toMatchObject({
+        status: "waiting",
+        authorizeUrl: null,
+        expiresAt: flow.expiresAt,
+      });
+      expect(() => flows.cancel(flow.flowId!, "owner", "thread", "openai")).toThrow("completing");
       await expect(flows.runLogout("account", "openai", logout)).rejects.toThrow("completing");
       await expect(
         flows.start("owner", "thread", "openai", request, {}, undefined, "account"),
@@ -484,6 +762,202 @@ describe("Meerkat provider sign-in", () => {
       expect(() => flows.status(flow.flowId!, "owner", "thread", "openai")).toThrow("unavailable");
     } finally {
       nativeCompletion.resolve(undefined);
+      flows.dispose();
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("Native device-code sign-in", () => {
+  it("never forwards private device credentials through native errors or malformed responses", async () => {
+    vi.useFakeTimers();
+    const flows = createMeerkatAuthFlows();
+    const device = {
+      deviceCode: "fixture-private-device",
+      userCode: "ABCD",
+      verificationUri: "https://github.com/login/device",
+      verificationUriComplete: null,
+      expiresIn: 60,
+      interval: 5,
+    };
+    try {
+      await expect(
+        flows.startDevice(
+          "owner",
+          "malformed",
+          "openai",
+          async () => ({ ...device, expiresIn: "fixture-private-device" }),
+          {},
+        ),
+      ).rejects.toThrow("invalid device sign-in response");
+      const view = await flows.startDevice(
+        "owner",
+        "scope",
+        "openai",
+        async (method) => {
+          if (method === "auth.v1.deviceStart") return device;
+          throw new Error("native rejected fixture-private-device");
+        },
+        {},
+      );
+      vi.advanceTimersByTime(5000);
+      await expect(flows.pollDevice(view.flowId!, "owner", "scope", "openai")).rejects.toThrow(
+        "Could not check device sign-in. Try again.",
+      );
+      expect(JSON.stringify(flows.status(view.flowId!, "owner", "scope", "openai"))).not.toContain(
+        "fixture-private-device",
+      );
+      const failed = await flows.startDevice(
+        "owner",
+        "failure",
+        "openai",
+        async (method) =>
+          method === "auth.v1.deviceStart"
+            ? device
+            : { status: "failed", message: "diagnostic fixture-private-device" },
+        {},
+      );
+      vi.advanceTimersByTime(5000);
+      expect(
+        JSON.stringify(await flows.pollDevice(failed.flowId!, "owner", "failure", "openai")),
+      ).not.toContain("fixture-private-device");
+    } finally {
+      flows.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps device credentials on the server, respects polling intervals and rejects another owner", async () => {
+    vi.useFakeTimers();
+    const flows = createMeerkatAuthFlows();
+    const connected = vi.fn(async () => {});
+    const request = vi.fn(async (method: string) =>
+      method === "auth.v1.deviceStart"
+        ? {
+            deviceCode: "private-device-credential",
+            userCode: "ABCD-EFGH",
+            verificationUri: "https://github.com/login/device",
+            verificationUriComplete: null,
+            expiresIn: 600,
+            interval: 5,
+          }
+        : { status: "connected" },
+    );
+    try {
+      const view = await flows.startDevice(
+        "owner",
+        "scope",
+        "openai",
+        request,
+        { bindingId: "work" },
+        connected,
+      );
+      expect(JSON.stringify(view)).not.toContain("private-device-credential");
+      expect(view.userCode).toBe("ABCD-EFGH");
+      await expect(flows.pollDevice(view.flowId!, "other", "scope", "openai")).rejects.toThrow(
+        "unavailable",
+      );
+      expect((await flows.pollDevice(view.flowId!, "owner", "scope", "openai")).status).toBe(
+        "waiting",
+      );
+      expect(request).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(5000);
+      expect((await flows.pollDevice(view.flowId!, "owner", "scope", "openai")).status).toBe(
+        "connected",
+      );
+      expect(request).toHaveBeenLastCalledWith("auth.v1.devicePoll", {
+        bindingId: "work",
+        provider: "openai",
+        deviceCode: "private-device-credential",
+      });
+      expect(connected).toHaveBeenCalledTimes(1);
+      await flows.pollDevice(view.flowId!, "owner", "scope", "openai");
+      expect(request).toHaveBeenCalledTimes(2);
+    } finally {
+      flows.dispose();
+      vi.useRealTimers();
+    }
+  });
+
+  it.each(["updated", "unchanged", "needs_selection"] as const)(
+    "retains %s device activation without retrying committed sign-in after a refresh failure",
+    async (status) => {
+      vi.useFakeTimers();
+      const flows = createMeerkatAuthFlows();
+      const defaultActivation = {
+        status,
+        providers: status === "updated" ? ["openai", "anthropic", "gemini"] : [],
+      };
+      const request = vi.fn(async (method: string) =>
+        method === "auth.v1.deviceStart"
+          ? {
+              deviceCode: "private-device-credential",
+              userCode: "ABCD-EFGH",
+              verificationUri: "https://github.com/login/device",
+              verificationUriComplete: null,
+              expiresIn: 600,
+              interval: 5,
+            }
+          : { status: "connected", defaultActivation, token: "private-native-token" },
+      );
+      const refresh = vi.fn(async () => {
+        throw new Error("Catalog unavailable");
+      });
+      try {
+        const flow = await flows.startDevice("owner", "scope", "openai", request, {}, refresh);
+        vi.advanceTimersByTime(5000);
+        const result = await flows.pollDevice(flow.flowId!, "owner", "scope", "openai");
+        expect(result.status).toBe("connected");
+        expect(result.defaultActivation).toEqual(defaultActivation);
+        expect(JSON.stringify(result)).not.toContain("private-");
+        expect(await flows.pollDevice(flow.flowId!, "owner", "scope", "openai")).toEqual(result);
+        expect(request.mock.calls.map(([method]) => method)).toEqual([
+          "auth.v1.deviceStart",
+          "auth.v1.devicePoll",
+        ]);
+        expect(refresh).toHaveBeenCalledTimes(1);
+      } finally {
+        flows.dispose();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("expires without contacting the provider and keeps a pending poll fenced from logout", async () => {
+    vi.useFakeTimers();
+    const flows = createMeerkatAuthFlows();
+    const poll = deferred<{ status: "connected" }>();
+    const request = vi.fn(async (method: string) =>
+      method === "auth.v1.deviceStart"
+        ? {
+            deviceCode: "fixture-device",
+            userCode: "ABCD",
+            verificationUri: "https://github.com/login/device",
+            verificationUriComplete: null,
+            expiresIn: 60,
+            interval: 5,
+          }
+        : poll.promise,
+    );
+    try {
+      const expired = await flows.startDevice("owner", "expired", "openai", request, {});
+      vi.advanceTimersByTime(61000);
+      expect((await flows.pollDevice(expired.flowId!, "owner", "expired", "openai")).status).toBe(
+        "failed",
+      );
+      expect(request).toHaveBeenCalledTimes(1);
+      const view = await flows.startDevice("owner", "scope", "openai", request, {});
+      vi.advanceTimersByTime(5000);
+      const running = flows.pollDevice(view.flowId!, "owner", "scope", "openai");
+      await expect(flows.runLogout("scope", "openai", async () => {})).rejects.toThrow(
+        "completing",
+      );
+      poll.resolve({ status: "connected" });
+      expect((await running).status).toBe("connected");
+      await flows.runLogout("scope", "openai", async () => {});
+      expect(() => flows.status(view.flowId!, "owner", "scope", "openai")).toThrow("unavailable");
+    } finally {
+      poll.resolve({ status: "connected" });
       flows.dispose();
       vi.useRealTimers();
     }

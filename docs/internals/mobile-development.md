@@ -1,5 +1,10 @@
 # Mobile development lifecycle
 
+> Scope: this page is reference material for the inherited mobile client. It is not a
+> supported MeerkaT3 preview service or release path. The supported local Mac stack
+> is described in [development](../operations/development.md) and
+> [distribution](../operations/meerkat-distribution.md).
+
 The [connection runtime's HMR boundary](../../apps/mobile/src/lib/hot-swappable-atom-runtime.ts)
 keeps a stable atom runtime and replaces its Effect layer through a writable atom.
 It accepts the update only after installing the new layer. Otherwise importers

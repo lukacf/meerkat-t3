@@ -1,7 +1,9 @@
 # Claude
 
+> **Inherited T3 reference.** This page describes the original T3 Code feature retained in the source. It is not part of the supported MeerkaT3 preview setup. Use [Installation](install.md) and [Providers and accounts](accounts.md) for MeerkaT3. Original T3 commands and downloads install a separate product.
+
 T3 Code uses Claude Code's login and configuration. Start with the default provider
-for one account; [provider setup](./install.md#providers) covers installation and
+for one account; [provider setup](https://github.com/pingdotgg/t3code/blob/main/docs/user/install.md#providers) covers installation and
 shared provider settings.
 
 ## Separate accounts or configurations
@@ -50,7 +52,7 @@ window. Leave it empty for Claude Code's default.
 
 You can also send `/compact` in an existing conversation. Web and desktop offer
 **Compact context** from the context meter and may suggest it when you return to
-a large older thread. See [commands and skills](./composer.md#commands-and-skills)
+a large older thread. See [commands and skills](https://github.com/pingdotgg/t3code/blob/main/docs/user/composer.md#commands-and-skills)
 for using composer commands.
 
 ## Usage limits

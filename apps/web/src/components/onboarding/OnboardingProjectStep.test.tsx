@@ -77,7 +77,7 @@ vi.mock("./OnboardingProjectReadiness", () => ({
     <div>
       <p>Review project</p>
       <button onClick={onBack}>Back to project</button>
-      <button onClick={onContinue}>Continue to first task</button>
+      <button onClick={onContinue}>Continue to project agents</button>
     </div>
   ),
 }));
@@ -231,7 +231,7 @@ it("resumes the reviewed project when its computer is still selected without cha
   drafts.selectEnvironment(remote);
   const before = [...saved];
   await render({ initialProjectRef: { environmentId: local, projectId } });
-  await click("Continue to first task");
+  await click("Continue to project agents");
 
   expect(openProject).toHaveBeenCalledExactlyOnceWith({ environmentId: local, projectId });
   expect([...saved]).toEqual(before);
@@ -493,7 +493,7 @@ it("keeps unread recovery blocked after failed retry or discard, including a sav
     },
   });
   await render({ initialProjectRef: { environmentId: local, projectId } });
-  expect(button("Continue to first task")).toBeUndefined();
+  expect(button("Continue to project agents")).toBeUndefined();
   await click("Retry reading draft");
   expect(button("Retry reading draft")).toBeDefined();
   await click("Discard draft");
@@ -508,7 +508,7 @@ it("keeps unread recovery blocked after failed retry or discard, including a sav
   await click("Discard draft");
   expect(saved.has(key)).toBe(false);
   expect(button("Retry reading draft")).toBeUndefined();
-  await click("Continue to first task");
+  await click("Continue to project agents");
   expect(openProject).toHaveBeenCalledExactlyOnceWith({ environmentId: local, projectId });
 });
 

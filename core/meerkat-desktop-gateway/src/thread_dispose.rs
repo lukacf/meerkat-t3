@@ -1,20 +1,57 @@
 use std::{
     collections::HashSet,
     future::Future,
+    pin::Pin,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc,
+        atomic::{AtomicBool, Ordering},
     },
     time::Duration,
 };
 
-use meerkat_mob::{MobError, MobHandle, MobMachineStateChanges};
+use meerkat_mob::{MobActorTaskWait, MobActorTaskWatch, MobError, MobHandle};
 use meerkat_mobkit::UnifiedRuntime;
 use meerkat_runtime::SessionServiceRuntimeExt;
 use tokio::{sync::Mutex, task::JoinHandle};
 
 const CALLER_WAIT: Duration = Duration::from_secs(60);
 const INPUT_RECHECK: Duration = Duration::from_millis(100);
+
+type SessionCleanupFuture = Pin<Box<dyn Future<Output = Result<(), String>> + Send>>;
+
+/// The desktop creates one concrete session service for each native mob.
+/// Meta owns the mob actors; the desktop also closes its service's remaining
+/// resident sessions through the service's typed terminal lifecycle boundary.
+pub(crate) struct OwnedSessionCleanup {
+    cleanup: Box<dyn Fn() -> SessionCleanupFuture + Send + Sync>,
+    state: Mutex<DisposalTask>,
+}
+
+impl OwnedSessionCleanup {
+    pub(crate) fn new<F>(cleanup: impl Fn() -> F + Send + Sync + 'static) -> Self
+    where
+        F: Future<Output = Result<(), String>> + Send + 'static,
+    {
+        Self {
+            cleanup: Box::new(move || Box::pin(cleanup())),
+            state: Mutex::new(DisposalTask::default()),
+        }
+    }
+
+    pub(crate) async fn shutdown(&self) -> Result<(), String> {
+        let mut state = self.state.lock().await;
+        if state.complete {
+            return Ok(());
+        }
+        if let Some(error) = &state.failed_task {
+            return Err(error.clone());
+        }
+        if state.worker.is_none() {
+            state.worker = Some(tokio::spawn((self.cleanup)()));
+        }
+        state.wait(CALLER_WAIT).await
+    }
+}
 
 async fn interrupt_owned_inputs(
     runtime: &UnifiedRuntime,
@@ -23,7 +60,9 @@ async fn interrupt_owned_inputs(
     let adapter = runtime
         .mob_runtime()
         .session_service()
-        .and_then(|service| service.runtime_adapter())
+        .ok_or("Owned native mob cleanup requires its session service")?
+        .acquire_runtime_adapter(None)
+        .map_err(|error| format!("Cannot acquire owned cleanup runtime: {error}"))?
         .ok_or("Owned native mob cleanup requires its session runtime")?;
 
     // Resolve identities through native session-binding authority. Retained
@@ -106,20 +145,24 @@ where
 }
 
 async fn shutdown_actor(runtime: &UnifiedRuntime, handle: &MobHandle) -> Result<(), String> {
-    let mut changes = handle.machine_state_changes();
+    let mut actor_task = handle.actor_task_watch();
     while_interrupting(runtime, handle, async {
         handle
             .shutdown()
             .await
             .map_err(|error| format!("Native mob cleanup did not complete: {error}"))?;
-        while !changes.is_closed() {
-            if changes.changed().await.is_err() {
-                break;
-            }
-        }
-        Ok(())
+        await_actor_return(&mut actor_task).await
     })
     .await
+}
+
+async fn await_actor_return(actor_task: &mut MobActorTaskWatch) -> Result<(), String> {
+    match actor_task.wait().await {
+        MobActorTaskWait::Returned => Ok(()),
+        outcome => Err(format!(
+            "Native mob actor did not attest physical cleanup: {outcome:?}"
+        )),
+    }
 }
 
 /// One retained cleanup owner per embedded runtime. A caller wait can expire,
@@ -129,6 +172,7 @@ pub(crate) struct NativeRuntimeDisposal {
     started: AtomicBool,
     state: Mutex<DisposalTask>,
     progress: Arc<Mutex<DisposalProgress>>,
+    session_cleanup: Option<Arc<OwnedSessionCleanup>>,
 }
 
 #[derive(Default)]
@@ -142,10 +186,18 @@ struct DisposalTask {
 struct DisposalProgress {
     runtime_phases_completed: bool,
     parent_closed: bool,
+    native_child_root_released: bool,
     children_closed: HashSet<String>,
 }
 
 impl NativeRuntimeDisposal {
+    pub(crate) fn with_session_cleanup(cleanup: Arc<OwnedSessionCleanup>) -> Self {
+        Self {
+            session_cleanup: Some(cleanup),
+            ..Default::default()
+        }
+    }
+
     /// Latch removal intent before any console/scheduler/native cleanup await.
     /// This entry remains the retry owner, but it can never be reused for work.
     pub(crate) fn begin(&self) {
@@ -190,8 +242,13 @@ impl NativeRuntimeDisposal {
         if state.worker.is_none() {
             let runtime = Arc::clone(runtime);
             let progress = Arc::clone(&self.progress);
+            let session_cleanup = self.session_cleanup.clone();
             state.worker = Some(tokio::spawn(async move {
-                dispose_runtime(&runtime, &mut *progress.lock().await).await
+                dispose_runtime(&runtime, &mut *progress.lock().await).await?;
+                if let Some(cleanup) = session_cleanup {
+                    cleanup.shutdown().await?;
+                }
+                Ok(())
             }));
         }
         state.wait(wait).await
@@ -218,24 +275,18 @@ impl DisposalTask {
 }
 
 async fn finish_parent_shutdown(
-    changes: &mut MobMachineStateChanges,
+    actor_task: &mut MobActorTaskWatch,
     result: Result<(), MobError>,
 ) -> Result<(), String> {
     match result {
-        Ok(())
-        | Err(MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed) => {
+        Ok(()) | Err(MobError::ActorCommandChannelClosed | MobError::ActorReplyChannelClosed) => {
             // This parent-only path follows acknowledged UnifiedRuntime phases.
             // Its own successful Shutdown can return before the actor drops
             // every field. A redundant command can find ingress closed, or be
             // queued before exit and lose its reply when the receiver drops.
             // Neither channel error nor time is success: still await actual
-            // actor exit through this exact actor's publication sender.
-            while !changes.is_closed() {
-                if changes.changed().await.is_err() {
-                    break;
-                }
-            }
-            Ok(())
+            // actor future returning, which attests that its stores dropped.
+            await_actor_return(actor_task).await
         }
         Err(error) => Err(format!("Native parent cleanup did not complete: {error}")),
     }
@@ -250,13 +301,15 @@ async fn finish_parent_actor(
         // MobKit 0.8.44 can report successful runtime phases after a final
         // actor refusal. Their acknowledgment and actor closure are distinct.
         // Redrive only the retained public actor when those phases are done.
-        let mut changes = parent.machine_state_changes();
-        if !changes.is_closed() {
+        let mut actor_task = parent.actor_task_watch();
+        if !parent.machine_state_changes().is_closed() {
             while_interrupting(runtime, parent, async {
                 let result = parent.shutdown().await;
-                finish_parent_shutdown(&mut changes, result).await
+                finish_parent_shutdown(&mut actor_task, result).await
             })
             .await?;
+        } else {
+            await_actor_return(&mut actor_task).await?;
         }
         progress.parent_closed = true;
     }
@@ -276,12 +329,24 @@ async fn dispose_runtime(
                 "MobKit parent cleanup did not complete: {report:?}"
             ));
         }
+        progress.native_child_root_released = matches!(
+            report.child_mob_stand_down,
+            meerkat_mobkit::ChildMobStandDownOutcome::Released { .. }
+        );
         progress.runtime_phases_completed = true;
     }
     finish_parent_actor(runtime, &parent, progress).await?;
 
-    // Agent-created mobs have their own actors. This is the exact set composed
-    // for this runtime, never independent project agents or sibling threads.
+    // Durable children have one native shutdown owner. Its released-root
+    // receipt proves their settlement; asking an already closed child again
+    // loses that receipt and can only return a closed command channel.
+    if progress.native_child_root_released {
+        return Ok(());
+    }
+
+    // Process-bound children retain the older explicit host cleanup path.
+    // This is the exact set composed for this runtime, never independent
+    // project agents or sibling threads.
     let Some(children) = runtime.mob_runtime().agent_mob_mcp_state() else {
         return Ok(());
     };

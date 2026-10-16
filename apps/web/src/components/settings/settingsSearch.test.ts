@@ -95,8 +95,8 @@ describe("searchSettings", () => {
     expect(searchSettings("git security keys")[0]?.id).toBe("git-fetch-interval");
     expect(searchSettings("push notifications")[0]?.id).toBe("publish-agent-activity");
     expect(searchSettings("battery saver")[0]?.id).toBe("background-activity");
-    expect(searchSettings("binary path")[0]?.id).toBe("providers");
-    expect(searchSettings("Antigravity")[0]?.id).toBe("providers");
+    expect(searchSettings("authentication")[0]?.id).toBe("providers");
+    expect(searchSettings("Azure")[0]?.id).toBe("providers");
     expect(searchSettings("Google sign in")[0]?.id).toBe("providers");
     expect(searchSettings("authorized clients")[0]?.id).toBe("connections-environment");
     expect(searchSettings("administrative access")[0]?.id).toBe("connections-environment");
@@ -110,13 +110,10 @@ describe("searchSettings", () => {
     ]);
   });
 
-  it.each(["usage providers", "CLIProxyAPI", "CLI proxy hub", "management key"])(
-    "finds usage-provider management by %s",
+  it.each(["CLIProxyAPI", "Antigravity", "binary path"])(
+    "does not advertise removed harness settings for %s",
     (query) => {
-      expect(searchSettings(query)[0]).toMatchObject({
-        id: "usage-providers",
-        to: "/settings/providers",
-      });
+      expect(searchSettings(query).filter((item) => item.to === "/settings/providers")).toEqual([]);
     },
   );
 
@@ -177,25 +174,6 @@ describe("searchSettings", () => {
       "days-before-auto-settle",
     ]);
     expect(available.map((item) => item.id).filter((id) => gatedIds.has(id))).toEqual([]);
-  });
-
-  it("offers Cursor Keychain settings only when a macOS provider environment is available", () => {
-    const availability = {
-      hasCloudPublicConfig: false,
-      hasEnvironment: true,
-      hasProviderSettingsEnvironment: true,
-      hasMacProviderSettingsEnvironment: false,
-      canManageLocalBackend: false,
-      isWslSettingsRowVisible: false,
-      hasThreadAutoSettlement: false,
-    };
-    const itemIds = (macAvailable: boolean) =>
-      filterAvailableSettingsSearchItems({
-        ...availability,
-        hasMacProviderSettingsEnvironment: macAvailable,
-      }).map((item) => item.id);
-    expect(itemIds(false)).not.toContain("cursor-keychain-usage");
-    expect(itemIds(true)).toContain("cursor-keychain-usage");
   });
 
   it("keeps the local toggle searchable without offering hidden host publishing controls", () => {

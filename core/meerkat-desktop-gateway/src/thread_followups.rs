@@ -100,11 +100,10 @@ fn validate(journal: &Journal, attribution: &Attribution) -> Result<(), GatewayE
 }
 
 fn current_console_cursor(attribution: &Attribution) -> Result<i64, GatewayError> {
-    let console = attribution
-        .state_root
-        .join("mobkit")
-        .join(stable_slug(&attribution.mob_id))
-        .join("console.sqlite");
+    let console_read = crate::mobkit_registry::storage_upgrade::read_console(
+        &attribution.state_root.join("mobkit").join(stable_slug(&attribution.mob_id)),
+    )?;
+    let console = &console_read.path;
     if !console.is_file() {
         return Ok(0);
     }
@@ -317,8 +316,9 @@ fn read_blocking(
         session_id: Some(session.clone()),
         source_mob_id: None,
     };
+    let console_read = crate::mobkit_registry::storage_upgrade::read_console(&mob_root)?;
     let page = native_history::read_log(
-        &mob_root.join("console.sqlite"),
+        &console_read.path,
         &expected,
         100,
         None,

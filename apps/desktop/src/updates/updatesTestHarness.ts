@@ -217,15 +217,15 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       path === "/missing/resources/app-update.yml" && options.appUpdateYml !== undefined
         ? Effect.succeed(options.appUpdateYml)
         : path === "/missing/resources/package-type" && options.packageType !== undefined
-        ? Effect.succeed(options.packageType)
-        : Effect.fail(
-            PlatformError.systemError({
-              module: "FileSystem",
-              method: "readFileString",
-              _tag: "NotFound",
-              pathOrDescriptor: path,
-            }),
-          ),
+          ? Effect.succeed(options.packageType)
+          : Effect.fail(
+              PlatformError.systemError({
+                module: "FileSystem",
+                method: "readFileString",
+                _tag: "NotFound",
+                pathOrDescriptor: path,
+              }),
+            ),
     makeDirectory: () => Effect.void,
     writeFileString: (path) =>
       Effect.sync(() => {

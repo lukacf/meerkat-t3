@@ -1,3 +1,5 @@
+#![cfg_attr(test, recursion_limit = "256")]
+
 use chrono::{TimeZone, Utc};
 use meerkat_core::derive_workspace_realm_id;
 use meerkat_core::event::{AgentEvent, EventEnvelope};
@@ -181,6 +183,7 @@ impl AppRunDeliveries {
 struct RunEventProjection {
     seen: HashSet<Uuid>,
     assembler: LiveEventAssembler,
+    native_identity_ready: Arc<Notify>,
     emitted: bool,
     presentation: Arc<Mutex<()>>,
     delivery_scope: Option<thread_followups::Attribution>,
@@ -365,19 +368,7 @@ impl MeerkatGateway {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
         let _shutdown_guard = self.inner.shutdown_lock.lock().await;
         self.disconnect_host_tools().await;
-        let registries = {
-            // Match project-handle creation's lock order so no newly created
-            // registry can escape the snapshot after admission closes.
-            let runtimes = self.inner.project_runtimes.lock().await;
-            let mut registries = self.inner.mobkit_registries.lock().await.values().cloned().collect::<Vec<_>>();
-            for handle in runtimes.values() {
-                let registry = Arc::clone(&handle.state.lock().await.mobkit);
-                if !registries.iter().any(|existing| Arc::ptr_eq(existing, &registry)) {
-                    registries.push(registry);
-                }
-            }
-            registries
-        };
+        let registries = self.owned_mobkit_registries().await;
         let mut errors: Vec<String> = futures_util::future::join_all(registries.iter().map(|registry| registry.shutdown()))
             .await.into_iter().flatten().collect();
         let handles = self.inner.project_runtimes.lock().await.values().cloned().collect::<Vec<_>>();
@@ -400,6 +391,54 @@ impl MeerkatGateway {
         })).await;
         errors.extend(delivery_results.into_iter().filter_map(Result::err));
         errors
+    }
+
+    async fn owned_mobkit_registries(&self) -> Vec<Arc<ProjectMobkitRegistry>> {
+        // Match project-handle creation's lock order. Shutdown closes gateway
+        // admission before either phase snapshots these exact registries.
+        let runtimes = self.inner.project_runtimes.lock().await;
+        let mut registries = self.inner.mobkit_registries.lock().await.values().cloned().collect::<Vec<_>>();
+        for handle in runtimes.values() {
+            let registry = Arc::clone(&handle.state.lock().await.mobkit);
+            if !registries.iter().any(|existing| Arc::ptr_eq(existing, &registry)) {
+                registries.push(registry);
+            }
+        }
+        registries
+    }
+
+    /// The stdio owner calls this after shutdown and admitted request joins.
+    /// Retained observer tasks survive a caller deadline without authorizing
+    /// any deletion or claiming that unrelated databases have been drained.
+    pub async fn drain_storage_observers(&self) -> Vec<String> {
+        if !self.inner.shutting_down.load(Ordering::SeqCst) {
+            return vec!["Cannot drain mob observers before gateway shutdown".into()];
+        }
+        let _shutdown_guard = self.inner.shutdown_lock.lock().await;
+        let registries = self.owned_mobkit_registries().await;
+        let mut failures = Vec::new();
+        for registry in registries {
+            failures.extend(registry.drain_storage_observers().await);
+        }
+        failures
+    }
+
+    /// Observe physical credential work only after this gateway has closed
+    /// admission and its producers and admitted requests have settled.
+    pub async fn settle_credential_mutations(&self, deadline: tokio::time::Instant) -> Vec<String> {
+        if !self.inner.shutting_down.load(Ordering::SeqCst) {
+            return vec!["Cannot settle credential work before gateway shutdown".into()];
+        }
+        use meerkat_providers::auth_store::{
+            CredentialSettlement, settle_in_flight_credential_mutations,
+        };
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match settle_in_flight_credential_mutations(remaining).await {
+            CredentialSettlement::Settled => Vec::new(),
+            CredentialSettlement::Unsettled { pending } => vec![format!(
+                "Credential cleanup did not complete before the shutdown deadline: {pending} operations remain"
+            )],
+        }
     }
 
     pub async fn handle(&self, request: RpcRequest, ctx: RequestContext) -> RpcResponse {
@@ -448,7 +487,7 @@ impl MeerkatGateway {
             return Err(GatewayError::conflict("Gateway is shutting down", None));
         }
         match request.method.as_str() {
-            "text.v1.generate" => auxiliary_generation::generate(request.params.as_ref()).await,
+            "text.v1.generate" => auxiliary_generation::generate(request.params.as_ref(), &self.inner.provider_auth).await,
             "approvals.v1.list" => native_approvals::dispatch(self, request.params.as_ref(), false).await,
             "approvals.v1.decide" => {
                 ensure_request_id(request)?;
@@ -508,6 +547,12 @@ impl MeerkatGateway {
                     .status(request.params.as_ref())
                     .await
             }
+            "auth.v1.configure" => self.inner.provider_auth.configure(request.params.as_ref()).await,
+            "auth.v1.check" => self.inner.provider_auth.check(request.params.as_ref()).await,
+            "auth.v1.deviceStart" => self.inner.provider_auth.device_start(request.params.as_ref()).await,
+            "auth.v1.devicePoll" => self.inner.provider_auth.device_poll(request.params.as_ref()).await,
+            "auth.v1.delete" => self.inner.provider_auth.delete_account(request.params.as_ref()).await,
+            "auth.v1.default" => self.inner.provider_auth.set_default(request.params.as_ref()).await,
             "auth.v1.loginStart" => {
                 self.inner
                     .provider_auth
@@ -617,6 +662,9 @@ impl MeerkatGateway {
 
     async fn models_catalog(&self, params: Option<&Value>) -> Result<Value, GatewayError> {
         let params = object_params(params)?;
+        if !params.contains_key("projectPath") {
+            return self.inner.provider_auth.global_models_catalog().await;
+        }
         let project_path = required_string(params, "projectPath")?;
         let config_state_root = optional_string(params, "configStateRoot")
             .or_else(|| optional_string(params, "stateRoot"));
@@ -629,7 +677,7 @@ impl MeerkatGateway {
                     Some(json!({"error": error})),
                 )
             })?;
-        let catalog = effective_models_catalog(&realm_config.effective)?;
+        let catalog = self.inner.provider_auth.account_models_catalog(params).await?;
         Ok(json!({
             "projectPath": locator.project_path,
             "configStateRoot": locator.state_root,
@@ -871,6 +919,12 @@ impl MeerkatGateway {
                 "models.v1.catalog",
                 "skills.v1.list",
                 "auth.v1.status",
+                "auth.v1.configure",
+                "auth.v1.check",
+                "auth.v1.deviceStart",
+                "auth.v1.devicePoll",
+                "auth.v1.delete",
+                "auth.v1.default",
                 "auth.v1.loginStart",
                 "auth.v1.loginComplete",
                 "auth.v1.logout",
@@ -1345,7 +1399,10 @@ impl MeerkatGateway {
                     native_skills::validate_enabled(&realm.effective, &skill_references)?;
                 }
                 if has_turn_llm_identity_override(params) {
-                    native_model::apply(&mob, &expected, params).await?;
+                    let catalog = self.inner.provider_auth.selection_catalog(
+                        &mob.checkpoint_project_path, &mob.config_state_root,
+                    ).await?;
+                    native_model::apply_with_catalog(&mob, &expected, params, Some(&catalog)).await?;
                 }
             }
         }
@@ -1397,7 +1454,7 @@ impl MeerkatGateway {
                 Some(json!({"error":error})),
             )
         })?;
-        let mut status = native_work::read(&mob, &expected, busy).await?;
+        let mut status = native_work::read(&mob, &expected, busy, Some(&self.inner.provider_auth)).await?;
         mob.validate_console_incarnation(&expected).await.map_err(|error| GatewayError::conflict(error, None))?;
         status.extend(serde_json::from_value::<serde_json::Map<String, Value>>(json!({"mobId":mob_id,"identity":expected.identity,"sessionId":expected.session_id,"busy":busy})).expect("status fields"));
         Ok(Value::Object(status))
@@ -1622,10 +1679,7 @@ impl MeerkatGateway {
         // already-reserved delivery may need the same state to settle.
         drop(state);
         let cancelled = if let Some(active) = active_run.as_ref() {
-            let (session, native_run) = {
-                let projection = active.projection.lock().await;
-                (projection.assembler.native_session_id.clone(), projection.assembler.native_run_id.clone())
-            };
+            let (session, native_run) = observed_native_run(&active.projection).await;
             async {
                 let session = session.ok_or_else(|| GatewayError::conflict(
                     "The application run has no observed native session yet; refresh before stopping",
@@ -2489,7 +2543,16 @@ When a decision genuinely needs the user's input, use the `ui_multiple_choice` t
                         )
                     })?
                     .map(|identity| identity.provider);
-                member_turn_options_from_params(params, &realm_config.effective, current_provider)?
+                let catalog = self.inner.provider_auth.selection_catalog(
+                    &runtime_project_path, &mob.config_state_root,
+                ).await?;
+                member_turn_options_with_catalog(
+                    params,
+                    &realm_config.effective,
+                    current_provider,
+                    Some(&realm_config.realm_id),
+                    &catalog,
+                )?
             } else {
                 MemberTurnOptions::new()
             };
@@ -2601,6 +2664,9 @@ When a decision genuinely needs the user's input, use the `ui_multiple_choice` t
             }.await;
             if let Err(error) = attribution_result {
                 let _ = applied_identity_tx.send(Err(error.clone()));
+                // Terminal publication can release the shutdown waiter on a
+                // different worker. Drop this task's native owner first.
+                drop(runtime);
                 finish_run(&events_tx,&handle_for_task,&thread_id_for_task,&run_id_for_task,&mob_id_for_task,&agent_identity_for_task,&project_path_for_task,&execution_path_for_task,&execution_mode_for_task,&host_tools_for_task,Err(RunFailure::Failed(error))).await;
                 return;
             }
@@ -2757,10 +2823,13 @@ When a decision genuinely needs the user's input, use the `ui_multiple_choice` t
         let initial_llm = if request.kind == "domain"
             && (params.contains_key("provider") || params.contains_key("providerParams"))
         {
-            Some(params.iter()
+            let catalog = self.inner.provider_auth.selection_catalog(
+                &locator.project_path, &config_state_root,
+            ).await?;
+            Some(native_model::InitialAgentLlmRequest { params: params.iter()
                 .filter(|(key, _)| matches!(key.as_str(), "model" | "provider" | "providerParams"))
                 .map(|(key, value)| (key.clone(), value.clone()))
-                .collect())
+                .collect(), catalog })
         } else {
             None
         };
@@ -2856,12 +2925,18 @@ When a decision genuinely needs the user's input, use the `ui_multiple_choice` t
                     // The original turn already owns the run stream. This
                     // input joins it and only adds a completion reservation.
                     let result = native_steering::wait(admission).await;
+                    // The detached task can outlive the RPC that admitted it.
+                    // Release its owners before finish_run publishes terminality.
+                    drop(mob);
+                    drop(runtime);
                     finish_run(&events_tx, &handle, &thread_id, &run_id, &mob_id, &agent_identity,
                         &project_path, &execution_path, &execution_mode, &host_tools, result).await;
                     return;
                 }
                 Err(error) => {
                     let _ = receipt_tx.send(Err(error.to_string()));
+                    drop(mob);
+                    drop(runtime);
                     finish_run(&events_tx, &handle, &thread_id, &run_id, &mob_id, &agent_identity,
                         &project_path, &execution_path, &execution_mode, &host_tools, Ok(())).await;
                     return;
@@ -2930,6 +3005,10 @@ When a decision genuinely needs the user's input, use the `ui_multiple_choice` t
                     Ok(())
                 }
             };
+            // The idle continuation's turn and event stream have settled.
+            // Drop both remaining owners before waking process shutdown.
+            drop(mob);
+            drop(runtime);
             finish_run(
                 &events_tx,
                 &handle,
@@ -3290,6 +3369,7 @@ async fn project_run_event(
         state.assembler.native_session_id = Some(session_id.to_string());
         state.assembler.native_run_id = identity.run_id.clone();
         state.assembler.native_segment_id = Some(event.event_id.to_string());
+        state.native_identity_ready.notify_waiters();
     }
     state.assembler.delivery_scope = state.delivery_scope.clone();
     state.assembler.followup_scope = state.followup.clone();
@@ -3331,6 +3411,36 @@ async fn project_run_event(
     state.pending_events.retain(|pending| pending.event_id != event.event_id);
     state.followup_failed = !state.pending_events.is_empty();
     result
+}
+
+async fn observed_native_run(
+    projection: &Arc<Mutex<RunEventProjection>>,
+) -> (Option<String>, Option<meerkat_core::RunId>) {
+    let ready = Arc::clone(&projection.lock().await.native_identity_ready);
+    // A tool invocation can reach the host before the native event forwarder
+    // presents RunStarted. Wait for that exact stream, never substitute the
+    // member's current run (which might already belong to another input).
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let observed = ready.notified();
+            tokio::pin!(observed);
+            observed.as_mut().enable();
+            let state = projection.lock().await;
+            if state.assembler.native_session_id.is_some()
+                && state.assembler.native_run_id.is_some()
+            {
+                return;
+            }
+            drop(state);
+            observed.await;
+        }
+    })
+    .await;
+    let state = projection.lock().await;
+    (
+        state.assembler.native_session_id.clone(),
+        state.assembler.native_run_id.clone(),
+    )
 }
 
 /// The native per-input observer is the correlation authority. Live steering
@@ -3512,7 +3622,7 @@ fn effective_models_catalog(config: &meerkat::Config) -> Result<Value, GatewayEr
 }
 
 #[derive(Clone, Debug)]
-struct EffectiveCatalogModel {
+pub(crate) struct EffectiveCatalogModel {
     id: String,
     provider: Provider,
     server_id: Option<String>,
@@ -3523,6 +3633,10 @@ fn effective_catalog_models(
     config: &meerkat::Config,
 ) -> Result<Vec<EffectiveCatalogModel>, GatewayError> {
     let catalog = effective_models_catalog(config)?;
+    catalog_models(&catalog)
+}
+
+fn catalog_models(catalog: &Value) -> Result<Vec<EffectiveCatalogModel>, GatewayError> {
     let mut models = Vec::new();
     for provider_catalog in catalog
         .get("providers")
@@ -3614,6 +3728,27 @@ fn member_turn_options_from_params(
     config: &meerkat::Config,
     current_provider: Option<Provider>,
 ) -> Result<MemberTurnOptions, GatewayError> {
+    member_turn_options_for_realm(params, config, current_provider, None)
+}
+
+fn member_turn_options_for_realm(
+    params: &serde_json::Map<String, Value>,
+    config: &meerkat::Config,
+    current_provider: Option<Provider>,
+    realm: Option<&meerkat_core::RealmId>,
+) -> Result<MemberTurnOptions, GatewayError> {
+    member_turn_options_with_catalog(
+        params, config, current_provider, realm, &effective_catalog_models(config)?,
+    )
+}
+
+fn member_turn_options_with_catalog(
+    params: &serde_json::Map<String, Value>,
+    config: &meerkat::Config,
+    current_provider: Option<Provider>,
+    realm: Option<&meerkat_core::RealmId>,
+    catalog: &[EffectiveCatalogModel],
+) -> Result<MemberTurnOptions, GatewayError> {
     let requested_model = turn_identity_string(params, "model")?;
     let requested_provider_name = turn_identity_string(params, "provider")?;
     if requested_provider_name.is_some() && requested_model.is_none() {
@@ -3635,9 +3770,10 @@ fn member_turn_options_from_params(
         .transpose()?;
 
     let catalog_model = if let Some(model_id) = requested_model.as_deref() {
-        let matches = effective_catalog_models(config)?
-            .into_iter()
+        let matches = catalog
+            .iter()
             .filter(|entry| entry.id == model_id)
+            .cloned()
             .collect::<Vec<_>>();
         let selected = if let Some(provider) = requested_provider {
             matches
@@ -3726,15 +3862,29 @@ fn member_turn_options_from_params(
 
     let mut options = MemberTurnOptions::new();
     if let Some(catalog_model) = catalog_model {
+        let auth_binding = if catalog_model.provider == Provider::SelfHosted {
+            TurnMetadataOverride::Clear
+        } else {
+            let target = meerkat_core::resolve_auth_binding_or_default_for_provider(
+                config, catalog_model.provider, None, realm, true,
+            ).map_err(|error| GatewayError::policy(
+                "Could not resolve the selected model account",
+                Some(json!({"error": error.to_string()})),
+            ))?;
+            if target.auth_binding.is_env_default() {
+                // Synthetic environment fallback is not a durable identity.
+                TurnMetadataOverride::Clear
+            } else {
+                // Keep the account selected by native default resolution in
+                // the reconfigured identity. Clearing it can release the
+                // existing OAuth lease after a new client uses that same account.
+                TurnMetadataOverride::Set(target.auth_binding)
+            }
+        };
         options = options
             .with_model(ModelId::new(catalog_model.id))
             .with_provider(catalog_model.provider)
-            // The desktop picker selects a provider/model, not one durable
-            // credential binding. Clear any binding inherited from the
-            // session so AgentFactory can apply Meerkat's canonical ordered
-            // candidate policy: configured OAuth when usable, then the
-            // provider's environment fallback.
-            .with_auth_binding(TurnMetadataOverride::Clear);
+            .with_auth_binding(auth_binding);
         if let Some(server_id) = catalog_model.server_id {
             options = options.with_self_hosted_server_id(server_id);
         }
@@ -5830,7 +5980,7 @@ mod tests {
     }
 
     async fn wait_console_frame(
-        console: &meerkat_mobkit::MobKitConsoleAggregator,
+        console: &meerkat_mobkit::MetaConsoleAggregator,
         identity: &str,
         kind: &str,
     ) -> meerkat_mobkit::ConsoleFrame {
@@ -6557,6 +6707,7 @@ mod tests {
             input: meerkat_core::types::RunInput::Content {
                 content: meerkat_core::ContentInput::Text("Do this work".into()),
             },
+            request_reasoning: None,
         };
         let observed = EventEnvelope::new_session(session.clone(), 1, None, started(
             meerkat_core::types::TranscriptMessageIdentity {
@@ -6564,7 +6715,12 @@ mod tests {
                 ..Default::default()
             },
         ));
-        super::project_run_event(&projection, &observed, "thread", "app-run", &events).await.unwrap();
+        let (identity, projected) = tokio::join!(
+            super::observed_native_run(&projection),
+            super::project_run_event(&projection, &observed, "thread", "app-run", &events),
+        );
+        projected.unwrap();
+        assert_eq!(identity, (Some(session.to_string()), Some(run.clone())));
         assert_eq!(projection.lock().await.assembler.native_run_id.as_ref(), Some(&run));
         let legacy = EventEnvelope::new_session(session.clone(), 2, None, started(Default::default()));
         super::project_run_event(&projection, &legacy, "thread", "app-run", &events).await.unwrap();
@@ -6589,6 +6745,7 @@ mod tests {
             input: meerkat_core::types::RunInput::Content {
                 content: meerkat_core::ContentInput::Text(prompt.into()),
             },
+            request_reasoning: None,
         };
         let completed = |text: &str| AgentEvent::RunCompleted {
             identity: Default::default(),
@@ -7677,6 +7834,7 @@ mod tests {
         streams: AtomicUsize,
         tool_surface_observations: AtomicUsize,
         missing_tool_surface_observations: AtomicUsize,
+        missing_tool_error_observations: AtomicUsize,
         capability_error_observations: AtomicUsize,
         host_disconnected_observations: AtomicUsize,
         native_mob_prompt_observations: AtomicUsize,
@@ -7694,6 +7852,7 @@ mod tests {
                 streams: AtomicUsize::new(0),
                 tool_surface_observations: AtomicUsize::new(0),
                 missing_tool_surface_observations: AtomicUsize::new(0),
+                missing_tool_error_observations: AtomicUsize::new(0),
                 capability_error_observations: AtomicUsize::new(0),
                 host_disconnected_observations: AtomicUsize::new(0),
                 native_mob_prompt_observations: AtomicUsize::new(0),
@@ -7822,6 +7981,14 @@ mod tests {
                 ]
             } else {
                 let messages = serde_json::to_string(&request.messages).unwrap_or_default();
+                if request.messages.iter().rev().find_map(|message| match message {
+                    meerkat_core::Message::ToolResults { results, .. } => results.last(),
+                    _ => None,
+                }).is_some_and(|result| result.is_error
+                    && serde_json::from_str::<Value>(&result.text_content())
+                        .is_ok_and(|value| value["error"] == "tool_not_found")) {
+                    self.missing_tool_error_observations.fetch_add(1, Ordering::SeqCst);
+                }
                 if messages.contains("CAPABILITY_UNAVAILABLE") {
                     self.capability_error_observations
                         .fetch_add(1, Ordering::SeqCst);
@@ -8071,7 +8238,8 @@ mod tests {
             .unwrap();
         let runtime = root.runtime.as_ref().unwrap();
         let service = runtime.mob_runtime().session_service().unwrap();
-        let machine = service.runtime_adapter().expect("canonical native machine");
+        let machine = service.acquire_runtime_adapter(None)
+            .expect("canonical native machine acquisition").expect("canonical native machine");
         let state = runtime.mob_runtime().agent_mob_mcp_state().unwrap();
         let child_id = meerkat_mob::MobId::from(format!("{mob_id}-autonomous-child"));
         let definition: meerkat_mob::MobDefinition = serde_json::from_value(json!({
@@ -9054,6 +9222,79 @@ mod tests {
     }
 
     #[test]
+    fn rejected_steering_releases_native_owners_before_finalization_wait() {
+        std::thread::Builder::new()
+            .name("steering-owner-release-proof".into())
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_stack_size(16 * 1024 * 1024)
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let (fixture, project, state_root, gateway, scripted) =
+                            setup_real_mobkit_host_tool_fixture("steering-owner-release", 0).await;
+                        let mob_id = real_mobkit_fixture_mob_id(&project);
+                        let handle = gateway.project_runtime_handle_for_paths(
+                            &project, &project, "local".into(), Some(&state_root),
+                        ).await.unwrap();
+                        let registry = Arc::clone(&handle.state.lock().await.mobkit);
+                        let mob = registry.get(&mob_id).await.unwrap();
+                        let runtime = Arc::clone(mob.runtime.as_ref().unwrap());
+                        let weak_mob = Arc::downgrade(&mob);
+                        let weak_runtime = Arc::downgrade(&runtime);
+                        let projection = Arc::new(Mutex::new(RunEventProjection::default()));
+                        let mut events = gateway.subscribe_events();
+                        // Block application finalization independently of native
+                        // shutdown. The error path must release its native owners
+                        // even while finish_run cannot acquire this mutex.
+                        let mut finalization_guard = handle.state.lock().await;
+                        finalization_guard.active_runs.insert("thread-host-tool-proof".into(), ActiveRun {
+                            run_id: "owner-release-run".into(),
+                            mob_id: mob_id.clone(),
+                            agent_identity: "absent-member".into(),
+                            started_at: chrono::Utc::now(),
+                            deliveries: AppRunDeliveries::default(),
+                            projection: Arc::clone(&projection),
+                        });
+                        let admission = gateway.submit_run_steering(
+                            Arc::clone(&handle), runtime, mob,
+                            "thread-host-tool-proof".into(), "owner-release-run".into(),
+                            mob_id.clone(), "absent-member".into(), project.clone(),
+                            project.clone(), "local".into(),
+                            meerkat_core::ContentInput::Text("No native turn should be admitted".into()),
+                            projection,
+                        ).await;
+                        assert!(admission.is_err());
+                        assert!(registry.remove(&mob_id).await.unwrap());
+                        let released = tokio::time::timeout(Duration::from_secs(2), async {
+                            while weak_mob.strong_count() != 0 || weak_runtime.strong_count() != 0 {
+                                tokio::task::yield_now().await;
+                            }
+                        }).await;
+                        // Release the test's gate before asserting so the old
+                        // behavior can finish its owned task and fixture cleanup.
+                        drop(finalization_guard);
+                        wait_for_real_mobkit_terminal_event(
+                            &mut events, "owner-release-run", "run.completed",
+                        ).await;
+                        assert!(gateway.shutdown().await.is_empty());
+                        let observer_failures = gateway.drain_storage_observers().await;
+                        assert!(observer_failures.is_empty(), "{observer_failures:?}");
+                        assert!(scripted.observed_requests.lock().unwrap().is_empty());
+                        drop(gateway);
+                        std::fs::remove_dir_all(&fixture).unwrap();
+                        assert!(released.is_ok(), "detached steering retained native owners while finalization was blocked");
+                    });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn idle_steering_continuation_waits_for_application_delivery_barrier() {
         std::thread::Builder::new().name("idle-steering-app-proof".into())
             .stack_size(16 * 1024 * 1024).spawn(|| {
@@ -9267,7 +9508,8 @@ mod tests {
                         wait_for_real_mobkit_terminal_event(&mut events, &run_id, "run.completed").await;
                         assert!(handle.state.lock().await.active_runs.is_empty());
                         assert_eq!(scripted.observed_requests.lock().unwrap().len(), 2);
-                        assert!(scripted.observed_requests.lock().unwrap()[1].contains("APP-LIVE-STEER-923"));
+                        assert!(!scripted.observed_requests.lock().unwrap()[0].contains("APP-LIVE-STEER-923"));
+                        assert_eq!(scripted.observed_requests.lock().unwrap()[1].matches("APP-LIVE-STEER-923").count(), 1);
                         assert!(events.try_recv().is_err(), "application terminal must emit exactly once");
                         assert_eq!(super::lookup_terminal_run(std::path::Path::new(&state_root), &run_id).unwrap()["status"], "completed");
                         let mob = handle.state.lock().await.mobkit.get(&mob_id).await.unwrap();
@@ -9275,6 +9517,12 @@ mod tests {
                         let session_id = runtime.mob_handle().resolve_bridge_session_id(&meerkat_mob::AgentIdentity::from("ingress"))
                             .await.unwrap();
                         let history = super::read_session_history_messages(runtime, &session_id.to_string()).await.unwrap();
+                        let steer_rows = history.iter().filter(|row| {
+                            row["role"] == "user"
+                                && super::message_text_for_matching(row) == "APP-LIVE-STEER-923"
+                        }).collect::<Vec<_>>();
+                        assert_eq!(steer_rows.len(), 1, "steering must commit exactly once");
+                        let committed_steer = steer_rows[0].clone();
                         let history = serde_json::to_string(&history).unwrap();
                         assert!(history.contains("APP-STEER-ORIGINAL-167"));
                         assert!(history.contains("Synthetic host tool completed."));
@@ -9288,6 +9536,12 @@ mod tests {
                         wait_for_real_mobkit_terminal_event(&mut events, &next_run, "run.completed").await;
                         let history = super::read_session_history_messages(runtime, &session_id.to_string()).await.unwrap();
                         assert!(serde_json::to_string(&history).unwrap().contains("NEXT-AFTER-STEER-634"));
+                        let steer_rows = history.iter().filter(|row| {
+                            row["role"] == "user"
+                                && super::message_text_for_matching(row) == "APP-LIVE-STEER-923"
+                        }).collect::<Vec<_>>();
+                        assert_eq!(steer_rows.len(), 1, "the next turn must not reappend steering");
+                        assert_eq!(steer_rows[0], &committed_steer);
                         assert_eq!(scripted.observed_requests.lock().unwrap().len(), 4);
                         {
                             let requests = scripted.observed_requests.lock().unwrap();
@@ -9295,8 +9549,9 @@ mod tests {
                             assert!(next_request.contains("APP-STEER-ORIGINAL-167"));
                             assert!(next_request.contains("Synthetic host tool completed."));
                             assert!(next_request.contains("NEXT-AFTER-STEER-634"));
-                            // Native RuntimeSteer context is local to one model request.
-                            assert!(!next_request.contains("APP-LIVE-STEER-923"));
+                            // Typed User steering is durable native transcript history.
+                            assert_eq!(next_request.matches("APP-LIVE-STEER-923").count(), 1);
+                            assert_eq!(requests[3].matches("APP-LIVE-STEER-923").count(), 1);
                         }
                         destroy_real_mobkit_host_tool_fixture(gateway, &fixture, &project_path, &state_root).await;
                     });
@@ -9717,7 +9972,9 @@ mod tests {
         let runtime_adapter = runtime
             .mob_runtime()
             .session_service()
-            .and_then(|service| service.runtime_adapter())
+            .expect("session service")
+            .acquire_runtime_adapter(None)
+            .expect("session runtime adapter acquisition")
             .expect("session runtime adapter");
         assert!(
             runtime_adapter.has_session_llm_reconfigure_host(),
@@ -10631,7 +10888,7 @@ mod tests {
             .and_then(serde_json::Value::as_str)
             .expect("unconfigured run id")
             .to_string();
-        let unconfigured_failure = tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::time::timeout(Duration::from_secs(30), async {
             loop {
                 tokio::select! {
                     notification = host_notifications.recv() => {
@@ -10642,21 +10899,18 @@ mod tests {
                         if event.run_id.as_deref() != Some(unconfigured_run_id.as_str()) {
                             continue;
                         }
-                        if event.kind == "run.failed" {
-                            break event.payload;
-                        }
+                        assert_ne!(event.kind, "run.failed", "missing tool must return model-visible feedback: {event:?}");
+                        if event.kind == "run.completed" { break; }
                     }
                 }
             }
         })
         .await
         .expect("unconfigured turn did not settle without reverse dispatch");
-        assert!(
-            unconfigured_failure
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .is_some_and(|message| message.contains("Tool not found: synthetic_counter")),
-            "unconfigured turn failed for the wrong reason: {unconfigured_failure:?}"
+        assert_eq!(
+            scripted_llm.missing_tool_error_observations.load(Ordering::SeqCst),
+            1,
+            "native missing-tool feedback must reach the model without host dispatch"
         );
         assert_eq!(
             scripted_llm
@@ -10665,10 +10919,6 @@ mod tests {
             1,
             "the disconnected tool must be absent from the next model request"
         );
-        // The hidden tool is rejected before PendingToolResults, so align this
-        // deterministic test model to the next independent turn.
-        scripted_llm.advance_after_interrupted_turn();
-
         let reconfigure =
             configure_synthetic_host_tool(&gateway, "reconfigure-after-disconnect", true).await;
         assert!(

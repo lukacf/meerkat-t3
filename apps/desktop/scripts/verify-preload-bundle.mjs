@@ -69,6 +69,9 @@ const createSandboxModules = (exposedGlobals) => {
       exposeInMainWorld: (name, api) => exposedGlobals.set(name, api),
     },
     ipcRenderer,
+    webFrame: {
+      getZoomFactor: () => 1,
+    },
     webUtils: {
       getPathForFile: () => "",
     },
@@ -87,11 +90,40 @@ const createSandboxModules = (exposedGlobals) => {
   ]);
 };
 
-const executeBundle = (source, sandboxModules) => {
+const createSandboxDom = () => {
+  const listeners = new Map();
+  const styleProperties = new Map();
+  return {
+    document: {
+      documentElement: {
+        style: {
+          setProperty: (name, value) => styleProperties.set(name, String(value)),
+          getPropertyValue: (name) => styleProperties.get(name) ?? "",
+        },
+      },
+    },
+    window: {
+      addEventListener: (type, listener, options) => {
+        const entries = listeners.get(type) ?? [];
+        entries.push({ listener, once: options?.once === true });
+        listeners.set(type, entries);
+      },
+      dispatchEvent: (event) => {
+        const entries = listeners.get(event.type) ?? [];
+        listeners.set(
+          event.type,
+          entries.filter((entry) => !entry.once),
+        );
+        for (const { listener } of entries) listener(event);
+      },
+    },
+  };
+};
+
+const executeBundle = (source, sandboxModules, platform) => {
   const sandboxProcess = {
     contextIsolated: true,
-    // oxlint-disable-next-line t3code/no-global-process-runtime -- This standalone CI verifier supplies the preload's host platform without loading Effect.
-    platform: process.platform,
+    platform,
     versions: { electron: electronVersion },
   };
   const requireSandboxModule = (moduleName) => {
@@ -103,20 +135,30 @@ const executeBundle = (source, sandboxModules) => {
     return sandboxModules.get(moduleName);
   };
 
-  NodeVM.runInNewContext(
-    source,
-    {
-      process: sandboxProcess,
-      require: requireSandboxModule,
-    },
-    {
-      filename: "desktop-preload.cjs",
-      timeout: preloadExecutionTimeoutMs,
-    },
+  const context = NodeVM.createContext({
+    process: sandboxProcess,
+    require: requireSandboxModule,
+    ...createSandboxDom(),
+  });
+  const executionOptions = {
+    filename: "desktop-preload.cjs",
+    timeout: preloadExecutionTimeoutMs,
+  };
+  NodeVM.runInContext(source, context, executionOptions);
+  // Electron provides these DOM events after preload evaluation. Exercise the
+  // callbacks too, under the same timeout, rather than only accepting registration.
+  NodeVM.runInContext(
+    'window.dispatchEvent({ type: "DOMContentLoaded" }); window.dispatchEvent({ type: "resize" });',
+    context,
+    executionOptions,
   );
 };
 
-export const verifyPreloadBundle = (source) => {
+export const verifyPreloadBundle = (
+  source,
+  // oxlint-disable-next-line t3code/no-global-process-runtime -- This standalone CI verifier supplies the preload's host platform without loading Effect.
+  { platform = process.platform } = {},
+) => {
   const runtimeImports = inspectBundle(source);
   const exposedGlobals = new Map();
   const sandboxModules = createSandboxModules(exposedGlobals);
@@ -130,7 +172,7 @@ export const verifyPreloadBundle = (source) => {
     );
   }
 
-  executeBundle(source, sandboxModules);
+  executeBundle(source, sandboxModules, platform);
 
   const desktopBridge = exposedGlobals.get("desktopBridge");
   const missingApis = expectedDesktopBridgeApis.filter(

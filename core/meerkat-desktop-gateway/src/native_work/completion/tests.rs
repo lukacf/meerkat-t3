@@ -130,6 +130,9 @@ async fn real_runtime_receipts_keep_pending_distinct_and_bind_the_accepted_key()
             idempotency_key: Some(IdempotencyKey::new(frame.id.clone())),
             supersession_key: None,
             correlation_id: None,
+            authority_association: None,
+            ingress_context: None,
+            retained_resume: None,
         },
         content: "Review".into(),
         typed_turn_appends: vec![],
@@ -277,12 +280,15 @@ async fn bounded_admission_query_survives_long_runs_and_reports_storage_faults()
             .await
             .unwrap();
     }
-    let runs = crate::native_history::recent_work_runs(path.clone(), target(&session))
+    let console_read = Arc::new(
+        crate::mobkit_registry::storage_upgrade::read_console(&root).unwrap(),
+    );
+    let runs = crate::native_history::recent_work_runs(console_read.clone(), target(&session))
         .await
         .unwrap();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].id, "frame-19");
-    let inputs = crate::native_history::recent_work_inputs(path, target(&session))
+    let inputs = crate::native_history::recent_work_inputs(console_read, target(&session))
         .await
         .unwrap();
     assert_eq!(inputs.len(), 16);
@@ -291,10 +297,15 @@ async fn bounded_admission_query_survives_long_runs_and_reports_storage_faults()
     assert!(inputs
         .iter()
         .all(|frame| exact_admission(frame, &target(&session))));
-    let broken_path = root.join("corrupt.sqlite");
+    let broken_root = root.join("corrupt");
+    std::fs::create_dir_all(&broken_root).unwrap();
+    let broken_path = broken_root.join("console.sqlite");
     std::fs::write(&broken_path, b"not a sqlite database").unwrap();
+    let broken_read = Arc::new(
+        crate::mobkit_registry::storage_upgrade::read_console(&broken_root).unwrap(),
+    );
     assert!(
-        crate::native_history::recent_work_inputs(broken_path, target(&session))
+        crate::native_history::recent_work_inputs(broken_read, target(&session))
             .await
             .is_err()
     );

@@ -140,13 +140,23 @@ describe("MeerkatGatewayClient", () => {
   it("retains sanitized native shutdown provenance on an unexpected exit", async () => {
     const client = makeClient();
     expectedCloseFailures.set(client, "process_exited");
-    await expect(client.request("shutdownFailure", {
-      cleanupCompleted: true,
-      trigger: {kind: "stdin_error", errorKind: "WouldBlock", rawOsError: 35, message: "/private/prompt"},
-      errors: ["private provider output"],
-    })).rejects.toMatchObject({
+    await expect(
+      client.request("shutdownFailure", {
+        cleanupCompleted: true,
+        trigger: {
+          kind: "stdin_error",
+          errorKind: "WouldBlock",
+          rawOsError: 35,
+          message: "/private/prompt",
+        },
+        errors: ["private provider output"],
+      }),
+    ).rejects.toMatchObject({
       kind: "process_exited",
-      details: {cleanupCompleted: true, trigger: {kind: "stdin_error", errorKind: "WouldBlock", rawOsError: 35}},
+      details: {
+        cleanupCompleted: true,
+        trigger: { kind: "stdin_error", errorKind: "WouldBlock", rawOsError: 35 },
+      },
     });
     const error = await client.request("never-replayed").catch((error: unknown) => error);
     expect(JSON.stringify(error)).not.toContain("private");
@@ -155,12 +165,14 @@ describe("MeerkatGatewayClient", () => {
   it("does not retain arbitrary native diagnostic text as a shutdown trigger", async () => {
     const client = makeClient();
     expectedCloseFailures.set(client, "cleanup_failed");
-    await expect(client.request("shutdownFailure", {
-      cleanupCompleted: false,
-      trigger: {kind: "stdin_error", errorKind: "/private/prompt", rawOsError: "secret"},
-    })).rejects.toMatchObject({
+    await expect(
+      client.request("shutdownFailure", {
+        cleanupCompleted: false,
+        trigger: { kind: "stdin_error", errorKind: "/private/prompt", rawOsError: "secret" },
+      }),
+    ).rejects.toMatchObject({
       kind: "process_exited",
-      details: {cleanupCompleted: false, trigger: {kind: "stdin_error"}},
+      details: { cleanupCompleted: false, trigger: { kind: "stdin_error" } },
     });
   });
 

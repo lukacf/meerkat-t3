@@ -16,7 +16,7 @@
   <path d="M-60 293C95 220 214 304 362 256S559 191 707 257" stroke="url(#veil)" stroke-width="146" fill="none" opacity="1" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M-60 306C113 252 223 298 367 272S553 242 707 280" stroke="url(#silk)" stroke-width="86" fill="none" opacity="1" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M-60 266C113 212 223 258 367 232S553 202 707 240" stroke="#F5F5F5" stroke-width="0.8" fill="none" opacity="0.42" stroke-linecap="round" stroke-linejoin="round"/>
-  <text x="32" y="38" fill="#303034" font-family="Helvetica" font-size="11" font-weight="700">Meerkat T3</text>
-  <text x="320" y="104" fill="#303034" font-family="Helvetica" font-size="23" font-weight="700" text-anchor="middle">Drag Meerkat T3 into Applications.</text>
+  <text x="32" y="38" fill="#303034" font-family="Helvetica" font-size="11" font-weight="700">MeerkaT3</text>
+  <text x="320" y="104" fill="#303034" font-family="Helvetica" font-size="23" font-weight="700" text-anchor="middle">Drag MeerkaT3 into Applications.</text>
   <text x="320" y="367" fill="#626269" font-family="Helvetica" font-size="12" font-weight="400" text-anchor="middle">Once copied, open it from Applications.</text>
 </svg>

@@ -1,6 +1,12 @@
 {
   "name": "@t3tools/monorepo",
   "private": true,
+  "description": "A desktop development workspace with long-lived project specialists and agent peering.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lukacf/meerkat-t3.git"
+  },
   "type": "module",
   "scripts": {
     "prepare": "effect-tsgo patch && vp config --no-agent",
@@ -20,18 +26,20 @@
     "icons:check": "node scripts/export-brand-icons.ts --check",
     "licenses:sync": "node scripts/sync-third-party-license-notices.ts",
     "icons:export:android": "node scripts/export-android-icons.ts",
-    "build": "vp run --filter './apps/*' build",
+    "build": "vp run --filter @t3tools/desktop --filter t3 build",
     "build:marketing": "vp run --filter @t3tools/marketing build",
     "build:desktop": "vp run --filter @t3tools/desktop --filter t3 build",
+    "native:build": "node scripts/build-meerkat-runtime.ts",
+    "native:test": "scripts/repo-cargo test --locked -p meerkat-desktop-contracts -p meerkat-desktop-gateway -p meerkat-desktop-stdio",
     "build:resource-monitor": "cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml",
-    "typecheck": "vp run -r --concurrency-limit 2 typecheck",
-    "tc": "vp run -r --concurrency-limit 2 typecheck",
+    "typecheck": "vp run --filter @t3tools/contracts --filter @t3tools/shared --filter @t3tools/client-runtime --filter @t3tools/ssh --filter @t3tools/tailscale --filter t3 --filter @t3tools/web --filter @t3tools/desktop --filter @t3tools/scripts --concurrency-limit 2 typecheck",
+    "tc": "pnpm typecheck",
     "lint": "vp lint --report-unused-disable-directives",
     "knip": "knip --preprocessor ./scripts/knip-schemas.ts",
     "knip:check": "knip --include files,dependencies --no-config-hints && knip --workspace apps/server --workspace apps/desktop --workspace apps/web --workspace packages/client-runtime --workspace packages/contracts --workspace packages/effect-acp --workspace packages/effect-codex-app-server --workspace packages/shared --workspace packages/ssh --workspace packages/tailscale --exports --preprocessor ./scripts/knip-schemas.ts --no-config-hints",
     "knip:production": "knip --production --preprocessor ./scripts/knip-schemas.ts",
     "lint:mobile": "node scripts/mobile-native-static-check.ts",
-    "test": "vp run -r test",
+    "test": "vp run --filter @t3tools/contracts --filter @t3tools/shared --filter @t3tools/client-runtime --filter @t3tools/ssh --filter @t3tools/tailscale --filter t3 --filter @t3tools/web --filter @t3tools/desktop --filter @t3tools/scripts --concurrency-limit 2 test",
     "test:resource-monitor": "cargo test --locked --manifest-path native/resource-monitor/Cargo.toml",
     "test:desktop-smoke": "vp run --filter @t3tools/desktop smoke-test",
     "fmt": "vp fmt",
@@ -45,9 +53,9 @@
     "dist:desktop:win": "node scripts/build-desktop-artifact.ts --platform win --target nsis",
     "dist:desktop:win:arm64": "node scripts/build-desktop-artifact.ts --platform win --target nsis --arch arm64",
     "dist:desktop:win:x64": "node scripts/build-desktop-artifact.ts --platform win --target nsis --arch x64",
-    "release:smoke": "node scripts/release-smoke.ts",
     "clean": "rm -rf node_modules apps/*/node_modules packages/*/node_modules apps/*/dist apps/*/dist-electron packages/*/dist .vite-plus apps/*/.vite-plus packages/*/.vite-plus",
-    "sync:repos": "node scripts/sync-reference-repos.ts"
+    "sync:repos": "node scripts/sync-reference-repos.ts",
+    "docs:check": "node scripts/check-docs.mjs"
   },
   "devDependencies": {
     "@effect/tsgo": "catalog:",

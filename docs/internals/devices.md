@@ -2,8 +2,8 @@
 
 The environment server owns simulators and emulators the way it owns
 terminals: discovery, streaming, and agent access all run there, and every
-client reaches them through the environment connection. This is what makes the
-Device panel work over Tailscale and T3 Connect, including when an SSH host runs the devices.
+client reaches them through the environment connection. The transport boundary is independent of where the client renders the panel.
+Inherited relay and SSH-device paths are not qualified MeerkaT3 preview features.
 
 ## Two external tools, one seam
 
@@ -76,7 +76,7 @@ is a few lines that point at the tools and forbid raw `simctl` and `adb`.
 The hub vendors two streaming servers with different wire formats. iOS video is
 an HTTP body of AVCC envelopes decoded with WebCodecs, with input on a separate
 binary WebSocket; Android multiplexes SEMU-framed H.264 and JSON gestures over
-one WebSocket. [`deviceStream.ts`](../../apps/web/src/components/device/deviceStream.ts)
+one WebSocket. [the shared decoder](../../packages/client-runtime/src/device/stream.ts)
 speaks both so one panel covers both platforms.
 
 Simulators encode H.264 High 5.1. Hardware decoders on some machines and all

@@ -1,7 +1,9 @@
 # OpenCode
 
+> **Inherited T3 reference.** This page describes the original T3 Code feature retained in the source. It is not part of the supported MeerkaT3 preview setup. Use [Installation](install.md) and [Providers and accounts](accounts.md) for MeerkaT3. Original T3 commands and downloads install a separate product.
+
 Install and authenticate OpenCode on the machine running your environment, then
-enable it in **Settings > Providers**. See [provider setup](./install.md#providers).
+enable it in **Settings > Providers**. See [provider setup](https://github.com/pingdotgg/t3code/blob/main/docs/user/install.md#providers).
 T3 Code requires OpenCode 1.14.19 or newer, including when you connect an existing
 OpenCode server.
 
@@ -22,7 +24,7 @@ session.
 
 ## Approvals
 
-OpenCode follows the shared [permission modes](./permission-modes.md). **Auto** has
+OpenCode follows the shared [permission modes](https://github.com/pingdotgg/t3code/blob/main/docs/user/permission-modes.md). **Auto** has
 the same rules as **Supervised** because OpenCode has no AI approval reviewer.
 Environment files such as `.env` and `.env.local` need approval in restricted
 modes even though normal file reads do not; `.env.example` is allowed.

@@ -365,7 +365,7 @@ function ProjectReadiness({
           }
         >
           {identityReady && identity.data?.ready && repository
-            ? "Continue to first task"
+            ? "Continue to project agents"
             : "Continue without Git setup"}
         </Button>
       </div>

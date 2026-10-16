@@ -21,30 +21,37 @@ import * as DesktopUpdates from "./DesktopUpdates.ts";
 import { flushCallbacks, makeHarness } from "./updatesTestHarness.ts";
 
 describe("DesktopUpdates", () => {
-  it.effect("rejects donor, generic and malformed bundled feeds without checking or downloading", () =>
-    Effect.gen(function* () {
-      for (const appUpdateYml of [
-        "provider: github\nowner: pingdotgg\nrepo: t3code\n",
-        "provider: github\nowner: 'PingDotGG'\nrepo: 'T3Code'\n",
-        "provider: github\nowner: pingdotgg\nrepo: t3code.git\n",
-        "provider: generic\nurl: https://github.com/pingdotgg/t3code/releases\n",
-        "provider: github\nowner: example\nrepo: meerkat\nhost: attacker.invalid\n",
-        "provider: github\nowner: example\nrepo: meerkat\nprotocol: http\n",
-        "provider: github\nowner: example\n",
-      ]) {
-        const harness = makeHarness({ appUpdateYml, env: { T3CODE_DESKTOP_MOCK_UPDATES: "false" } });
-        yield* Effect.scoped(Effect.gen(function* () {
-          const updates = yield* DesktopUpdates.DesktopUpdates;
-          yield* updates.configure;
-          assert.equal((yield* updates.getState).status, "disabled");
-          yield* updates.check("menu");
-          yield* updates.download;
-          assert.equal(harness.checkCount(), 0);
-          assert.equal(harness.downloadCount(), 0);
-          assert.deepEqual(harness.feedUrls(), []);
-        }).pipe(Effect.provide(harness.layer)));
-      }
-    }),
+  it.effect(
+    "rejects donor, generic and malformed bundled feeds without checking or downloading",
+    () =>
+      Effect.gen(function* () {
+        for (const appUpdateYml of [
+          "provider: github\nowner: pingdotgg\nrepo: t3code\n",
+          "provider: github\nowner: 'PingDotGG'\nrepo: 'T3Code'\n",
+          "provider: github\nowner: pingdotgg\nrepo: t3code.git\n",
+          "provider: generic\nurl: https://github.com/pingdotgg/t3code/releases\n",
+          "provider: github\nowner: example\nrepo: meerkat\nhost: attacker.invalid\n",
+          "provider: github\nowner: example\nrepo: meerkat\nprotocol: http\n",
+          "provider: github\nowner: example\n",
+        ]) {
+          const harness = makeHarness({
+            appUpdateYml,
+            env: { T3CODE_DESKTOP_MOCK_UPDATES: "false" },
+          });
+          yield* Effect.scoped(
+            Effect.gen(function* () {
+              const updates = yield* DesktopUpdates.DesktopUpdates;
+              yield* updates.configure;
+              assert.equal((yield* updates.getState).status, "disabled");
+              yield* updates.check("menu");
+              yield* updates.download;
+              assert.equal(harness.checkCount(), 0);
+              assert.equal(harness.downloadCount(), 0);
+              assert.deepEqual(harness.feedUrls(), []);
+            }).pipe(Effect.provide(harness.layer)),
+          );
+        }
+      }),
   );
 
   it.effect("accepts an explicitly bundled fork GitHub feed with quoted YAML fields", () => {
@@ -52,13 +59,15 @@ describe("DesktopUpdates", () => {
       appUpdateYml: "provider: github\nowner: 'example'\nrepo: 'meerkat-desktop'\n",
       env: { T3CODE_DESKTOP_MOCK_UPDATES: "false" },
     });
-    return Effect.scoped(Effect.gen(function* () {
-      const updates = yield* DesktopUpdates.DesktopUpdates;
-      yield* updates.configure;
-      assert.equal((yield* updates.getState).enabled, true);
-      yield* updates.check("menu");
-      assert.equal(harness.checkCount(), 1);
-    }).pipe(Effect.provide(harness.layer)));
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        assert.equal((yield* updates.getState).enabled, true);
+        yield* updates.check("menu");
+        assert.equal(harness.checkCount(), 1);
+      }).pipe(Effect.provide(harness.layer)),
+    );
   });
 
   it("preserves complete causes for update poller and event failures", () => {

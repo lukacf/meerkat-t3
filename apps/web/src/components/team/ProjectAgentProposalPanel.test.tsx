@@ -8,11 +8,14 @@ import {
   type MeerkatProjectProposal,
   type MeerkatProjectTeam,
 } from "@t3tools/contracts";
+import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
 import { act, type PropsWithChildren } from "react";
 import { create, type ReactTestRenderer } from "react-test-renderer";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
+  settings: null as ClientSettings | null,
+  persist: vi.fn(),
   proposal: null as MeerkatProjectProposal | null,
   team: null as MeerkatProjectTeam | null,
   teamError: null as string | null,
@@ -21,6 +24,15 @@ const state = vi.hoisted(() => ({
   startTurn: vi.fn(),
   refresh: vi.fn(),
   navigate: vi.fn(),
+}));
+vi.mock("../../hooks/useSettings", () => ({
+  useClientSettings: (select: (settings: ClientSettings) => unknown) => select(state.settings!),
+  persistClientSettingsUpdate: async (update: (settings: ClientSettings) => ClientSettings) => {
+    const next = update(state.settings!);
+    await state.persist(next);
+    state.settings = next;
+    return next;
+  },
 }));
 vi.mock("@tanstack/react-router", () => ({ useNavigate: () => state.navigate }));
 vi.mock("../../lib/utils", () => ({ newMessageId: () => "message" }));
@@ -33,6 +45,18 @@ vi.mock("../../state/meerkatTeam", () => ({
   },
   useVisibleTeamRefresh: () => {},
 }));
+vi.mock("@effect/atom-react", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@effect/atom-react")>()),
+  useAtomValue: () => ({
+    status: "live",
+    snapshot: { _id: "Option", _tag: "Some", value: { threads: [] } },
+  }),
+}));
+vi.mock("./useRestoreReview", () => ({
+  useRestoreReviewWorkBlock: () => null,
+  readRestoreReviewWorkBlock: () => null,
+}));
+vi.mock("../../state/shell", () => ({ environmentShell: { stateValueAtom: () => "shell" } }));
 vi.mock("../../state/threads", () => ({ threadEnvironment: { startTurn: "startTurn" } }));
 vi.mock("../../state/query", () => ({
   useEnvironmentQuery: (query: string) => ({
@@ -183,6 +207,8 @@ beforeEach(() => {
     providers: [],
     projectAgents: [],
   };
+  state.settings = { ...DEFAULT_CLIENT_SETTINGS, onboardingCompletedAt: null };
+  state.persist.mockReset().mockResolvedValue(undefined);
   state.teamError = null;
   state.create.mockReset();
   state.prepare.mockReset();
@@ -285,4 +311,82 @@ describe("proposal command recovery", () => {
     expect(content()).toContain("1 agent ready");
     expect(renderer!.root.findAllByProps({ role: "alert" })).toHaveLength(0);
   });
+});
+
+describe("specialist onboarding completion", () => {
+  function beginSetup() {
+    state.settings = {
+      ...state.settings!,
+      onboardingProgress: {
+        step: "project-agents",
+        environmentIds: [props.environmentId],
+        startedAt: "2026-10-08T12:00:00.000Z",
+        projectRef: { environmentId: props.environmentId, projectId },
+        threadId: sourceThreadId,
+      },
+    };
+  }
+  it("a ready proposal and unrelated agents cannot finish the setup journey", () => {
+    beginSetup();
+    state.team = { ...state.team!, projectAgents: [{ ...prepared, focus: "An unrelated domain" }] };
+    render();
+    expect(button("Continue to specialists")).toBeUndefined();
+    expect(state.settings!.onboardingCompletedAt).toBeNull();
+    expect(state.persist).not.toHaveBeenCalled();
+  });
+  it("successful apply offers explicit completion while preparation is still running", async () => {
+    beginSetup();
+    state.create.mockResolvedValueOnce({
+      _tag: "Success",
+      value: {
+        projectId,
+        sourceThreadId,
+        proposalId: proposal.proposalId,
+        results: [
+          {
+            candidateId: "architect",
+            agent: { ...prepared, preparation: { ...prepared.preparation!, status: "studying" } },
+            error: null,
+          },
+        ],
+      },
+    });
+    render();
+    act(() => button("Review proposal").props.onClick());
+    await act(async () => button("Apply 1 assignment").props.onClick());
+    act(() => button("Close review").props.onClick());
+    expect(state.settings!.onboardingCompletedAt).toBeNull();
+    expect(content()).toContain("1 studying");
+    await act(async () => button("Continue to specialists").props.onClick());
+    expect(state.settings!.onboardingProgress).toBeNull();
+    expect(state.navigate).toHaveBeenCalledWith({
+      to: "/$environmentId/agents/$agentId",
+      params: { environmentId: props.environmentId, agentId: prepared.agentId },
+      search: { project: projectId },
+    });
+    expect(state.startTurn).not.toHaveBeenCalled();
+  });
+  it("reload recognizes current applied assignments and does not repeat study", async () => {
+    beginSetup();
+    state.team = { ...state.team!, projectAgents: [prepared] };
+    render();
+    expect(button("Continue to specialists")).toBeDefined();
+    expect(state.settings!.onboardingCompletedAt).toBeNull();
+    await act(async () => button("Continue to specialists").props.onClick());
+    expect(state.create).not.toHaveBeenCalled();
+    expect(state.startTurn).not.toHaveBeenCalled();
+  });
+  it.each(["failed", "interrupted", "uncertain"] as const)(
+    "does not complete from a %s assignment",
+    (status) => {
+      beginSetup();
+      state.team = {
+        ...state.team!,
+        projectAgents: [{ ...prepared, preparation: { ...prepared.preparation!, status } }],
+      };
+      render();
+      expect(button("Continue to specialists")).toBeUndefined();
+      expect(state.settings!.onboardingCompletedAt).toBeNull();
+    },
+  );
 });

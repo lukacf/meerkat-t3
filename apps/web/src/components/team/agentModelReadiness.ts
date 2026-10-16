@@ -1,5 +1,9 @@
-import type { ModelSelection, ProviderInstanceId, ServerConfig } from "@t3tools/contracts";
-import { currentModelCredentialRequirement } from "../../modelCredentials";
+import type {
+  MeerkatAgentWork,
+  ModelSelection,
+  ProviderInstanceId,
+  ServerConfig,
+} from "@t3tools/contracts";
 import { toAppModelOption } from "../../modelSelection";
 import {
   applyProviderInstanceSettings,
@@ -17,11 +21,12 @@ import {
   resolveProviderWorkspaceReadiness,
 } from "@t3tools/client-runtime/providerWorkspaceReadiness";
 
-/** An omitted override keeps the native session's model; it is not an unknown catalog selection. */
+/** Current sessions retain their account binding; explicit selections use workspace defaults. */
 export function getAgentModelSendBlock(input: {
   readonly instanceId: ProviderInstanceId;
   readonly selection: ModelSelection | undefined;
   readonly currentModel: string | undefined;
+  readonly modelAuth?: MeerkatAgentWork["modelAuth"];
   readonly steering: boolean;
   readonly cwd?: string | null | undefined;
   readonly serverConfig:
@@ -45,15 +50,42 @@ export function getAgentModelSendBlock(input: {
     : [];
   const entry = entries.find((candidate) => candidate.instanceId === input.instanceId);
   if (
-    provider?.driver === "meerkat" &&
-    provider.supportsWorkspaceReadiness === true &&
-    (!canCheckProviderWorkspaceReadiness(provider) || !entry?.enabled)
+    input.serverConfig &&
+    (!provider ||
+      !entry?.enabled ||
+      !entry.installed ||
+      !entry.isAvailable ||
+      provider.status === "disabled" ||
+      (provider.supportsWorkspaceReadiness === true &&
+        !canCheckProviderWorkspaceReadiness(provider)))
   )
     return {
-      reason:
-        "The selected Meerkat provider is unavailable. Check this provider in Settings before sending.",
+      reason: "Model access is unavailable. Check Settings > Providers before sending.",
       action: { kind: "settings", instanceId: input.instanceId, label: "Open provider settings" },
     };
+  if (!input.selection) {
+    if (input.modelAuth?.state === "connected") return null;
+    const account = input.modelAuth?.accountLabel
+      ? `the "${input.modelAuth.accountLabel}" account`
+      : "this agent's model account";
+    const reason =
+      input.modelAuth?.state === "needs_auth"
+        ? `Connect ${account} in Settings > Providers before sending. Your draft is saved.`
+        : input.modelAuth?.state === "reauth_required"
+          ? `Reconnect ${account} in Settings > Providers before sending. Your draft is saved.`
+          : `Could not confirm access to ${account}. Check Settings > Providers or choose a model. Your draft is saved.`;
+    return {
+      reason,
+      action: {
+        kind: "settings",
+        instanceId: input.instanceId,
+        label:
+          input.modelAuth?.state === "needs_auth" || input.modelAuth?.state === "reauth_required"
+            ? "Connect model account"
+            : "Open provider settings",
+      },
+    };
+  }
   if (workspace.pendingInstanceIds.has(input.instanceId))
     return { reason: "Checking models for this workspace...", action: null };
   if (provider?.supportsWorkspaceReadiness === true && provider.status === "error")
@@ -62,33 +94,6 @@ export function getAgentModelSendBlock(input: {
         "Could not check models for this workspace. Refresh this provider in Settings before sending. Your draft is saved.",
       action: { kind: "settings", instanceId: input.instanceId, label: "Open provider settings" },
     };
-  if (!input.selection) {
-    const exactCurrent = provider?.models.find((model) => model.slug === input.currentModel);
-    const currentModels =
-      provider?.models.filter(
-        (model) =>
-          input.currentModel !== undefined &&
-          (model.slug === input.currentModel || model.slug.endsWith(`:${input.currentModel}`)),
-      ) ?? [];
-    const current = exactCurrent ?? (currentModels.length === 1 ? currentModels[0] : undefined);
-    const currentHasCredentials =
-      current?.credentialState === "connected" || current?.credentialState === "host_managed";
-    const reason =
-      currentModelCredentialRequirement(provider?.models ?? [], undefined, input.currentModel) ??
-      (provider?.auth.status === "unauthenticated" && !currentHasCredentials
-        ? "Connect a model account in Settings > Providers before sending. Your draft is saved."
-        : null);
-    return reason
-      ? {
-          reason,
-          action: {
-            kind: "settings",
-            instanceId: input.instanceId,
-            label: "Connect model account",
-          },
-        }
-      : null;
-  }
   if (input.selection.instanceId !== input.instanceId) {
     return {
       reason:
@@ -119,6 +124,7 @@ export function getAgentDeliveryRetryBlock(input: {
   readonly now: number;
   readonly instanceId: ProviderInstanceId;
   readonly currentModel: string | undefined;
+  readonly modelAuth?: MeerkatAgentWork["modelAuth"];
   readonly cwd?: string | null | undefined;
   readonly serverConfig:
     | Pick<ServerConfig, "providers" | "settings" | "restoreReview">
@@ -143,6 +149,7 @@ export function getAgentDeliveryRetryBlock(input: {
     instanceId: input.instanceId,
     selection: input.attempt.modelSelection,
     currentModel: input.currentModel,
+    modelAuth: input.modelAuth,
     steering: false,
     cwd: input.cwd,
     serverConfig: input.serverConfig,

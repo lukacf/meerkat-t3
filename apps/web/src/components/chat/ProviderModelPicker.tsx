@@ -94,7 +94,7 @@ export const ProviderModelPicker = memo(function ProviderModelPicker(props: {
     : triggerTitle;
   const showInstanceBadge =
     activeEntry !== null && shouldShowInstanceBadge(activeEntry, props.instanceEntries);
-  const compactMeerkatTrigger = props.isComposerOwned && activeEntry?.driverKind === "meerkat";
+  const compactMeerkatTrigger = activeEntry?.driverKind === "meerkat";
 
   const setIsMenuOpen = (open: boolean) => {
     props.onOpenChange?.(open);

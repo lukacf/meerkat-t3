@@ -49,6 +49,16 @@ vi.mock("./MeerkatPeerConnections", () => ({
 vi.mock("../ui/button", () => ({
   Button: ({ children, ...props }: any) => <button {...props}>{children}</button>,
 }));
+vi.mock("../ui/tooltip", () => ({
+  Tooltip: ({ children }: any) => children,
+  TooltipTrigger: ({ render, children }: any) => (
+    <>
+      {render}
+      {children}
+    </>
+  ),
+  TooltipPopup: () => null,
+}));
 vi.mock("../ui/popover", () => ({
   Popover: ({ children, open, onOpenChange }: any) => (
     <div data-open={open}>

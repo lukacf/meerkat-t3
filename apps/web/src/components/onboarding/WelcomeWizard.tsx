@@ -1,35 +1,22 @@
+import { onboardingWorkspaceStep } from "../../onboarding/firstRun.logic";
 import { useAuth } from "@clerk/react";
-import { Link } from "@tanstack/react-router";
 import { useAtomValue } from "@effect/atom-react";
 import type {
   AgentSessionProjectCandidate,
   EnvironmentId,
   ProjectId,
-  ProviderInstanceId,
   ScopedProjectRef,
-  ServerConfig,
   ServerProvider,
 } from "@t3tools/contracts";
-import { scopeProjectRef, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { scopeProjectRef } from "@t3tools/client-runtime/environment";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { CommandId, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
-import * as Schema from "effect/Schema";
-import {
-  ArrowRightIcon,
-  CheckIcon,
-  ChevronRightIcon,
-  CloudIcon,
-  LinkIcon,
-  MonitorIcon,
-  TerminalIcon,
-} from "lucide-react";
+import { CommandId } from "@t3tools/contracts";
+import { ArrowRightIcon, ChevronRightIcon, CloudIcon, LinkIcon, MonitorIcon } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-import { TYPOGRAPHY_ADVANCED_STORAGE_KEY } from "../../appearanceFonts";
-import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { hasCloudPublicConfig } from "../../cloud/publicConfig";
 import { useT3ConnectAuthPrompt } from "../clerk/useT3ConnectAuthPrompt";
 import { saveOnboardingProgress, useCompleteOnboarding } from "../../onboarding/firstRun";
@@ -44,15 +31,8 @@ import {
   resolveOnboardingProjectId,
   type OnboardingProjectGroup,
 } from "../../onboarding/projectImport.logic";
-import {
-  getOnboardingProviderState,
-  getMeerkatOnboardingPresentation,
-  selectOnboardingProviderSetup,
-  resolveOnboardingProviderInstallCommand,
-  resolveOnboardingProviderLoginCommand,
-  selectOnboardingProvidersByDriver,
-} from "../../onboarding/providerReadiness.logic";
-import { newProjectId, randomUUID } from "../../lib/utils";
+import { isOnboardingModelAccessReady } from "../../onboarding/providerReadiness.logic";
+import { newProjectId } from "../../lib/utils";
 import { agentSessionImport } from "../../state/agentSessions";
 import { readProjects, useProjects } from "../../state/entities";
 import { useEnvironments, usePrimaryEnvironment } from "../../state/environments";
@@ -60,12 +40,8 @@ import { isOnboardingRelayEnvironment } from "../../onboarding/targetEnvironment
 import { useProjectScans } from "../../onboarding/useProjectScans";
 import { projectEnvironment } from "../../state/projects";
 import { serverEnvironment } from "../../state/server";
-import { terminalEnvironment } from "../../state/terminal";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { connectPairing } from "../../connection/onboarding";
-import { getProviderSummary } from "../settings/providerStatus";
-import { getDriverOption } from "../settings/providerDriverMeta";
-import { TerminalViewport } from "../ThreadTerminalDrawer";
 import { CloudEnvironmentConnectRows } from "../cloud/CloudEnvironmentConnectList";
 import { ClaudeAI, OpenAI } from "../Icons";
 import { APP_DISPLAY_NAME } from "../../branding";
@@ -85,16 +61,15 @@ import { formatRelativeTime } from "../../timestampFormat";
 /**
  * First-run welcome wizard. Rendered over the workspace at `/welcome` on a
  * fresh install (no completed-onboarding flag, empty workspace). Flow:
- * connection, model access, project choice and a first task. Only a successful
- * reply or an explicit skip completes the persisted setup journey.
+ * connection, model access, project choice and specialist assignments. Applying
+ * assignments and continuing, or explicitly skipping, completes the setup journey.
  */
 
 type WizardStep = "connection" | "agents" | "projects" | "import";
 const NO_ENVIRONMENTS: readonly EnvironmentId[] = [];
 const NO_PROVIDERS: readonly ServerProvider[] = [];
 
-const AGENT_ONBOARDING_THREAD_ID = ThreadId.make("onboarding-agent-setup");
-const ONBOARDING_STAGES = ["Connect", "Model access", "Project", "First task"] as const;
+const ONBOARDING_STAGES = ["Connect", "Model access", "Project", "Project agents"] as const;
 const SCAN_LIMIT_MESSAGE = "Scan limit reached. Some projects or conversations may be missing.";
 export function WelcomeWizard({
   localAvailable,
@@ -106,7 +81,9 @@ export function WelcomeWizard({
   const completeOnboarding = useCompleteOnboarding();
   const progress = useClientSettings((settings) => settings.onboardingProgress);
   const [step, setStep] = useState<WizardStep>(() =>
-    progress?.step === "first-task" ? "projects" : (progress?.step ?? "connection"),
+    progress?.step === "first-task" || progress?.step === "project-agents"
+      ? "projects"
+      : (progress?.step ?? "connection"),
   );
   const { environments } = useEnvironments();
   const [selection, setSelection] = useState<ReadonlySet<EnvironmentId> | null>(() =>
@@ -153,6 +130,7 @@ export function WelcomeWizard({
             : null;
         await saveOnboardingProgress({
           step: next === "import" ? "projects" : next,
+          ...(projectRef ? { resumeStep: onboardingWorkspaceStep(progress) } : {}),
           environmentIds: ids,
           startedAt: progress?.startedAt ?? new Date().toISOString(),
           projectRef,
@@ -184,6 +162,7 @@ export function WelcomeWizard({
           progress.projectRef.projectId === projectRef.projectId;
         await saveOnboardingProgress({
           step: "projects",
+          ...(sameProject ? { resumeStep: onboardingWorkspaceStep(progress) } : {}),
           environmentIds: setupIds,
           startedAt: sameProject ? progress.startedAt : new Date().toISOString(),
           projectRef,
@@ -211,7 +190,8 @@ export function WelcomeWizard({
             progress?.projectRef?.environmentId === projectRef.environmentId &&
             progress.projectRef.projectId === projectRef.projectId;
           await saveOnboardingProgress({
-            step: "first-task",
+            step: sameProject ? onboardingWorkspaceStep(progress) : "project-agents",
+            resumeStep: sameProject ? onboardingWorkspaceStep(progress) : "project-agents",
             environmentIds: setupIds,
             startedAt: sameProject ? progress.startedAt : new Date().toISOString(),
             projectRef,
@@ -328,7 +308,7 @@ export function WelcomeWizard({
               Skip setup for now
             </Button>
             <p className="mt-1 text-xs text-muted-foreground">
-              Search for "Set up Meerkat" to return here.
+              Search for "Set up your workspace" to return here.
             </p>
           </div>
         </WizardPanel>
@@ -675,7 +655,7 @@ function PairingForm({
             </p>
             <p className="mt-2 text-xs leading-relaxed text-muted-foreground">
               Remote installation is not included in the Meerkat pilot. For the supported local
-              setup, open Meerkat T3 on your Mac and choose this computer.
+              setup, open MeerkaT3 on your Mac and choose this computer.
             </p>
           </CollapsiblePanel>
         </Collapsible>
@@ -686,26 +666,7 @@ function PairingForm({
 
 // ── Step 3: agents ───────────────────────────────────────────
 
-const PRIMARY_AGENT_DRIVERS = ["claudeAgent", "codex"] as const;
-type OnboardingAgentDriver = (typeof PRIMARY_AGENT_DRIVERS)[number];
-
-/** Setup values stay fixed while provider probes refresh the surrounding cards. */
-interface AgentTerminalSession {
-  readonly environmentId: EnvironmentId;
-  readonly driver: OnboardingAgentDriver;
-  readonly providerInstanceId: ServerProvider["instanceId"];
-  readonly cwd: string;
-  readonly command: string;
-  readonly keybindings: ServerConfig["keybindings"];
-}
-
-/**
- * Claude Code and Codex use live probe status. Install opens the built-in
- * terminal inline with the vendor's standalone installer pre-typed. The update
- * RPC can't install a binary that isn't there yet (it infers the installer from
- * the installed binary's path), and the terminal also handles the interactive
- * login that follows.
- */
+/** Native provider authentication is shared with Settings. */
 function AgentsStep({
   environmentIds,
   onContinue,
@@ -736,8 +697,8 @@ function AgentsStep({
     );
   return (
     <StepShell
-      title="Connect a model"
-      description="Connect a provider before starting your first task. Existing credentials on these computers are detected automatically."
+      title="Connect your providers"
+      description="Sign in or add credentials for the models your project specialists will use. Existing accounts are detected automatically."
     >
       <ScrollArea scrollFade className="mt-5 h-auto max-h-96">
         <div className="space-y-5 pr-3">
@@ -756,7 +717,7 @@ function AgentsStep({
         </div>
       </ScrollArea>
       <p className="sr-only" role="status">
-        {ready ? "Provider setup is ready. Choose a project to try your first task." : null}
+        {ready ? "Model setup is ready. Choose a repository to propose project specialists." : null}
       </p>
       <div className="mt-6 flex justify-end">
         <Button autoFocus onClick={onContinue} disabled={setupPending || !ready}>
@@ -784,8 +745,6 @@ function ConnectedAgentsStep({
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders, {
     reportFailure: false,
   });
-  const serverConfig = useAtomValue(serverEnvironment.configValueAtom(environmentId));
-  const [credentialTarget, setCredentialTarget] = useState<ProviderInstanceId | null>(null);
   const [credentialPending, setCredentialPending] = useState(false);
   const [credentialError, setCredentialError] = useState(false);
   const [rechecking, setRechecking] = useState(false);
@@ -795,14 +754,11 @@ function ConnectedAgentsStep({
     !credentialError &&
     !rechecking &&
     !probeError &&
-    providers.some((provider) => getOnboardingProviderState(provider) === "ready");
+    isOnboardingModelAccessReady(providers);
   useEffect(() => {
     onReadinessChange(environmentId, ready);
   }, [environmentId, onReadinessChange, ready]);
-  const [terminalSession, setTerminalSession] = useState<AgentTerminalSession | null>(null);
 
-  // Re-probe on entry so freshly installed CLIs show up without a manual
-  // refresh; harmless when nothing changed (single-flighted per environment).
   const recheck = useCallback(async () => {
     setRechecking(true);
     setProbeError(null);
@@ -811,7 +767,7 @@ function ConnectedAgentsStep({
       if (result._tag === "Failure") throw squashAtomCommandFailure(result);
     } catch (cause) {
       setProbeError(
-        cause instanceof Error ? cause.message : "Could not check providers. Try again.",
+        cause instanceof Error ? cause.message : "Could not check model access. Try again.",
       );
     } finally {
       setRechecking(false);
@@ -821,59 +777,14 @@ function ConnectedAgentsStep({
     void recheck();
   }, [recheck]);
 
-  const byDriver = useMemo(() => selectOnboardingProvidersByDriver(providers), [providers]);
-
-  const { meerkatProviders, showCliProviders } = selectOnboardingProviderSetup(providers);
-  const primaryAgents = (showCliProviders ? PRIMARY_AGENT_DRIVERS : []).map((driver) => ({
-    driver,
-    provider: byDriver.get(driver),
-  }));
   return (
     <section>
       <h2 className="mb-2 text-sm font-medium">{machineLabel}</h2>
-      <div className="space-y-1.5">
-        {meerkatProviders.map((provider) => (
-          <MeerkatOnboardingCard
-            key={provider.instanceId}
-            provider={provider}
-            environmentId={environmentId}
-            setupPending={setupPending || credentialPending || rechecking}
-            rechecking={rechecking}
-            hasCredentialRetry={credentialTarget === provider.instanceId && credentialError}
-            onRecheck={() => void recheck()}
-            onConfigure={() => setCredentialTarget(provider.instanceId)}
-          />
-        ))}
-        {primaryAgents.map(({ driver, provider }) => (
-          <AgentCard
-            key={driver}
-            driver={driver}
-            provider={provider}
-            terminalOpen={terminalSession?.driver === driver}
-            terminalAvailable={serverConfig !== null}
-            onOpenTerminal={() => {
-              if (provider === undefined || serverConfig === null) return;
-              setTerminalSession({
-                environmentId,
-                driver,
-                providerInstanceId: provider.instanceId,
-                cwd: serverConfig.cwd,
-                command: provider.installed
-                  ? resolveOnboardingProviderLoginCommand(
-                      provider,
-                      serverConfig.settings,
-                      serverConfig.environment.platform.os,
-                    )
-                  : resolveOnboardingProviderInstallCommand(
-                      driver,
-                      serverConfig.environment.platform.os,
-                    ),
-                keybindings: serverConfig.keybindings,
-              });
-            }}
-          />
-        ))}
-      </div>
+      <OnboardingCredentials
+        environmentId={environmentId}
+        onPendingChange={setCredentialPending}
+        onErrorChange={setCredentialError}
+      />
       {probeError ? (
         <div className="mt-2 space-y-2">
           <p role="alert" className="text-xs text-destructive">
@@ -889,317 +800,7 @@ function ConnectedAgentsStep({
           </Button>
         </div>
       ) : null}
-      {credentialTarget !== null ? (
-        <div className="mt-3">
-          <OnboardingCredentials
-            key={credentialTarget}
-            environmentId={environmentId}
-            instanceId={credentialTarget}
-            onPendingChange={setCredentialPending}
-            onErrorChange={setCredentialError}
-          />
-        </div>
-      ) : null}
-      {terminalSession !== null ? (
-        <AgentInstallTerminal
-          key={`${terminalSession.environmentId}:${terminalSession.providerInstanceId}:${terminalSession.driver}`}
-          session={terminalSession}
-          onClose={() => {
-            setTerminalSession(null);
-            void recheck();
-          }}
-        />
-      ) : null}
     </section>
-  );
-}
-
-function MeerkatOnboardingCard({
-  provider,
-  environmentId,
-  onConfigure,
-  setupPending,
-  rechecking,
-  hasCredentialRetry,
-  onRecheck,
-}: {
-  readonly provider: ServerProvider;
-  readonly environmentId: EnvironmentId;
-  readonly onConfigure: () => void;
-  readonly setupPending: boolean;
-  readonly rechecking: boolean;
-  readonly hasCredentialRetry: boolean;
-  readonly onRecheck: () => void;
-}) {
-  const presentation = getMeerkatOnboardingPresentation(provider);
-  const Icon = getDriverOption(provider.driver)?.icon;
-  const needsRecovery =
-    !presentation.ready &&
-    (provider.availability === "unavailable" || getOnboardingProviderState(provider) !== "signIn");
-  return (
-    <div className="flex items-start gap-3 rounded-lg border border-border bg-background px-3 py-2.5">
-      {Icon ? <Icon className="mt-0.5 size-5 shrink-0" /> : null}
-      <div className="min-w-0 flex-1">
-        <span className="block text-sm font-medium text-foreground">
-          {provider.displayName?.trim() || "Meerkat"}
-        </span>
-        <p className="mt-0.5 text-xs leading-relaxed break-words text-muted-foreground">
-          {presentation.detail}
-        </p>
-        {(presentation.ready || getOnboardingProviderState(provider) === "signIn") &&
-        provider.availability !== "unavailable" ? (
-          <div className="mt-3">
-            <Button size="sm" onClick={onConfigure} disabled={setupPending}>
-              {setupPending
-                ? "Checking credentials..."
-                : presentation.ready
-                  ? "Manage credentials"
-                  : "Set up credentials"}
-              <ArrowRightIcon className="size-3.5" />
-            </Button>
-          </div>
-        ) : null}
-        {needsRecovery ? (
-          <div className="mt-3 flex flex-wrap items-center gap-2">
-            {!hasCredentialRetry ? (
-              <Button size="sm" variant="outline" onClick={onRecheck} disabled={setupPending}>
-                {rechecking ? "Checking..." : "Retry check"}
-              </Button>
-            ) : null}
-            <Link
-              to="/settings/providers"
-              search={{ environmentId, instanceId: provider.instanceId }}
-              className="text-xs text-primary underline underline-offset-2"
-            >
-              Open Providers
-            </Link>
-          </div>
-        ) : null}
-      </div>
-      <span
-        className={cn(
-          "inline-flex shrink-0 items-center gap-1.5 text-xs font-medium",
-          presentation.ready ? "text-success-foreground" : "text-muted-foreground",
-        )}
-      >
-        {presentation.ready ? <CheckIcon className="size-3.5" /> : null}
-        {presentation.label}
-      </span>
-    </div>
-  );
-}
-
-function AgentCard({
-  driver,
-  provider,
-  terminalOpen,
-  terminalAvailable,
-  onOpenTerminal,
-}: {
-  readonly driver: OnboardingAgentDriver;
-  readonly provider: ServerProvider | undefined;
-  readonly terminalOpen: boolean;
-  readonly terminalAvailable: boolean;
-  readonly onOpenTerminal: () => void;
-}) {
-  const meta = getDriverOption(ProviderDriverKind.make(driver));
-  const Icon = meta?.icon;
-  const displayName = driver === "claudeAgent" ? "Claude Code" : (meta?.label ?? driver);
-  const summary = getProviderSummary(provider);
-  const providerState = getOnboardingProviderState(provider);
-
-  return (
-    <div className="flex items-center gap-3 rounded-lg border border-border bg-background px-3 py-2.5">
-      {Icon ? (
-        <Icon className={cn("size-5 shrink-0", driver !== "claudeAgent" && "fill-foreground")} />
-      ) : null}
-      <div className="min-w-0 flex-1">
-        <span className="block text-sm font-medium text-foreground">{displayName}</span>
-        <p className="mt-0.5 text-xs leading-relaxed break-words whitespace-pre-wrap text-muted-foreground">
-          {summary.headline}
-          {summary.detail ? ` · ${summary.detail}` : ""}
-        </p>
-      </div>
-      <div className="shrink-0">
-        {providerState === "ready" ? (
-          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-success-foreground">
-            <CheckIcon className="size-3.5" />
-            Ready
-          </span>
-        ) : providerState === "checking" ? (
-          <span className="text-xs text-muted-foreground">Checking...</span>
-        ) : providerState === "disabled" ? (
-          <span className="text-xs text-muted-foreground">Disabled</span>
-        ) : providerState === "attention" ? (
-          <span className="text-xs text-muted-foreground">{summary.headline}</span>
-        ) : (
-          <Button
-            size="xs"
-            variant="ghost"
-            onClick={onOpenTerminal}
-            disabled={terminalOpen || !terminalAvailable}
-          >
-            <TerminalIcon className="size-3.5" />
-            {providerState === "signIn" ? "Sign in" : "Install"}
-          </Button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/**
- * Inline install terminal. Opens a PTY on the connected environment under a
- * synthetic onboarding thread id (terminals are keyed by free-form thread id;
- * the server validates only the cwd) and pre-types the install or login
- * command without submitting, so the user reviews and presses Enter.
- */
-function AgentInstallTerminal({
-  session,
-  onClose,
-}: {
-  readonly session: AgentTerminalSession;
-  readonly onClose: () => void;
-}) {
-  const { command, cwd, driver, environmentId, keybindings, providerInstanceId } = session;
-  // Same terminal typography preference the thread drawer honors.
-  const [advancedTypography] = useLocalStorage(
-    TYPOGRAPHY_ADVANCED_STORAGE_KEY,
-    false,
-    Schema.Boolean,
-  );
-  const openTerminal = useAtomCommand(terminalEnvironment.open, { reportFailure: false });
-  const writeTerminal = useAtomCommand(terminalEnvironment.write, { reportFailure: false });
-  const closeTerminal = useAtomCommand(terminalEnvironment.close, { reportFailure: false });
-  const setupQueueRef = useRef(Promise.resolve());
-  const setupGenerationRef = useRef(0);
-  const activeSetupGenerationRef = useRef<number | null>(null);
-  const [terminalId] = useState(() => `onboarding-${driver}-${randomUUID()}`);
-  const threadRef = useMemo(
-    () => scopeThreadRef(environmentId, AGENT_ONBOARDING_THREAD_ID),
-    [environmentId],
-  );
-  const [setupAttempt, setSetupAttempt] = useState(0);
-  const [setupState, setSetupState] = useState<
-    "preparing" | "ready" | "openFailed" | "writeFailed"
-  >("preparing");
-  const terminalReady = setupState === "ready" || setupState === "writeFailed";
-
-  // Keep each setup generation distinct. In Strict Mode, a canceled open can
-  // finish after the replacement setup starts; it must not close or pre-type
-  // into the replacement session that shares this terminal id.
-  useEffect(() => {
-    const generation = setupGenerationRef.current + 1;
-    setupGenerationRef.current = generation;
-    activeSetupGenerationRef.current = generation;
-    setSetupState("preparing");
-
-    setupQueueRef.current = setupQueueRef.current.then(async () => {
-      if (activeSetupGenerationRef.current !== generation) return;
-      const opened = await openTerminal({
-        environmentId,
-        input: {
-          threadId: AGENT_ONBOARDING_THREAD_ID,
-          terminalId,
-          cwd,
-          providerInstanceId,
-        },
-      });
-      if (opened._tag !== "Success") {
-        if (activeSetupGenerationRef.current === generation) setSetupState("openFailed");
-        return;
-      }
-
-      if (activeSetupGenerationRef.current !== generation) return;
-
-      const wrote = await writeTerminal({
-        environmentId,
-        input: { threadId: AGENT_ONBOARDING_THREAD_ID, terminalId, data: command },
-      });
-      if (activeSetupGenerationRef.current !== generation) return;
-      setSetupState(wrote._tag === "Success" ? "ready" : "writeFailed");
-    });
-
-    // Every exit path unmounts the drawer (Done, Continue/Skip, card switch,
-    // session exit), so this cleanup is the single place the PTY dies —
-    // nothing is left running behind the wizard. An interrupted install is
-    // re-runnable from the card.
-    return () => {
-      if (activeSetupGenerationRef.current === generation) {
-        activeSetupGenerationRef.current = null;
-      }
-      setupQueueRef.current = setupQueueRef.current.then(async () => {
-        await closeTerminal({
-          environmentId,
-          input: { threadId: AGENT_ONBOARDING_THREAD_ID, terminalId, deleteHistory: true },
-        });
-      });
-    };
-  }, [
-    closeTerminal,
-    command,
-    cwd,
-    environmentId,
-    openTerminal,
-    providerInstanceId,
-    setupAttempt,
-    terminalId,
-    writeTerminal,
-  ]);
-
-  return (
-    <div
-      data-thread-terminal-drawer
-      className="mt-4 overflow-hidden rounded-lg border border-border/70 bg-background text-foreground"
-    >
-      <div className="flex items-center justify-between border-b border-border/60 bg-background/60 px-3 py-1.5">
-        <span className="text-2xs font-medium text-muted-foreground">
-          {setupState === "writeFailed" ? (
-            <>
-              Run <code className="rounded bg-muted px-1 font-mono">{command}</code> in this
-              terminal.
-            </>
-          ) : setupState === "ready" ? (
-            "Review the command, then press Enter to run it."
-          ) : setupState === "openFailed" ? (
-            "Could not open the setup terminal."
-          ) : (
-            "Preparing command..."
-          )}
-        </span>
-        <div className="flex items-center gap-1">
-          {setupState === "openFailed" ? (
-            <Button size="xs" variant="ghost" onClick={() => setSetupAttempt((value) => value + 1)}>
-              Retry
-            </Button>
-          ) : null}
-          <Button size="xs" variant="ghost-muted" onClick={onClose}>
-            Close
-          </Button>
-        </div>
-      </div>
-      <div className="h-64">
-        {terminalReady ? (
-          <TerminalViewport
-            threadRef={threadRef}
-            threadId={AGENT_ONBOARDING_THREAD_ID}
-            terminalId={terminalId}
-            terminalLabel={`Install ${driver}`}
-            cwd={cwd}
-            providerInstanceId={providerInstanceId}
-            advancedTypography={advancedTypography}
-            onSessionExited={onClose}
-            onSessionClosed={onClose}
-            focusRequestId={1}
-            autoFocus
-            visible
-            resizeEpoch={0}
-            drawerHeight={256}
-            keybindings={keybindings}
-          />
-        ) : null}
-      </div>
-    </div>
   );
 }
 

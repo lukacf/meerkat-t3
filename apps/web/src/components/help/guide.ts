@@ -9,10 +9,10 @@ import privacy from "../../../../../docs/user/telemetry.md?raw";
 import licenses from "../../../../../docs/user/open-source-licenses.md?raw";
 
 export const GUIDE_TOPICS = [
-  { id: "start", label: "Your first task", file: "getting-started.md", text: start },
+  { id: "start", label: "Start with your project", file: "getting-started.md", text: start },
   { id: "install", label: "Install the prototype", file: "install.md", text: install },
-  { id: "accounts", label: "Accounts and billing", file: "accounts.md", text: accounts },
-  { id: "agents", label: "Work with agents", file: "agents.md", text: agents },
+  { id: "accounts", label: "Providers and accounts", file: "accounts.md", text: accounts },
+  { id: "agents", label: "Project specialists", file: "agents.md", text: agents },
   { id: "permissions", label: "Permissions", file: "permission-modes.md", text: permissions },
   { id: "recovery", label: "Recovery and help", file: "troubleshooting.md", text: recovery },
   { id: "updates", label: "Updates", file: "updating.md", text: updates },

@@ -2,7 +2,7 @@
 use crate::mobkit_registry::{ConsoleExpectedTarget, MobkitMobRuntime};
 use meerkat_mobkit::ConsoleFrame;
 use serde_json::{json, Map, Value};
-use std::{future::Future, time::Duration};
+use std::{future::Future, sync::Arc, time::Duration};
 use tokio::time::Instant;
 
 mod completion;
@@ -185,24 +185,23 @@ pub(crate) async fn read(
     mob: &MobkitMobRuntime,
     expected: &ConsoleExpectedTarget,
     busy: bool,
+    auth: Option<&crate::provider_auth::DesktopProviderAuth>,
 ) -> Result<Map<String, Value>, crate::GatewayError> {
     // Model/objective details are optional. Completion authority errors must
     // remain observable, and every read shares one bounded status deadline.
     let deadline = Instant::now() + Duration::from_secs(2);
-    let path = mob
-        .state_root
-        .join("mobkit")
-        .join(crate::stable_slug(&mob.mob_id))
-        .join("console.sqlite");
+    let console_read = Arc::new(crate::mobkit_registry::storage_upgrade::read_console(
+        &mob.state_root.join("mobkit").join(crate::stable_slug(&mob.mob_id)),
+    )?);
     let (active, frames, model, native_run, durable) = tokio::join!(
         before_deadline(deadline, active_inputs(mob, expected, busy)),
         before_deadline(
             deadline,
-            crate::native_history::recent_frames(path.clone(), expected.clone())
+            crate::native_history::recent_frames(console_read.clone(), expected.clone())
         ),
         before_deadline(deadline, current_model(mob, expected)),
         before_deadline(deadline, current_run(mob, expected)),
-        tokio::time::timeout_at(deadline, completion::read(mob, expected, path.clone())),
+        tokio::time::timeout_at(deadline, completion::read(mob, expected, console_read)),
     );
     let durable = durable.map_err(|_| {
         crate::GatewayError::conflict("Native completion evidence is not available yet", None)
@@ -219,6 +218,25 @@ pub(crate) async fn read(
     }
     if let Some(identity) = model.flatten() {
         out.extend(project_current_model(&identity));
+        if let Some(auth) = auth {
+            // Keep model and auth provenance tied to this exact saved session
+            // snapshot. Current provider defaults cannot describe pinned auth.
+            let read_auth = async {
+                let realm = crate::mobkit_registry::load_effective_realm_config(
+                    &mob.checkpoint_project_path,
+                    &mob.config_state_root,
+                )
+                .await
+                .ok()?;
+                (realm.realm_id.as_str() == mob.realm_id).then_some(())?;
+                Some(auth.model_auth_status(&realm.effective, &realm.realm_id, &identity).await)
+            };
+            let model_auth = before_deadline(deadline, read_auth)
+                .await
+                .flatten()
+                .unwrap_or_else(|| crate::provider_auth::DesktopProviderAuth::unknown_model_auth(&identity));
+            out.insert("modelAuth".into(), model_auth);
+        }
     }
     if busy {
         if let Some(run) = native_run.flatten() {
@@ -287,7 +305,10 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let frames = crate::native_history::recent_frames(path, target.clone())
+        let console_read = Arc::new(
+            crate::mobkit_registry::storage_upgrade::read_console(&root).unwrap(),
+        );
+        let frames = crate::native_history::recent_frames(console_read, target.clone())
             .await
             .unwrap();
         assert_eq!(frames.len(), 100);

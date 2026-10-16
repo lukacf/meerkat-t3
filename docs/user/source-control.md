@@ -1,201 +1,55 @@
 # Source control
 
-T3 Code integrates with GitHub, GitLab, Forgejo, Gitea, Bitbucket, and Azure DevOps to clone and publish
-repositories, create pull requests, and review changes.
+Use Git to inspect, preserve, and deliver changes from specialists and task threads. The preview's documented publishing path is GitHub. Model-provider sign-in and GitHub repository access are separate.
 
 ## Connect an account
 
-Install Git and configure authentication on the machine running your T3 Code server. For a remote
-environment, do this on the remote machine. After signing in, open **Settings → Source Control**
-and choose **Rescan**.
+Install Git and [GitHub CLI](https://cli.github.com/) 2.81.0 or newer on your Mac, then follow [GitHub repository setup](accounts.md#github-repositories). Return to **Settings > Source Control**, choose **Rescan**, and confirm the account is authenticated.
 
-### GitHub
-
-Install [GitHub CLI](https://cli.github.com/) 2.81.0 or newer, then sign in:
-
-```bash
-gh auth login
-```
-
-### Forgejo and Gitea
-
-Install [Forgejo CLI (`fj`)](https://codeberg.org/forgejo-contrib/forgejo-cli) or
-[Gitea CLI (`tea`)](https://gitea.com/gitea/tea) 0.16 or later on your T3 Code server.
-Sign in with `fj --host https://your-server auth add-token` or `tea login add`.
-Repeat for each server you use, including Codeberg.
-
-T3 Code prefers a matching `fj` login and falls back to `tea` when `fj` is unavailable
-or has no login for that server. Once an account is selected, failed actions stay on that
-account. Settings shows the detected CLI. Forgejo and Gitea share one integration entry.
-Servers hosted under a URL subpath, such as `https://example.com/forgejo`, use `tea` because
-fj 0.6 does not preserve the subpath when checking its account.
-
-When cloning or publishing, use a full repository URL to select a specific server.
-You can use `owner/repo` when only one fj server is configured, or with your default `tea`
-login when fj is unavailable or unconfigured. With multiple fj servers, use the full URL.
-If you have multiple `tea` accounts on one server, select one with
-`tea login default <login-name>`. Git push and clone also need Git credentials or an SSH key
-for that server.
-
-### GitLab
-
-Install [GitLab CLI](https://gitlab.com/gitlab-org/cli), then sign in:
-
-```bash
-glab auth login
-```
-
-### Bitbucket
-
-Set an access token in the server's environment:
-
-```bash
-export T3CODE_BITBUCKET_ACCESS_TOKEN="your-access-token"
-```
-
-Or use an Atlassian account email and API token with read/write access to repositories and pull
-requests, plus user read access (`read:user:bitbucket`):
-
-```bash
-export T3CODE_BITBUCKET_EMAIL="you@example.com"
-export T3CODE_BITBUCKET_API_TOKEN="your-token"
-```
-
-The access token takes precedence if both are configured. Restart the server after changing these
-variables.
-
-### Azure DevOps
-
-Install [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/), add the DevOps extension, and sign in:
-
-```bash
-az extension add --name azure-devops
-az login
-```
+A model account does not supply Git credentials. Your remote URL, SSH keys, and Git credential helpers still determine whether Git can clone, fetch, and push.
 
 ## Clone or publish a project
 
-Use **Add Project** in the command palette (`Cmd/Ctrl+K`) to clone a repository. Choose a hosting
-provider or paste a Git URL, then choose where to save it. The project opens right away while the
-clone runs in the background: you can write your first prompt, and sending waits until the files
-are in place. A toast tracks progress and lets you cancel; if the clone fails, retry it from the
-toast or from the banner above the composer.
+Use **Add project** to clone a repository or open a local folder. Supply a repository URL without embedded credentials and choose a destination. The project can open while cloning, but sending waits for the files. If cloning fails, resolve the reported error before retrying.
 
-An unfinished clone remains blocked after the server restarts. Retry rechecks the source and destination. If the destination contains files, move that folder aside before retrying; the app preserves those files. Removing a restored failed-clone project removes its listing without deleting that folder. A source URL that contained credentials must be entered again by adding the project afresh, because those credentials are not saved in clone recovery state.
+An unfinished clone remains blocked after restart. Retry checks the source and destination again. If the destination already contains files, preserve that folder before choosing a fresh destination. Removing a failed clone's project listing does not delete its files.
 
-For a local Git repository without a remote, **Publish Repository** creates a hosted repository,
-adds it as `origin`, and pushes your commits. If there are no commits yet, it creates the remote;
-make your first commit before pushing.
+For a local Git repository without a remote, **Publish Repository** creates a hosted repository and configures `origin`. Review its owner, name, and visibility before confirming. If there are no commits, make your first commit before pushing.
 
-If repository creation succeeds but connecting or pushing fails, **Finish publishing** keeps the
-created repository and checkout available on this device. Fix the reported Git setup or connection
-problem, then retry there. Retrying uses that same repository and refuses a changed remote
-destination. It does not create another repository. A failed creation itself is not treated as
-success; check the hosting service before starting another creation attempt if the connection was lost.
+If the repository was created but connecting or pushing failed, use **Finish publishing** after correcting the Git setup. It continues with that repository and refuses a changed remote destination. Check the host before making another creation attempt when the outcome is uncertain.
 
 ## Create a pull request
 
-Use a thread's Git actions to commit, push, and create a pull request. To write everything yourself,
-choose **Commit**, select the intended files with **Edit**, and enter a commit message. Use
-**Commit on new branch** when the change should leave the default branch. Once the checkout is clean,
-choose **Write pull request...**, enter a title and description, and choose **Create pull request**.
-This pushes committed changes if needed and does not call a writing model. Review the project and
-branch before publishing.
+A specialist's **Delivery task** opens a saved task in its checkout for reviewing and publishing the work. A task thread already has these Git controls.
 
-T3 Code can also generate commit messages, review titles, and descriptions from your changes.
+1. Inspect **Changes** and run the project's checks in **Terminal**. Check the branch and checkout, especially when several agents use the same project.
+2. Choose **Commit**, use **Edit** to select the intended files, and enter a commit message. **Commit on new branch** keeps the change off the default branch. If asked for an author, the app saves your name and email for this repository.
+3. Once the checkout is clean, choose **Write pull request...**, enter the title and description, and choose whether to create a draft.
+4. Choose **Create pull request**. This can push committed changes before creating the review on GitHub.
 
-Choose the writing style and model in **Settings → Source Control**. **Repository conventions**
-uses the project's instructions and recent commit subjects.
+Writing the commit message and using **Write pull request...** avoids a model request for those texts. Generated messages and descriptions use the text-generation account configured in **Settings > Source Control**. Review generated text before publishing it.
 
 ## Review and merge
 
-Open **Pull requests** to review changes and comments, request reviewers, check out a branch,
-or merge. You can edit review titles and descriptions and your own comments where the host allows it.
-GitLab calls these merge requests.
-
-GitHub, GitLab, and Azure DevOps support auto-merge while checks are outstanding. GitHub also
-supports approving waiting fork workflows and opening a revert pull request for a merged change.
-
-GitHub sharing is off by default. In Settings → Connections → GitHub sharing (Environments on mobile), choose
-**Read PRs** or **Read and act** for each environment you trust to share GitHub access.
-Enable both the original environment and the environment answering its requests on this client.
-**Read and act** can use broader GitHub permissions than the original environment's credential;
-only enable it for environments you control and trust. Changing a saved endpoint or removing an
-environment clears its permission.
-
-GitHub review details, linked PR status, and permitted review actions can then use another
-connected environment signed in to the same GitHub account. Each needs a project on that host.
-A connected local environment is preferred for actions and can answer slow or failed reads.
-Browsers and mobile clients need a paired environment to use its GitHub CLI credentials.
-Credentials stay on their machines. Previously verified credentials remain usable for routing
-for ten minutes during a GitHub outage; new credentials must be verified first. An action with
-an uncertain result is never automatically retried elsewhere. Listings, diffs, and checkout or
-PR creation from Git actions continue to use the project's environment.
-
-For Azure DevOps, use the host website to change comments. Bitbucket does not support reopening a
-declined pull request.
+Open **Pull requests** to inspect diffs, comments, checks, and available review actions. Check the destination branch and current checks before merging. A successful local test is separate from the host's branch rules and required checks.
 
 ### Mark files as viewed
 
-Tick a file off in the **Code** tab once you have read it and it collapses; the toolbar keeps a
-running count. A tick belongs to the pull request rather than to a commit, so scoping the tab to a
-single commit keeps them. A file pushed to after you cleared it comes back marked **Changed**.
-
-On GitHub these are GitHub's own viewed marks, so a review carries between T3 Code and github.com
-in either direction. Forgejo, GitLab, Bitbucket, and Azure DevOps expose no record T3 Code can read, so the
-server you are connected to keeps them instead: they follow you across the apps connected to that
-server, but the host's own site will not show them, and the count reads **viewed in T3 Code**.
-
-The **Code** tab is a web and desktop surface. The mobile app reports a pull request's status but
-does not show its diff, so marks are made and read on web and desktop.
-
-## Troubleshooting
-
-- **Expired GitHub credentials or Bad credentials:** run `gh auth login` in a terminal on the computer running this project, open **Settings > Source Control** for that computer, rescan, and retry. Model API keys do not sign in to GitHub.
-
-- **Not authenticated:** run the provider's login command on the server, then rescan. For Bitbucket,
-  confirm the running server received the environment variables.
-- **GitHub sign-in cannot be verified:** update GitHub CLI to at least 2.81.0.
-- **Push fails despite a connected account:** check the Git remote's credentials. SSH and HTTPS
-  remotes can require separate setup from the hosting provider's API access.
-- **A review cannot load:** open it on the host website while resolving connectivity, permissions,
-  or rate limits.
+Mark a file as viewed in a pull request's **Code** tab as you review it. On GitHub, these marks synchronize with GitHub's own review state. A file changed after you reviewed it is marked **Changed** so you can inspect it again.
 
 ## Linked pull requests
 
-A thread can hold several pull requests, including reviews from another repository on the same host.
-Use **Link pull request** in the command palette or **Linked pull requests** panel, or right-click a
-pull request link in the conversation. Creating a pull request from Git actions beside an existing
-saved thread links it automatically. A new, unsent draft has no saved thread to link to; keep the PR
-URL and link it after the thread is saved. After restarting, reopen the same project and saved thread,
-then use **Linked pull requests** to return to the review. Do not create another PR to recover a link.
-Agents can link their pull requests with the `link_pull_request` tool.
+Use **Link pull request** or **Linked pull requests** in a saved thread to attach a review. Pull requests created from Git actions beside a saved thread are linked automatically. A new, unsent draft has no saved thread to attach to: retain the URL and link it once the thread exists.
 
-Use **Link this PR** in a branch-detected badge's tooltip to keep it with the thread. From a review
-on the Pull Requests page, **Link to thread** lets you search for an active thread. The review header
-also lists the threads that link to it, including archived threads, so you can return to their context.
+Reopen the same saved thread after restarting to find its reviews. Unlinking removes the association from the thread; it does not close or delete the pull request. Cross-repository links need a project for that repository on the same computer.
 
-Thread badges show a stack's layer count or the current review number with a count of additional
-links. On mobile, the Git overview lists linked reviews and their stacks; tap a review to open it.
-Linking and unlinking are available in the web and desktop clients.
+## Troubleshooting
 
-The **Linked pull requests** panel lists every review and groups stacks. Unlink a review from its
-row menu. An unlinked stack layer stays out of later syncs. Open linked reviews refresh on the server;
-closed reviews refresh periodically so reopening one on the host is detected. Merged reviews refresh
-when requested. With **Auto-settle merged threads** enabled, a thread can settle after every linked
-review is terminal. An open or unsynced link keeps it active.
+- **GitHub credentials expired:** run `gh auth login --hostname github.com`, rescan Source Control, and retry.
+- **Sign-in cannot be verified:** check that GitHub CLI meets the required version.
+- **Push fails despite an authenticated account:** check the Git remote and its SSH or HTTPS credentials. API access and Git transport can use different authentication.
+- **Repository not found:** check the URL and that the selected account has access.
+- **A review cannot load:** open it on GitHub while resolving connectivity, permission, or rate-limit errors.
+- **An action's outcome is unknown:** inspect GitHub and local Git state before repeating it. Creating another pull request is not a recovery step.
 
-Cross-repository links use a project on the same host. Azure DevOps reviews require a project checked
-out from the matching organization and repository.
-
-## GitHub stacks
-
-The Pull Requests page shows each PR's position in its GitHub stack. Open the stack badge in a
-review to navigate its layers. **Merge stack** submits the selected pull request and every unmerged
-layer below it to GitHub together, respecting branch rules and merge queues. The confirmation shows
-the scope and merge strategy. GitHub rebases the remaining stack after merging.
-
-**Rebase stack** updates remote branches from bottom to top without changing your local checkout.
-It can rewrite history and restart checks. If a layer fails, earlier updates remain; resolve that
-layer before retrying. GitHub may require manual conflict resolution after a lower layer is amended,
-even when its changes look independent. Stack actions require an environment that supports them.
+The source retains integrations for other Git hosts and advanced remote-sharing flows from T3 Code. Their presence in the source does not establish support in this desktop preview.

@@ -31,7 +31,7 @@ describe("composer primary-action availability", () => {
     });
     expect(unavailable).toEqual({
       isEnvironmentUnavailable: false,
-      sendDisabledReason: "The selected provider is unavailable. Check provider settings.",
+      sendDisabledReason: "Model access is unavailable. Check Settings > Providers.",
     });
 
     expect(resolveComposerPrimaryActionAvailability(connected)).toEqual({
@@ -55,7 +55,7 @@ describe("composer primary-action availability", () => {
       }),
     ).toEqual({
       isEnvironmentUnavailable: false,
-      sendDisabledReason: "Checking available providers...",
+      sendDisabledReason: "Checking model access...",
     });
   });
 
@@ -286,11 +286,13 @@ describe("composer model admission", () => {
     });
   });
 
-  it.each([undefined, "unknown", "host_managed", "connected"] as const)(
-    "permits a catalog model with %s credentials while runtime auth remains unknown",
+  it.each([undefined, "unknown", "host_managed"] as const)(
+    "blocks a catalog model with %s credentials until native account access is detected",
     (credentialState) => {
       const option = { ...nativeModel, credentialState };
-      expect(readiness(entry({ auth: { status: "unknown" } }), [option])).toBeNull();
+      expect(readiness(entry({ auth: { status: "unknown" } }), [option])?.reason).toContain(
+        "Check openai",
+      );
     },
   );
 
@@ -319,7 +321,9 @@ describe("composer model admission", () => {
   it("uses per-model native credentials without treating another missing account as an all-model failure", () => {
     const provider = entry({ auth: { status: "unauthenticated" } });
     expect(readiness(provider)).toBeNull();
-    expect(readiness(provider, [{ ...nativeModel, credentialState: "host_managed" }])).toBeNull();
+    expect(
+      readiness(provider, [{ ...nativeModel, credentialState: "host_managed" }]),
+    ).not.toBeNull();
     expect(readiness(provider, [{ ...nativeModel, credentialState: "unknown" }])).not.toBeNull();
   });
 
@@ -363,7 +367,7 @@ describe("composer model admission", () => {
     ]) {
       const pending = { pendingWorkspaceInstanceIds: new Set([provider.instanceId]) };
       const block = readiness(unavailable, [], nativeModel.slug, pending);
-      expect(block?.reason).toContain("provider is unavailable");
+      expect(block?.reason).toContain("Model access is unavailable");
       expect(block?.action).toEqual({
         kind: "settings",
         instanceId: provider.instanceId,
@@ -581,7 +585,7 @@ describe("scoped composer account guidance", () => {
     ];
     for (const modelSendBlock of blocks)
       expect(getProjectHomeAccountSetup({ ...input, modelSendBlock })).toBeNull();
-    for (const credentialState of ["connected", "host_managed"] as const) {
+    for (const credentialState of ["connected"] as const) {
       const modelSendBlock = readiness(entry({ auth: { status: "unauthenticated" } }), [
         { ...nativeModel, credentialState },
       ]);

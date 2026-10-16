@@ -1,7 +1,9 @@
 # Codex
 
+> **Inherited T3 reference.** This page describes the original T3 Code feature retained in the source. It is not part of the supported MeerkaT3 preview setup. Use [Installation](install.md) and [Providers and accounts](accounts.md) for MeerkaT3. Original T3 commands and downloads install a separate product.
+
 For one account, use the default Codex provider with your normal Codex login.
-[Provider setup](./install.md#providers) covers installation, Settings > Providers,
+[Provider setup](https://github.com/pingdotgg/t3code/blob/main/docs/user/install.md#providers) covers installation, Settings > Providers,
 and custom binaries or environment variables.
 
 ## Use multiple accounts
@@ -62,7 +64,7 @@ supports async questions.
 
 Codex tools can request access to another app. Respond to the named app's request
 in the thread on web, desktop, or mobile. Some tools offer access for one request,
-the current session, or permanently. See [Permission modes](./permission-modes.md)
+the current session, or permanently. See [Permission modes](https://github.com/pingdotgg/t3code/blob/main/docs/user/permission-modes.md)
 for command and file approvals.
 
 ## Codex says I hit a usage limit

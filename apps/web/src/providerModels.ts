@@ -105,7 +105,7 @@ export function getDefaultServerModel(
   provider: ProviderDriverKind,
 ): string {
   const models = getProviderModels(providers, provider).filter(
-    (model) => !modelCredentialRequirement(model),
+    (model) => !modelCredentialRequirement(model, provider === "meerkat"),
   );
   return (
     models.find((model) => model.isDefault && !model.isCustom)?.slug ??

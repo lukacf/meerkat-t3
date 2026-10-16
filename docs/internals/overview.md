@@ -1,13 +1,35 @@
 # Architecture
 
-T3 Code keeps execution in the environment that owns the workspace. Web, desktop, and mobile
-clients control it over authenticated RPC. A remote client must never substitute its own filesystem,
+MeerkaT3 keeps execution in the environment that owns the workspace. The local web client
+and Electron desktop control it over authenticated RPC. Meerkat and Meta own the agent runtime. A remote client must never substitute its own filesystem,
 provider credentials, or machine state for the environment's. The desktop app bundles a server,
 but its renderer follows the same boundary.
 
+```mermaid
+flowchart LR
+  UI["Web UI / Electron"] -->|"authenticated RPC"| Server["Environment server"]
+  Server -->|"JSON-RPC over stdio"| Gateway["Rust desktop gateway"]
+  Gateway --> Meta["Meerkat Meta"]
+  Meta --> Core["Meerkat runtime"]
+  Core --> Accounts["Configured model accounts"]
+  Server --> Workspace["Files / Git / terminals"]
+```
+
+## Project specialists and threads
+
+A project is a workspace with long-lived specialist agents. Repository-grounded
+onboarding proposes specialists around its domains; the user selects which to
+create. Their identities and conversations persist beyond a single task. Threads
+provide a place to coordinate work and may have their own native crew. Explicit
+peer links let agents collaborate within and across projects on the environment.
+
+Navigation and conversation views project that topology. They must not replace it
+with app-owned routing, hard-coded worker roles, or a parallel team database that
+claims whether a native message was delivered.
+
 ## Ownership boundaries
 
-Provider processes, terminals, Git, and project files belong to the server. Shared connection and
+Native runtime processes, terminals, Git, and project files belong to the server. Shared connection and
 domain state belongs in `packages/client-runtime`; clients supply platform services and UI.
 Keeping that logic shared prevents reconnect and multi-environment behavior from diverging between
 web and mobile. See [connection runtime](./connection-runtime.md) and
@@ -37,9 +59,10 @@ omit `pullRequests`. Retain the legacy wire fields, projection column, and repla
 does not schedule their removal. Missing new capabilities must also override cached multi-link data
 after an environment downgrade.
 
-Provider-specific behavior belongs behind an adapter. Orchestration works with normalized commands
-and events, so adding a provider should not require branches throughout the domain or clients.
-See [provider constraints](./providers.md).
+The Meerkat adapter translates native facts into application events. The native runtime owns
+account access, model availability, agent lifecycle, peer routing, and durable child crews; the
+application owns presentation, navigation, and workspace tools. Do not infer native completion
+from a persisted app command or closed transport. See [native runtime boundaries](./providers.md).
 
 ## Settings ownership
 
@@ -52,7 +75,8 @@ select known environment-local checkouts; the group itself does not store inheri
 
 ## Durable intent and side effects
 
-The event log is the source of truth for orchestration state. The
+The application event log is the source of truth for application orchestration state,
+not a replacement for native runtime state. The
 [engine](../../apps/server/src/orchestration/Layers/OrchestrationEngine.ts) serializes commands;
 the [decider](../../apps/server/src/orchestration/decider.ts) produces events without performing
 provider or filesystem work. Events, persisted projections, and the accepted command receipt commit

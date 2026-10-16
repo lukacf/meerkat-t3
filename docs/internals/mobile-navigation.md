@@ -1,5 +1,10 @@
 # Mobile navigation
 
+> Scope: this page is reference material for the inherited mobile client. It is not a
+> supported MeerkaT3 preview service or release path. The supported local Mac stack
+> is described in [development](../operations/development.md) and
+> [distribution](../operations/meerkat-distribution.md).
+
 Home and thread routes share the [root native stack](../../apps/mobile/src/Stack.tsx)
 so UIKit can animate the header within one navigation controller. The iPad sidebar
 has its own stack. Splitting Home and threads between controllers loses that

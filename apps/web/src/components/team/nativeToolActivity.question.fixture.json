@@ -398,9 +398,7 @@
               {
                 "customText": "",
                 "questionId": "review",
-                "selectedOptionIds": [
-                  "return-review"
-                ]
+                "selectedOptionIds": ["return-review"]
               }
             ],
             "dismissed": false
@@ -451,9 +449,7 @@
               {
                 "customText": "",
                 "questionId": "review",
-                "selectedOptionIds": [
-                  "return-review"
-                ]
+                "selectedOptionIds": ["return-review"]
               }
             ],
             "dismissed": false
@@ -886,9 +882,7 @@
               {
                 "customText": "",
                 "questionId": "review",
-                "selectedOptionIds": [
-                  "return-review"
-                ]
+                "selectedOptionIds": ["return-review"]
               }
             ],
             "dismissed": false

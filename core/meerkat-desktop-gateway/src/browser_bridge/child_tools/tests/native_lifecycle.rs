@@ -228,3 +228,225 @@ fn native_child_build_receives_late_browser_grant_without_replacing_builtins() {
         });
     }).unwrap().join().unwrap();
 }
+
+#[test]
+fn cold_restored_child_preserves_identity_and_requires_a_new_browser_grant() {
+    std::thread::Builder::new()
+        .name("cold-child-browser-proof".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(16 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    tokio::time::timeout(Duration::from_secs(90), cold_child_browser_proof())
+                        .await
+                        .expect("cold child browser proof must settle");
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+async fn cold_child_browser_proof() {
+    assert!(
+        std::env::var_os("MEERKAT_UI_MCP_SERVER_JS").is_none(),
+        "run this offline proof without a live UI MCP server"
+    );
+    assert!(
+        std::env::var_os("MEERKAT_PROJECT_AGENT_PROPOSAL_MCP_SERVER_JS").is_none(),
+        "run this offline proof without a live project proposal MCP server"
+    );
+    let root = std::env::temp_dir().join(format!("cold-child-browser-{}", uuid::Uuid::new_v4()));
+    let input = CreateMobInput {
+        mob_id: "cold-browser-thread".into(),
+        kind: "thread".into(),
+        label: "Cold browser child proof".into(),
+        role: "coordinator".into(),
+        coordinator_identity: "coordinator".into(),
+        model: "gpt-5.6-sol".into(),
+        initial_llm: None,
+        instructions: "Use the deterministic fixture.".into(),
+        thread_id: Some("cold-browser-thread".into()),
+        include_native_workers: true,
+        access_mode: Some(crate::native_execution_modes::ExecutionMode::FullAccess),
+        config_project_path: root.join("project"),
+        project_path: root.join("project"),
+        state_root: root.join("state"),
+        config_state_root: root.join("state"),
+    };
+    std::fs::create_dir_all(&input.project_path).unwrap();
+    let scope = Scope {
+        project: input.project_path.clone(),
+        state: input.state_root.clone(),
+        mob: input.mob_id.clone(),
+    };
+    let child_id = meerkat_mob::MobId::from("cold-browser-native-child");
+    let llm = Arc::new(InspectChildCatalog {
+        phase: AtomicU64::new(0),
+        requests: AtomicU64::new(0),
+    });
+    let mut saved_sessions = None;
+
+    for attempt in 0..2 {
+        llm.phase.store(0, Ordering::SeqCst);
+        let before_restore = llm.requests.load(Ordering::SeqCst);
+        let registry =
+            ProjectMobkitRegistry::new_with_test_llm(HostToolTransport::new(), llm.clone());
+        let owner = registry.create_local(input.clone()).await.unwrap();
+        let runtime = owner.runtime.as_ref().unwrap();
+        let coordinator = runtime
+            .mob_handle()
+            .resolve_bridge_session_id(&"coordinator".into())
+            .await
+            .unwrap();
+        let state = runtime.mob_runtime().agent_mob_mcp_state().unwrap();
+        if attempt == 0 {
+            let definition: meerkat_mob::MobDefinition = serde_json::from_value(json!({
+                "id": child_id,
+                "profiles": {
+                    "worker": { "model": "gpt-5.6-sol", "runtime_mode": "turn_driven", "tools": { "builtins": true, "shell": true, "comms": true, "mcp": ["t3_preview"] } },
+                    "restricted": { "model": "gpt-5.6-sol", "runtime_mode": "turn_driven", "tools": { "builtins": true, "shell": true, "comms": true, "mcp": ["another_source"] } }
+                }
+            }))
+            .unwrap();
+            state
+                .mob_create_definition_with_owner_bridge_session(
+                    definition,
+                    coordinator.clone(),
+                    true,
+                    false,
+                )
+                .await
+                .unwrap();
+        }
+        let child = state.handle_for(&child_id).await.unwrap();
+        if attempt == 0 {
+            for (profile, member) in [
+                ("worker", "browser-worker"),
+                ("restricted", "restricted-worker"),
+            ] {
+                child
+                    .spawn_spec_with_generated_owner_context(
+                        meerkat_mob::SpawnMemberSpec::new(profile, member)
+                            .with_runtime_mode(meerkat_mob::MobRuntimeMode::TurnDriven)
+                            .with_initial_message("Inspect the initial catalog"),
+                        coordinator.clone(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            child
+                .wait_for_kickoff_complete(Some(Duration::from_secs(15)))
+                .await
+                .unwrap();
+        }
+        let session = child
+            .resolve_bridge_session_id(&"browser-worker".into())
+            .await
+            .unwrap();
+        let restricted = child
+            .resolve_bridge_session_id(&"restricted-worker".into())
+            .await
+            .unwrap();
+        let sessions = (coordinator.clone(), session.clone(), restricted.clone());
+        if let Some(saved) = &saved_sessions {
+            assert_eq!(
+                &sessions, saved,
+                "cold restore must reuse every saved session"
+            );
+        } else {
+            saved_sessions = Some(sessions);
+        }
+        let expected = expected_child(&owner, &session).await;
+        let restricted_expected = expected_child(&owner, &restricted).await;
+        if attempt == 1 {
+            assert_eq!(
+                llm.requests.load(Ordering::SeqCst),
+                before_restore,
+                "restoring and observing the child must not start a model turn"
+            );
+        }
+        let restricted_profile = child
+            .effective_member_profile(&"restricted-worker".into())
+            .await
+            .unwrap();
+        assert_eq!(restricted_profile.tools.mcp, vec!["another_source".to_owned()]);
+        assert!(restricted_profile.tools.builtins && restricted_profile.tools.shell);
+        assert!(child_grant(&owner, &restricted_expected).await.is_err());
+
+        let proxy = scoped(scope.clone());
+        assert!(proxy.grants.read().unwrap().is_empty());
+        // The recorder checks the actual LLM tool catalog: builtins remain,
+        // while the restored child has no preview tool without a new grant.
+        console_turn(
+            &owner,
+            &expected,
+            &format!("No browser grant in lifetime {attempt}"),
+        )
+        .await;
+        console_turn(
+            &owner,
+            &restricted_expected,
+            &format!("Restricted browser source in lifetime {attempt}"),
+        )
+        .await;
+        let guard = child_grant(&owner, &expected).await.unwrap().unwrap();
+        assert_eq!(guard.binding().member, "browser-worker");
+        let host = Arc::new(Preview {
+            names: vec!["preview_status", "preview_open"],
+            calls: AtomicU64::new(0),
+            invalidate_on_probe: None,
+        });
+        let revision = proxy.revoke(&session.to_string());
+        proxy.grants.write().unwrap().insert(
+            session.to_string(),
+            Grant {
+                host_thread_id: Some("cold-browser-thread".into()),
+                host_session_id: Some(coordinator.to_string()),
+                dispatcher: host.clone(),
+                revision,
+                child_guard: Some(guard),
+            },
+        );
+        proxy.epoch.fetch_add(1, Ordering::SeqCst);
+        llm.phase.store(1, Ordering::SeqCst);
+        console_turn(
+            &owner,
+            &expected,
+            &format!("Use new browser grant in lifetime {attempt}"),
+        )
+        .await;
+        assert_eq!(
+            host.calls.load(Ordering::SeqCst),
+            2,
+            "the native child must execute the host probe and preview tool"
+        );
+
+        let prior_owner = Arc::downgrade(&owner);
+        assert!(registry.shutdown().await.is_empty());
+        drop(child);
+        drop(owner);
+        drop(registry);
+        assert!(
+            prior_owner.upgrade().is_none(),
+            "the prior runtime owner must be gone"
+        );
+        // SCOPES is process-local, not saved policy. Remove only this fixture's
+        // entry to model process exit after all of its native owners joined.
+        assert!(
+            crate::browser_bridge::SCOPES
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .remove(&scope)
+                .is_some()
+        );
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}

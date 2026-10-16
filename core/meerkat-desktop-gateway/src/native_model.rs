@@ -1,9 +1,16 @@
 use crate::mobkit_registry::{
     load_effective_realm_config, ConsoleExpectedTarget, MobkitMobRuntime,
 };
-use crate::{member_turn_options_from_params, GatewayError};
+use crate::GatewayError;
 use meerkat_runtime::{SessionLlmReconfigureRequest, SessionServiceRuntimeExt};
 use serde_json::{json, Map, Value};
+
+#[derive(Clone)]
+pub(crate) struct InitialAgentLlmRequest {
+    pub(crate) params: Map<String, Value>,
+    // Trusted native account discovery, never taken from request JSON.
+    pub(crate) catalog: Vec<crate::EffectiveCatalogModel>,
+}
 
 #[derive(Clone)]
 pub(crate) struct InitialAgentLlm {
@@ -17,13 +24,21 @@ pub(crate) fn initial_selection(
     params: &Map<String, Value>,
     config: &meerkat::Config,
 ) -> Result<InitialAgentLlm, GatewayError> {
+    initial_selection_with_catalog(params, config, &crate::effective_catalog_models(config)?)
+}
+
+pub(crate) fn initial_selection_with_catalog(
+    params: &Map<String, Value>,
+    config: &meerkat::Config,
+    catalog: &[crate::EffectiveCatalogModel],
+) -> Result<InitialAgentLlm, GatewayError> {
     let mut params = params.clone();
     // There is no previous session identity at creation. Default means the
     // selected backend's defaults, never an inherited provider's parameters.
     params
         .entry("providerParams".to_string())
         .or_insert(Value::Null);
-    let options = member_turn_options_from_params(&params, config, None)?;
+    let options = crate::member_turn_options_with_catalog(&params, config, None, None, catalog)?;
     let provider = options.provider.ok_or_else(|| {
         GatewayError::invalid(
             "Initial agent parameters require an exact model selection",
@@ -97,6 +112,15 @@ pub(crate) async fn apply(
     expected: &ConsoleExpectedTarget,
     params: &Map<String, Value>,
 ) -> Result<(), GatewayError> {
+    apply_with_catalog(mob, expected, params, None).await
+}
+
+pub(crate) async fn apply_with_catalog(
+    mob: &MobkitMobRuntime,
+    expected: &ConsoleExpectedTarget,
+    params: &Map<String, Value>,
+    catalog: Option<&[crate::EffectiveCatalogModel]>,
+) -> Result<(), GatewayError> {
     if params.get("handlingMode").and_then(Value::as_str) != Some("queue") {
         return Err(GatewayError::invalid(
             "Model changes apply to the next queued turn, not steering",
@@ -147,7 +171,21 @@ pub(crate) async fn apply(
     params
         .entry("providerParams".to_string())
         .or_insert(Value::Null);
-    let options = member_turn_options_from_params(&params, &config.effective, None)?;
+    let fallback;
+    let catalog = match catalog {
+        Some(catalog) => catalog,
+        None => {
+            fallback = crate::effective_catalog_models(&config.effective)?;
+            &fallback
+        }
+    };
+    let options = crate::member_turn_options_with_catalog(
+        &params,
+        &config.effective,
+        None,
+        Some(&config.realm_id),
+        catalog,
+    )?;
     runtime
         .reconfigure_session_llm_identity(
             &session_id,

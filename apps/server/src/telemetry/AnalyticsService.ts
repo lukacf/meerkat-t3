@@ -31,10 +31,12 @@ interface BufferedAnalyticsEvent {
 
 const TelemetryEnvConfig = Config.all({
   posthogKey: Config.String("T3CODE_POSTHOG_KEY").pipe(
-    Config.withDefault("phc_XOWci4oZP4VvLiEyrFqkFjP4CZn55mjYYBMREK5Wd6m"),
+    Config.withDefault(""),
+    Config.map((value) => value.trim()),
   ),
   posthogHost: Config.String("T3CODE_POSTHOG_HOST").pipe(
-    Config.withDefault("https://us.i.posthog.com"),
+    Config.withDefault(""),
+    Config.map((value) => value.trim()),
   ),
   enabled: Config.Boolean("T3CODE_TELEMETRY_ENABLED").pipe(Config.withDefault(false)),
   flushBatchSize: Config.Number("T3CODE_TELEMETRY_FLUSH_BATCH_SIZE").pipe(Config.withDefault(20)),
@@ -85,6 +87,14 @@ function serverOsFromNodePlatform(platform: string): ClientOs {
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const telemetryConfig = yield* TelemetryEnvConfig;
+  if (!telemetryConfig.enabled || !telemetryConfig.posthogKey || !telemetryConfig.posthogHost) {
+    if (telemetryConfig.enabled) {
+      yield* Effect.logWarning(
+        "Product analytics remain disabled: configure both T3CODE_POSTHOG_KEY and T3CODE_POSTHOG_HOST for your analytics destination.",
+      );
+    }
+    return AnalyticsService.of({ record: () => Effect.void, flush: Effect.void });
+  }
   const httpClient = yield* HttpClient.HttpClient;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const identifier = yield* getTelemetryIdentifier;

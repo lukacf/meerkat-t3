@@ -665,6 +665,45 @@ describe("Meerkat native Team reader", () => {
     }).pipe(Effect.provide(Path.layer)),
   );
 
+  it.effect("passes the session's native account observation without using provider defaults", () =>
+    Effect.gen(function* () {
+      for (const state of [
+        undefined,
+        "connected",
+        "needs_auth",
+        "reauth_required",
+        "host_managed",
+        "unknown",
+      ] as const) {
+        const modelAuth = state
+          ? {
+              state,
+              source: "pinned",
+              provider: "openai",
+              realmId: "global",
+              bindingId: "nondefault",
+              profileId: "work",
+            }
+          : undefined;
+        const { reader, calls } = yield* make(() => ({
+          busy: false,
+          model: "retained-model",
+          ...(modelAuth ? { modelAuth } : {}),
+          latestCompletion: { interactionId: "finished", status: "completed", timestampMs: 100 },
+        }));
+        const work = yield* reader.work!({
+          projectPath: "/workspace",
+          mobId: "mob",
+          record: { ...record, session_id: "pinned-session" },
+        });
+        if (modelAuth) expect(work.modelAuth).toEqual(modelAuth);
+        else expect(work).not.toHaveProperty("modelAuth");
+        expect(calls.map((call) => call.method)).toEqual(["mobs.v1.consoleStatus"]);
+        expect(calls[0]?.params?.expected).toMatchObject({ sessionId: "pinned-session" });
+      }
+    }).pipe(Effect.provide(Path.layer)),
+  );
+
   it.effect("converts native queued model options and omits overrides from steering", () =>
     Effect.gen(function* () {
       const { reader, calls } = yield* make(() => ({ accepted: true }));

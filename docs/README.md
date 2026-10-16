@@ -1,70 +1,58 @@
-# Meerkat T3 documentation
+# MeerkaT3 documentation
 
-## Using the prototype
+MeerkaT3 is a desktop workspace for long-lived project specialists and the connections between them. The supported preview is the local Apple Silicon Mac app. Start with the user guides below; no previous Meerkat experience is required.
 
-The supported pilot is the maintainer-distributed Apple Silicon Mac app. Start here:
+## Use MeerkaT3
 
-- [Install Meerkat T3](user/install.md)
-- [Your first task](user/getting-started.md)
-- [Accounts and billing](user/accounts.md)
-- [Projects, specialists, and collaboration](user/agents.md)
-- [Permissions and access](user/permission-modes.md)
-- [Recovery and troubleshooting](user/troubleshooting.md)
-- [Updates](user/updating.md)
-- [Data and privacy](user/telemetry.md)
-- [Open-source licenses](user/open-source-licenses.md)
+| I want to...                              | Read                                                    |
+| ----------------------------------------- | ------------------------------------------------------- |
+| Install a preview build                   | [Installation and availability](user/install.md)        |
+| Set up my first repository                | [Start with your project](user/getting-started.md)      |
+| Sign in and choose a model                | [Providers and accounts](user/accounts.md)              |
+| Generate specialists and connect projects | [Project specialists and peering](user/agents.md)       |
+| Understand what agents can do             | [Permissions and access](user/permission-modes.md)      |
+| Recover interrupted work or report a bug  | [Recovery and troubleshooting](user/troubleshooting.md) |
+| Replace a preview build                   | [Updates](user/updating.md)                             |
+| Understand local data and model requests  | [Data and privacy](user/telemetry.md)                   |
+| Find dependency attribution               | [Open-source licenses](user/open-source-licenses.md)    |
 
-The app includes this guide under **Help > Meerkat T3 Guide** and the sidebar Help button, including when you have not connected a model account.
+These guides are also bundled offline in **Help > MeerkaT3 Guide** and the sidebar **Help** button, including before you connect a model account.
 
-## Shared interface references
+## Everyday work
 
-These inherited T3 guides explain shared controls. Provider-specific, hosted, mobile, and remote-host features are not a promise of support in the Meerkat pilot. Follow the Meerkat guides above when behavior differs.
+- [Messages and context](user/composer.md) - attachments, follow-ups, model choices, and references.
+- [Working with threads](user/thread-sidebar.md) - task workspaces, finding work, and keeping the sidebar useful.
+- [Source control](user/source-control.md) - GitHub setup, commits, pull requests, and linked reviews.
+- [Terminal](user/terminal.md) - local commands and retained output.
+- [Project settings](user/project-settings.md) - project overrides, actions, and worktree defaults.
+- [Usage](user/usage.md) - recorded native token counts and their limits.
+- [Keyboard shortcuts](user/keybindings.md) and [appearance](user/appearance.md).
 
-- [Ordinary thread composer](user/composer.md)
-- [Thread sidebar](user/thread-sidebar.md)
-- [Terminal](user/terminal.md)
-- [Source control](user/source-control.md)
-- [Project settings](user/project-settings.md)
-- [Keyboard shortcuts](user/keybindings.md)
-- [Appearance](user/appearance.md)
+## Develop MeerkaT3
 
----
+Start with [Contributing](../CONTRIBUTING.md) and the [development runbook](operations/development.md). The [distribution runbook](operations/meerkat-distribution.md) describes app identity, runtime packaging, notices, and manual previews.
 
-## Working on T3 Code
+The source includes the T3 workspace and its Meerkat integration. Public source availability does not mean a public binary has been released. Use the [repository release page](https://github.com/lukacf/meerkat-t3/releases) for published artifacts and the installation guide for supported use.
 
-For this fork's app identity and disabled-by-default update feed, see [Meerkat distribution](operations/meerkat-distribution.md). The inherited release machinery is not a configured Meerkat publishing pipeline.
+For architecture and integration boundaries:
 
-Start with the [development runbook](./operations/development.md) and
-[contribution policy](../CONTRIBUTING.md).
+- [Architecture overview](internals/overview.md)
+- [Glossary](internals/glossary.md)
+- [Connection runtime](internals/connection-runtime.md)
+- [Provider integration](internals/providers.md)
+- [Model classification](internals/model-manifest.md)
+- [Environment authentication](internals/environment-auth.md)
+- [License notice pipeline](internals/open-source-licenses.md)
+- [Reproduce native notice inputs](operations/native-notices.md)
 
-Internal notes preserve architectural decisions, constraints, and implementation traps that the
-source alone does not explain. Most code changes do not need an internal documentation update. Follow the
-[documentation rules](../AGENTS.md#documentation) before adding one.
+## Inherited T3 reference material
 
-- [Architecture overview](./internals/overview.md)
-- [Glossary](./internals/glossary.md)
-- [Connection runtime](./internals/connection-runtime.md)
-- [Providers](./internals/providers.md)
-- [Pull request file revisions](./internals/pull-request-file-revisions.md)
-- [Model classification](./internals/model-manifest.md)
-- [Remote environments](./internals/remote.md)
-- [Server updates](./internals/server-updates.md)
-- [Resource telemetry](./internals/resource-telemetry.md)
-- [Product analytics](./internals/product-analytics.md)
-- [Environment auth](./internals/environment-auth.md)
-- [T3 Connect](./internals/t3-connect.md)
-- [Assistant citations](./internals/assistant-citations.md)
-- [Mobile navigation](./internals/mobile-navigation.md)
-- [Mobile development lifecycle](./internals/mobile-development.md)
-- [Terminal runtime](./internals/terminal-runtime.md)
-- [Devices](./internals/devices.md)
-- [Voice input](./internals/voice-input.md)
+Some source and documentation remain from upstream T3 Code. Pages marked **Inherited T3 reference** describe those original features and are not the supported MeerkaT3 setup. In particular, original T3 CLI installation, alternate agent runtimes, hosted services, mobile clients, and remote installation do not install or extend this preview.
 
-### Runbooks
+This material is retained for contributors working on the donor code:
 
-- [Development and local builds](./operations/development.md)
-- [T3 Connect setup](./operations/connect-setup.md)
-- [Release](./operations/release.md)
-- [Observability](./operations/observability.md)
-- [Relay observability](./operations/relay-observability.md)
-- [Mobile app store screenshots](./operations/mobile-app-store-screenshots.md)
+- Agent-runtime references: [Codex](user/providers-codex.md), [Claude Code](user/providers-claude.md), [OpenCode](user/providers-opencode.md), and [Antigravity](user/providers-antigravity.md).
+- Other surfaces: [remote access](user/remote-access.md), [background service](user/background-service.md), [mobile notifications](user/mobile-notifications.md), and [devices](user/devices.md).
+- Additional interface references: [browser import](user/browser-import.md), [SnapShot](user/snap-shot.md), [keyboard focus](user/keyboard-focus.md), and [question attachments](user/question-attachments.md).
+
+Follow [Providers and accounts](user/accounts.md) for MeerkaT3 model access. The original T3 website, packages, and app-store clients are separate distribution channels.

@@ -3,6 +3,7 @@ import { Alert, AlertAction, AlertDescription, AlertTitle } from "../ui/alert";
 import { Button, InlineButton } from "../ui/button";
 import { CircleAlertIcon, XIcon } from "lucide-react";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { ErrorDetailsDialog } from "./ErrorDetailsDialog";
 
 export function getThreadErrorBannerKey(threadKey: string, error: string | null): string | null {
   return error === null ? null : `${threadKey}\u0000${error}`;
@@ -52,14 +53,7 @@ export const ThreadErrorBanner = memo(function ThreadErrorBanner({
         {showDetails ? <AlertTitle>This request could not be completed</AlertTitle> : null}
         <AlertDescription>
           {showDetails ? (
-            <details key={error}>
-              <summary className="cursor-pointer rounded-sm focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring">
-                Error details
-              </summary>
-              <div className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap text-xs leading-relaxed [overflow-wrap:anywhere]">
-                {error}
-              </div>
-            </details>
+            <ErrorDetailsDialog key={error} details={error} />
           ) : (
             <Tooltip>
               <TooltipTrigger render={<div className="line-clamp-3" />}>{error}</TooltipTrigger>

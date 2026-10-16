@@ -52,6 +52,61 @@ describe("desktop preload bundle verifier", () => {
     );
   });
 
+  it("executes Mac DOM startup and resize handlers before checking bridge exposure", () => {
+    assert.doesNotThrow(() =>
+      verifyPreloadBundle(
+        `
+          if (process.platform !== "darwin") throw new Error("Expected Mac preload");
+          const { webFrame } = require("electron");
+          window.addEventListener("DOMContentLoaded", () => {
+            document.documentElement.style.setProperty(
+              "--desktop-window-controls-inset", (90 / webFrame.getZoomFactor()) + "px"
+            );
+          }, { once: true });
+          window.addEventListener("resize", () => {
+            if (document.documentElement.style.getPropertyValue("--desktop-window-controls-inset") !== "90px") {
+              throw new Error("Mac window controls were not initialized");
+            }
+            ${validPreload}
+          });
+        `,
+        { platform: "darwin" },
+      ),
+    );
+  });
+
+  for (const event of ["DOMContentLoaded", "resize"]) {
+    it(`propagates errors from ${event} callbacks`, () => {
+      assert.throws(
+        () =>
+          verifyPreloadBundle(`
+            ${validPreload}
+            window.addEventListener("${event}", () => { throw new Error("Startup failure"); });
+          `),
+        /Startup failure/,
+      );
+    });
+  }
+
+  it("bounds execution time inside a DOM callback", () => {
+    assert.throws(
+      () =>
+        verifyPreloadBundle(`
+          ${validPreload}
+          window.addEventListener("DOMContentLoaded", () => { while (true) {} });
+        `),
+      /Script execution timed out/,
+    );
+  });
+
+  it("rejects dynamic require calls", () => {
+    assert.throws(
+      () =>
+        verifyPreloadBundle(`${validPreload}\nconst moduleName = "electron"; require(moduleName);`),
+      /dynamic require\(\)/,
+    );
+  });
+
   it("rejects dynamic imports with comments before the opening parenthesis", () => {
     assert.throws(
       () =>

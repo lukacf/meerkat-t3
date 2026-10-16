@@ -7,6 +7,7 @@ import {
   ServerConfig,
   ServerObservability,
   ServerProvider,
+  ServerProviderModel,
   ServerProviders,
   ServerUpsertKeybindingResult,
 } from "./server.ts";
@@ -31,6 +32,19 @@ const baseProviderSnapshot = {
 };
 
 describe("ServerProvider", () => {
+  it("preserves supplied model catalog tiers without inventing one for older snapshots", () => {
+    const decode = Schema.decodeUnknownSync(ServerProviderModel);
+    const model = { slug: "model", name: "Model", isCustom: false, capabilities: null };
+    expect(decode(model)).not.toHaveProperty("catalogTier");
+    expect(decode(model)).not.toHaveProperty("accountLabel");
+    expect(decode({ ...model, accountLabel: "GitHub Copilot · King" }).accountLabel).toBe(
+      "GitHub Copilot · King",
+    );
+    for (const catalogTier of ["recommended", "supported", "custom"])
+      expect(decode({ ...model, catalogTier }).catalogTier).toBe(catalogTier);
+    expect(() => decode({ ...model, catalogTier: "premium" })).toThrow();
+  });
+
   it("preserves exact workspace readiness without treating old snapshots as scoped", () => {
     const legacy = decodeServerProvider(baseProviderSnapshot);
     expect(legacy.supportsWorkspaceReadiness).toBeUndefined();

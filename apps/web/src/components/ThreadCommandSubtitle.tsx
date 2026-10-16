@@ -8,8 +8,8 @@ import { MiddleTruncate } from "./ui/middle-truncate";
 
 /**
  * Flip this while reviewing command-palette thread subtitles.
- * - favicon-workspace-harness: favicon + Folder/FolderGit2 + branch + harness (default)
- * - favicon-workspace: same without harness
+ * - favicon-workspace-harness: favicon + Folder/FolderGit2 + branch + harness
+ * - favicon-workspace: project and workspace context (default)
  * - favicon-branch-harness: GitBranch for local, FolderGit2 for worktrees, + harness
  */
 export type ThreadCommandSubtitleVariant =
@@ -17,7 +17,7 @@ export type ThreadCommandSubtitleVariant =
   | "favicon-workspace"
   | "favicon-branch-harness";
 
-const THREAD_COMMAND_SUBTITLE_VARIANT: ThreadCommandSubtitleVariant = "favicon-workspace-harness";
+const THREAD_COMMAND_SUBTITLE_VARIANT: ThreadCommandSubtitleVariant = "favicon-workspace";
 
 export const COMMAND_PALETTE_META_ICON_CLASS = "size-3 shrink-0 text-muted-foreground/70";
 

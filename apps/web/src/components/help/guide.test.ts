@@ -26,8 +26,9 @@ describe("bundled guide navigation", () => {
         expect(target, `${entry.file}: ${href}`).not.toBeNull();
         if (target?.hash) {
           const destination = GUIDE_TOPICS.find((topic) => topic.id === target.topic);
-          const headingIds = [...(destination?.text ?? "").matchAll(/^#{2,3} (.+)$/gm)]
-            .map((match) => guideHeadingId(match[1] ?? ""));
+          const headingIds = [...(destination?.text ?? "").matchAll(/^#{2,3} (.+)$/gm)].map(
+            (match) => guideHeadingId(match[1] ?? ""),
+          );
           expect(headingIds, `${entry.file}: ${href}`).toContain(target.hash);
         }
       }

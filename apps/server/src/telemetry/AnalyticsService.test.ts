@@ -3,7 +3,12 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import * as HttpClient from "effect/unstable/http/HttpClient";
+import type * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
+import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import * as HttpServer from "effect/unstable/http/HttpServer";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
@@ -46,7 +51,133 @@ interface RecordedBatchBody {
   }>;
 }
 
+const decodeCapturedBatch = Schema.decodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      api_key: Schema.String,
+      batch: Schema.Array(Schema.Struct({ event: Schema.String })),
+    }),
+  ),
+);
+
+const captureTelemetry = Effect.fnUntraced(function* (
+  config: Readonly<Record<string, string | boolean>>,
+) {
+  const requests: Array<HttpClientRequest.HttpClientRequest> = [];
+  let identityReads = 0;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const httpClient = HttpClient.make((request) =>
+    Effect.sync(() => {
+      requests.push(request);
+      return HttpClientResponse.fromWeb(request, new Response("{}"));
+    }),
+  );
+  yield* Effect.gen(function* () {
+    const analytics = yield* AnalyticsService.make.pipe(
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+      Effect.provideService(FileSystem.FileSystem, {
+        ...fileSystem,
+        readFileString: () =>
+          Effect.sync(() => {
+            identityReads += 1;
+            return '{"tokens":{"account_id":"test-analytics-account"}}';
+          }),
+      }),
+    );
+    yield* analytics.record("test.destination", { index: 1 });
+    yield* analytics.flush;
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        ConfigProvider.layer(ConfigProvider.fromUnknown(config)),
+        ServerConfig.ServerConfig.layerTest(process.cwd(), { prefix: "t3-telemetry-destination-" }),
+      ),
+    ),
+    Effect.scoped,
+  );
+  return { requests, identityReads };
+});
+
 it.layer(NodeServices.layer)("AnalyticsService test", (it) => {
+  const inactiveConfigurations: ReadonlyArray<{
+    readonly name: string;
+    readonly config: Readonly<Record<string, string | boolean>>;
+  }> = [
+    { name: "no analytics configuration", config: {} },
+    {
+      name: "a destination without explicit opt-in",
+      config: {
+        T3CODE_POSTHOG_KEY: "phc_test_key",
+        T3CODE_POSTHOG_HOST: "https://analytics.example.test",
+      },
+    },
+    { name: "opt-in without a destination", config: { T3CODE_TELEMETRY_ENABLED: true } },
+    {
+      name: "opt-in without a project key",
+      config: {
+        T3CODE_TELEMETRY_ENABLED: true,
+        T3CODE_POSTHOG_HOST: "https://analytics.example.test",
+      },
+    },
+    {
+      name: "opt-in without an ingestion host",
+      config: { T3CODE_TELEMETRY_ENABLED: true, T3CODE_POSTHOG_KEY: "phc_test_key" },
+    },
+    {
+      name: "a blank project key",
+      config: {
+        T3CODE_TELEMETRY_ENABLED: true,
+        T3CODE_POSTHOG_KEY: "   ",
+        T3CODE_POSTHOG_HOST: "https://analytics.example.test",
+      },
+    },
+    {
+      name: "a blank ingestion host",
+      config: {
+        T3CODE_TELEMETRY_ENABLED: true,
+        T3CODE_POSTHOG_KEY: "phc_test_key",
+        T3CODE_POSTHOG_HOST: "   ",
+      },
+    },
+    {
+      name: "explicit opt-out with a destination",
+      config: {
+        T3CODE_TELEMETRY_ENABLED: false,
+        T3CODE_POSTHOG_KEY: "phc_test_key",
+        T3CODE_POSTHOG_HOST: "https://analytics.example.test",
+      },
+    },
+  ];
+  for (const { name, config } of inactiveConfigurations) {
+    it.effect(`does not read an identity or send requests with ${name}`, () =>
+      Effect.gen(function* () {
+        const result = yield* captureTelemetry(config);
+        assert.equal(result.identityReads, 0);
+        assert.deepEqual(result.requests, []);
+      }),
+    );
+  }
+
+  it.effect("sends only to the explicitly configured ingestion host and project", () =>
+    Effect.gen(function* () {
+      const result = yield* captureTelemetry({
+        T3CODE_TELEMETRY_ENABLED: true,
+        T3CODE_POSTHOG_KEY: " phc_test_key ",
+        T3CODE_POSTHOG_HOST: " https://analytics.example.test ",
+      });
+      assert.equal(result.identityReads, 1);
+      assert.equal(result.requests.length, 1);
+      const request = result.requests[0]!;
+      assert.equal(request.method, "POST");
+      assert.equal(request.url, "https://analytics.example.test/batch/");
+      if (request.body._tag !== "Uint8Array") throw new Error("Expected a JSON batch body");
+      const payload = yield* decodeCapturedBatch(new TextDecoder().decode(request.body.body));
+      assert.equal(payload.api_key, "phc_test_key");
+      assert.equal(payload.batch.length, 1);
+      assert.equal(payload.batch[0]?.event, "test.destination");
+    }),
+  );
+
   it.effect("flush drains all buffered events across multiple batches", () =>
     Effect.gen(function* () {
       const capturedRequests: Array<RecordedBatchRequest> = [];
