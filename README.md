@@ -51,6 +51,7 @@ MeerkaT3 uses the bundled Meerkat runtime for its agents. Connecting an OpenAI, 
 
 - [Documentation](docs/README.md) - user guides, development, and architecture.
 - [Contributing](CONTRIBUTING.md) - setup, focused checks, and change proposals.
+- [Code of conduct](CODE_OF_CONDUCT.md) - community expectations and reporting concerns.
 - [Troubleshooting](docs/user/troubleshooting.md) - interrupted work, recovery, and support reports.
 - [Issues](https://github.com/lukacf/meerkat-t3/issues) - reproducible bugs and feature proposals for this project.
 - [Security policy](SECURITY.md) - report a vulnerability privately.

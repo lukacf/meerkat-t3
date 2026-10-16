@@ -6,6 +6,9 @@ changes are welcome. For substantial features or architecture changes, open an
 proposed direction before investing in implementation. This helps keep work aligned
 with long-lived project specialists and connected agent workflows.
 
+Follow the [code of conduct](CODE_OF_CONDUCT.md) in project discussions and reviews.
+It describes the behavior we expect and how to report a concern.
+
 ## Get a working checkout
 
 Follow the [development guide](docs/operations/development.md). It covers frozen
