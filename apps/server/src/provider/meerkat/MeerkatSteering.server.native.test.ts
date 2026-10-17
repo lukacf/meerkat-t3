@@ -24,6 +24,7 @@ import {
   availablePort,
   bounded,
   exchangeToken,
+  fixtureTimeoutMs,
   ownedServer,
   prepareFixture,
   readRetainedNativeHistory,
@@ -115,13 +116,31 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
                     await server?.close();
                     clean = true;
                   } finally {
-                    fixture.provider.closeAllConnections();
-                    if (fixture.provider.listening)
-                      await new Promise<void>((resolve, reject) =>
-                        fixture.provider.close((error) => (error ? reject(error) : resolve())),
-                      );
-                    if (Exit.isSuccess(exit) && clean)
-                      await NodeFSP.rm(root, { recursive: true, force: true });
+                    if (clean) {
+                      fixture.provider.closeAllConnections();
+                      if (fixture.provider.listening)
+                        await new Promise<void>((resolve, reject) =>
+                          fixture.provider.close((error) => (error ? reject(error) : resolve())),
+                        );
+                    }
+                    await NodeFSP.writeFile(
+                      NodePath.join(evidenceRoot, "steering-acceptance.json"),
+                      encodeEvidence({
+                        ...evidence,
+                        passed: Exit.isSuccess(exit) && clean,
+                        cleanupComplete: clean,
+                        providerErrors: fixture.errors,
+                        shutdown: server
+                          ? {
+                              pid: server.child.pid,
+                              code: server.child.exitCode,
+                              signal: server.child.signalCode,
+                              ...server.shutdownObservation(),
+                            }
+                          : null,
+                      }),
+                      { mode: 0o600 },
+                    );
                   }
                 }).pipe(
                   Effect.ensuring(
@@ -130,7 +149,7 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
                         ? Effect.logError(
                             `Native steering ${surface} failed; private evidence retained at ${root}`,
                           )
-                        : Effect.void,
+                        : Effect.logInfo(`Native steering ${surface} evidence retained at ${root}`),
                     ),
                   ),
                 );
@@ -148,7 +167,7 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
               throw new Error("No fixture provider port");
             const prepared = yield* Effect.promise(() =>
               prepareFixture(root, runtimeDirectory, address.port),
-            );
+            ).pipe(Effect.uninterruptible);
             evidence.manifest = prepared.manifest;
             yield* Effect.promise(() => initializeRepository(prepared.projectPath, prepared.env));
             const port = yield* Effect.promise(availablePort);
@@ -160,6 +179,7 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
               prepared.baseDir,
               port,
               prepared.env,
+              prepared.shutdownHorizonMs,
               NodePath.join(prepared.evidenceRoot, "server-diagnostics.json"),
             );
             const readiness = server.ready;
@@ -505,8 +525,8 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
                 evidence.phase = "complete";
               }),
             ).pipe(Effect.raceFirst(Effect.promise(() => fixture.failed)));
-          }).pipe(Effect.scoped, Effect.timeout("180 seconds")),
-        190_000,
+          }).pipe(Effect.timeout(180_000), Effect.scoped),
+        fixtureTimeoutMs(180_000) + 10_000,
       );
   },
 );

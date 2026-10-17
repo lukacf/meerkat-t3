@@ -1,4 +1,5 @@
 import { T3_PROJECT_FILE_NAME, type T3ProjectFile } from "@t3tools/contracts";
+import { isSharedWorkspaceConnection } from "@t3tools/client-runtime/connection";
 import { parseT3ProjectFile } from "@t3tools/shared/t3ProjectFile";
 import { useAtomValue } from "@effect/atom-react";
 import * as Option from "effect/Option";
@@ -56,7 +57,12 @@ function useMemberProjectFiles(scope: ReturnType<typeof resolveSettingsScope>) {
 
 function useResolvedSettingsScope(search: SettingsScopeSearch) {
   const groups = useSettingsProjectGroups();
-  const { environments: availableEnvironments } = useEnvironments();
+  const { environments } = useEnvironments();
+  const availableEnvironments = useMemo(
+    () =>
+      environments.filter((environment) => !isSharedWorkspaceConnection(environment.entry.target)),
+    [environments],
+  );
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const scope = useMemo(
     () => resolveSettingsScope(search, groups, availableEnvironments),

@@ -12,7 +12,10 @@ import {
   getDefaultCloneUrl,
   normalizePastedCloneUrl,
 } from "@t3tools/client-runtime/operations/projects";
-import { connectionStatusText } from "@t3tools/client-runtime/connection";
+import {
+  connectionStatusText,
+  isSharedWorkspaceConnection,
+} from "@t3tools/client-runtime/connection";
 import { threadSearchMatchKey } from "@t3tools/client-runtime/state/thread-search";
 import { resolveThreadReferenceCopyTarget } from "@t3tools/shared/threadReference";
 import {
@@ -42,7 +45,6 @@ import { useContextualSettingsScope } from "./settings/useContextualSettingsScop
 import { agentSearchMatchKey, useMeerkatConversationSearch } from "../state/meerkatSearch";
 import { nativeSearchDestination } from "./team/nativeSearchNavigation";
 import { buildAddProjectRemoteSourceReadiness, gitCloneSetupHint } from "./cloneSourceReadiness";
-import * as Option from "effect/Option";
 import {
   ArrowLeftIcon,
   ChartNoAxesColumnIcon,
@@ -433,7 +435,11 @@ export function CommandPalette({ children }: { children: ReactNode }) {
     (mode: SearchOverlayMode) => dispatch({ _tag: "ToggleMode", mode }),
     [],
   );
-  const openAddProject = useCallback(() => dispatch({ _tag: "OpenAddProject" }), []);
+  const openAddProject = useCallback(
+    (environmentId?: EnvironmentId) =>
+      dispatch({ _tag: "OpenAddProject", ...(environmentId ? { environmentId } : {}) }),
+    [],
+  );
   const openNewThreadIn = useCallback(() => dispatch({ _tag: "OpenNewThreadIn" }), []);
   const clearOpenIntent = useCallback(() => dispatch({ _tag: "ClearOpenIntent" }), []);
   const keybindings = useAtomValue(primaryServerKeybindingsAtom);
@@ -552,7 +558,7 @@ export function CommandPalette({ children }: { children: ReactNode }) {
         if (detail.open === "new-thread-in") {
           openNewThreadIn();
         } else if (detail.open === "add-project") {
-          openAddProject();
+          openAddProject(detail.environmentId);
         } else if (detail.query !== undefined) {
           dispatch({
             _tag: "OpenSearch",
@@ -966,21 +972,23 @@ function OpenCommandPaletteDialog(props: {
   );
 
   const addProjectEnvironmentOptions = useMemo(() => {
-    const options = environments.map((environment): AddProjectEnvironmentOption => {
-      const isPrimary = environment.entry.target._tag === "PrimaryConnectionTarget";
-      return {
-        environmentId: environment.environmentId,
-        label: resolveEnvironmentOptionLabel({
-          isPrimary,
+    const options = environments
+      .filter((environment) => !isSharedWorkspaceConnection(environment.entry.target))
+      .map((environment): AddProjectEnvironmentOption => {
+        const isPrimary = environment.entry.target._tag === "PrimaryConnectionTarget";
+        return {
           environmentId: environment.environmentId,
-          runtimeLabel: environment.label,
-        }),
-        isPrimary,
-        machine: resolveEnvironmentMachineKind(environment.serverConfig),
-        isConnected: canCreateProjectInEnvironment(environment.connection.phase),
-        status: connectionStatusText(environment.connection),
-      };
-    });
+          label: resolveEnvironmentOptionLabel({
+            isPrimary,
+            environmentId: environment.environmentId,
+            runtimeLabel: environment.label,
+          }),
+          isPrimary,
+          machine: resolveEnvironmentMachineKind(environment.serverConfig),
+          isConnected: canCreateProjectInEnvironment(environment.connection.phase),
+          status: connectionStatusText(environment.connection),
+        };
+      });
 
     options.sort((left, right) => {
       if (left.isPrimary !== right.isPrimary) {
@@ -1748,8 +1756,33 @@ function OpenCommandPaletteDialog(props: {
       return;
     }
     clearOpenIntent();
+    if (openIntent.environmentId) {
+      const selected = addProjectEnvironmentOptions.find(
+        (entry) => entry.environmentId === openIntent.environmentId && entry.isConnected,
+      );
+      if (!selected) {
+        setOpen(false);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Host is unavailable",
+            description: "Start or reconnect the selected host, then add its repository.",
+          }),
+        );
+        return;
+      }
+      void startAddProjectSourceSelection(selected.environmentId);
+      return;
+    }
     openAddProjectFlow();
-  }, [clearOpenIntent, openAddProjectFlow, openIntent]);
+  }, [
+    addProjectEnvironmentOptions,
+    clearOpenIntent,
+    openAddProjectFlow,
+    openIntent,
+    setOpen,
+    startAddProjectSourceSelection,
+  ]);
 
   useLayoutEffect(() => {
     if (openIntent?.kind !== "new-thread-in" || projectThreadItems.length === 0) {

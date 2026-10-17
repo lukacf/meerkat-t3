@@ -81,6 +81,16 @@ import Migration0066 from "./Migrations/066_ProjectCloneIntents.ts";
 import Migration0067 from "./Migrations/067_ThreadPreparedTurn.ts";
 import Migration0068 from "./Migrations/068_MeerkatProjectAgentOptions.ts";
 import Migration0069 from "./Migrations/069_CreatedPullRequestLinks.ts";
+import Migration0070 from "./Migrations/070_SharedWorkspace.ts";
+import Migration0071 from "./Migrations/071_SharedSpecialistRequests.ts";
+import Migration0072 from "./Migrations/072_SharedSpecialistAccess.ts";
+import Migration0073 from "./Migrations/073_SharedSpecialistRecovery.ts";
+import Migration0074 from "./Migrations/074_SharedComposition.ts";
+import Migration0075 from "./Migrations/075_SharedDelegation.ts";
+import Migration0076 from "./Migrations/076_SharedLocalDelegationExpiry.ts";
+import Migration0077 from "./Migrations/077_SharedKnowledgeCorrections.ts";
+import Migration0078 from "./Migrations/078_LocalSpecialistCollaboration.ts";
+import Migration0079 from "./Migrations/079_SharedEvidenceCapacity.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -162,6 +172,16 @@ const migrationEntries = [
   [67, "ThreadPreparedTurn", Migration0067],
   [68, "MeerkatProjectAgentOptions", Migration0068],
   [69, "CreatedPullRequestLinks", Migration0069],
+  [70, "SharedWorkspace", Migration0070],
+  [71, "SharedSpecialistRequests", Migration0071],
+  [72, "SharedSpecialistAccess", Migration0072],
+  [73, "SharedSpecialistRecovery", Migration0073],
+  [74, "SharedComposition", Migration0074],
+  [75, "SharedDelegation", Migration0075],
+  [76, "SharedLocalDelegationExpiry", Migration0076],
+  [77, "SharedKnowledgeCorrections", Migration0077],
+  [78, "LocalSpecialistCollaboration", Migration0078],
+  [79, "SharedEvidenceCapacity", Migration0079],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

@@ -24,6 +24,7 @@ import {
   availablePort,
   bounded,
   exchangeToken,
+  fixtureTimeoutMs,
   ownedServer,
   prepareFixture,
   withClient,
@@ -112,11 +113,13 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
                   await server?.close();
                   cleanupComplete = true;
                 } finally {
-                  fixture.provider.closeAllConnections();
-                  if (fixture.provider.listening)
-                    await new Promise<void>((resolve, reject) =>
-                      fixture.provider.close((error) => (error ? reject(error) : resolve())),
-                    );
+                  if (cleanupComplete) {
+                    fixture.provider.closeAllConnections();
+                    if (fixture.provider.listening)
+                      await new Promise<void>((resolve, reject) =>
+                        fixture.provider.close((error) => (error ? reject(error) : resolve())),
+                      );
+                  }
                   const evidenceRoot = NodePath.join(root, "evidence");
                   await NodeFSP.mkdir(evidenceRoot, { recursive: true, mode: 0o700 });
                   await NodeFSP.writeFile(
@@ -155,7 +158,7 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
             throw new Error("No controlled provider port");
           const prepared = yield* Effect.promise(() =>
             prepareFixture(root, runtimeDirectory, address.port),
-          );
+          ).pipe(Effect.uninterruptible);
           evidence.manifest = prepared.manifest;
           yield* Effect.promise(() => initializeRepository(prepared.projectPath, prepared.env));
           fixture.setWorkspace(prepared.projectPath);
@@ -169,6 +172,7 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
             prepared.baseDir,
             port,
             prepared.env,
+            prepared.shutdownHorizonMs,
             NodePath.join(prepared.evidenceRoot, "server-diagnostics.json"),
           );
           const readiness = server.ready;
@@ -605,8 +609,8 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
               evidence.phase = "complete";
             }),
           ).pipe(Effect.raceFirst(Effect.promise(() => fixture.failed)));
-        }).pipe(Effect.scoped, Effect.timeout("240 seconds")),
-      250_000,
+        }).pipe(Effect.timeout(240_000), Effect.scoped),
+      fixtureTimeoutMs(240_000) + 10_000,
     );
   },
 );

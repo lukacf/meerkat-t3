@@ -20,6 +20,8 @@ export class BearerConnectionTarget extends Schema.TaggedClass<BearerConnectionT
   {
     ...ConnectionTargetBase,
     connectionId: Schema.String,
+    /** Shared collaboration never grants access to the host's local workbench. */
+    sharedWorkspace: Schema.optionalKey(Schema.Boolean),
   },
 ) {}
 
@@ -45,6 +47,9 @@ export const ConnectionTarget = Schema.Union([
   SshConnectionTarget,
 ]);
 export type ConnectionTarget = typeof ConnectionTarget.Type;
+
+export const isSharedWorkspaceConnection = (target: ConnectionTarget): boolean =>
+  target._tag === "BearerConnectionTarget" && target.sharedWorkspace === true;
 
 export const PersistedConnectionTarget = Schema.Union([
   BearerConnectionTarget,

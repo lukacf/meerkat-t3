@@ -111,6 +111,22 @@ function shutdownTrigger(value: unknown) {
   };
 }
 
+function credentialSettlement(
+  value: unknown,
+): { status: "settled" | "not_observed" } | { status: "unsettled"; pending: number } | undefined {
+  if (!isRecord(value)) return undefined;
+  if (value.status === "settled" || value.status === "not_observed")
+    return { status: value.status };
+  if (
+    value.status === "unsettled" &&
+    typeof value.pending === "number" &&
+    Number.isSafeInteger(value.pending) &&
+    value.pending > 0
+  )
+    return { status: "unsettled", pending: value.pending };
+  return undefined;
+}
+
 export function decodeMeerkatGatewayEvent(value: unknown): MeerkatGatewayEvent {
   if (
     !isRecord(value) ||
@@ -163,7 +179,11 @@ export function createMeerkatGatewayClient(
   let spawnFailedWithoutChild = false;
   let cleanupConfirmed = false;
   let nativeShutdown:
-    | { cleanupCompleted: boolean; trigger: ReturnType<typeof shutdownTrigger> }
+    | {
+        cleanupCompleted: boolean;
+        trigger: ReturnType<typeof shutdownTrigger>;
+        credentialSettlement: ReturnType<typeof credentialSettlement>;
+      }
     | undefined;
   let closeResolved = false;
   let resolveClose: () => void = () => {};
@@ -220,20 +240,40 @@ export function createMeerkatGatewayClient(
       return;
     }
     if (message.method === "system.v1.shutdownComplete") {
-      if (isRecord(message.params)) {
+      const credentials = credentialSettlement(
+        isRecord(message.params) ? message.params.credentialSettlement : undefined,
+      );
+      const credentialReceiptPresent =
+        isRecord(message.params) && "credentialSettlement" in message.params;
+      const credentialsUnconfirmed = credentialReceiptPresent && credentials?.status !== "settled";
+      if (isRecord(message.params) && !shutdownError) {
         nativeShutdown = {
-          cleanupCompleted: message.params.cleanupCompleted === true,
+          cleanupCompleted: message.params.cleanupCompleted === true && !credentialsUnconfirmed,
           trigger: shutdownTrigger(message.params.trigger),
+          credentialSettlement: credentials,
         };
       }
-      if (!isRecord(message.params) || message.params.cleanupCompleted !== true) {
+      if (credentials?.status === "unsettled") {
         shutdownError ??= new MeerkatGatewayTransportError(
-          "cleanup_failed",
-          "Meerkat native cleanup did not complete.",
-          false,
+          "credential_unsettled",
+          "Credential work was still running at exit. Its outcome is unknown; check the account after reopening.",
+          true,
           message.params,
         );
-      } else cleanupConfirmed = true;
+      } else if (
+        credentialsUnconfirmed ||
+        !isRecord(message.params) ||
+        message.params.cleanupCompleted !== true
+      ) {
+        shutdownError ??= new MeerkatGatewayTransportError(
+          "cleanup_failed",
+          credentialsUnconfirmed
+            ? "Credential cleanup was not confirmed. Check the account after reopening."
+            : "Meerkat native cleanup did not complete.",
+          credentialsUnconfirmed,
+          message.params,
+        );
+      } else if (!shutdownError) cleanupConfirmed = true;
       return;
     }
     if (message.method === "events.v1.emit") {

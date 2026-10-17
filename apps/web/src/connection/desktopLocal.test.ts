@@ -11,6 +11,8 @@ import {
   desktopLocalConnectionId,
   isDesktopLocalConnectionTarget,
   isWslConnectionTarget,
+  isDesktopSharedHostTarget,
+  isSharedSpecialistHostTarget,
 } from "./desktopLocal";
 
 describe("desktop local connection identity", () => {
@@ -47,6 +49,33 @@ describe("desktop local connection identity", () => {
 
     expect(isDesktopLocalConnectionTarget(target)).toBe(false);
     expect(desktopLocalBackendId(target)).toBeNull();
+  });
+});
+
+describe("shared specialist host recognition", () => {
+  it("includes the owned host without restricting its administrative workbench", () => {
+    const target = new BearerConnectionTarget({
+      connectionId: desktopLocalConnectionId("shared-host"),
+      environmentId: EnvironmentId.make("owned-host"),
+      label: "Shared host",
+    });
+    expect(isDesktopSharedHostTarget(target)).toBe(true);
+    expect(isSharedSpecialistHostTarget(target)).toBe(true);
+    expect(target.sharedWorkspace).not.toBe(true);
+  });
+  it("requires the participant marker for ordinary remote connections", () => {
+    const target = new BearerConnectionTarget({
+      connectionId: "shared-host",
+      environmentId: EnvironmentId.make("remote-host"),
+      label: "Shared host",
+    });
+    expect(isDesktopSharedHostTarget(target)).toBe(false);
+    expect(isSharedSpecialistHostTarget(target)).toBe(false);
+    expect(
+      isSharedSpecialistHostTarget(
+        new BearerConnectionTarget({ ...target, sharedWorkspace: true }),
+      ),
+    ).toBe(true);
   });
 });
 

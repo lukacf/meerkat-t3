@@ -253,6 +253,14 @@ describe("reduceCommandPaletteUiState", () => {
     });
   });
 
+  it("retains an explicit host when opening project creation", () => {
+    const environmentId = EnvironmentId.make("owned-shared-host");
+    expect(
+      reduceCommandPaletteUiState(closedState, { _tag: "OpenAddProject", environmentId })
+        .openIntent,
+    ).toEqual({ kind: "add-project", environmentId });
+  });
+
   it("preserves the mode on close and resets it on open", () => {
     const filesOpen = reduceCommandPaletteUiState(closedState, {
       _tag: "ToggleMode",

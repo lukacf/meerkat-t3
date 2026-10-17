@@ -84,7 +84,11 @@ export const stageNativeNotices = Effect.fn("stageNativeNotices")(function* (inp
   readonly bundleDir: string;
   readonly destinationDir: string;
   readonly target: { readonly platform: string; readonly arch: string };
-  readonly gateway: { readonly cargoLockSha256: string; readonly binarySha256: string };
+  readonly gateway: {
+    readonly cargoLockPath: string;
+    readonly cargoLockSha256: string;
+    readonly binarySha256: string;
+  };
   readonly resourceMonitor: { readonly cargoLockPath: string; readonly binaryPath: string };
   readonly t3LicensePath: string;
 }) {
@@ -122,6 +126,10 @@ export const stageNativeNotices = Effect.fn("stageNativeNotices")(function* (inp
     manifest.bindings.gateway.binarySha256 !== input.gateway.binarySha256
   ) {
     return yield* failure("Gateway binary or Cargo.lock differs from the notice selection");
+  }
+  const gatewayLock = yield* read(input.gateway.cargoLockPath);
+  if (digest(gatewayLock) !== input.gateway.cargoLockSha256) {
+    return yield* failure("Current gateway Cargo.lock differs from the provisioned runtime");
   }
   const monitorLock = yield* read(input.resourceMonitor.cargoLockPath);
   const monitorBinary = yield* read(input.resourceMonitor.binaryPath);

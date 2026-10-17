@@ -19,6 +19,7 @@ fn fixture(
 ) {
     let store = Arc::new(EphemeralTokenStore::new());
     let auth = DesktopProviderAuth {
+        auth_scope: Ok(None),
         global_config_path: accounts::default_global_config_path(),
         copilot_accounts: Default::default(),
         account_mutations: Default::default(),

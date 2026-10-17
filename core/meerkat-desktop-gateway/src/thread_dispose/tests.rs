@@ -236,6 +236,95 @@ fn late_child_input_is_interrupted_while_the_same_shutdown_future_is_pending() {
 }
 
 #[test]
+fn held_child_root_is_retained_until_native_stand_down_retry_releases_it() {
+    run(async {
+        let fixture = Fixture(
+            std::env::temp_dir().join(format!("disposal-child-retry-{}", uuid::Uuid::new_v4())),
+        );
+        let spec = input(&fixture.0);
+        std::fs::create_dir_all(&spec.project_path).unwrap();
+        std::fs::create_dir_all(&spec.state_root).unwrap();
+        let (started, _starts) = mpsc::unbounded_channel();
+        let (closed, _closes) = mpsc::unbounded_channel();
+        let registry = ProjectMobkitRegistry::new_with_test_llm(
+            HostToolTransport::new(),
+            Arc::new(HeldProvider { started, closed }),
+        );
+        let mob = registry.create_local(spec.clone()).await.unwrap();
+        let runtime = mob.runtime.as_ref().unwrap();
+        let child_state = runtime.mob_runtime().agent_mob_mcp_state().unwrap();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (finished_tx, finished_rx) = oneshot::channel();
+        // Hold real native state-owned work past its stand-down deadline.
+        // There are deliberately no child actors: an empty root is not free
+        // while admitted work can still write to it.
+        assert!(child_state.spawn_owned_work_for_tests(
+            "desktop cleanup retry proof",
+            async move {
+                entered_tx.send(()).unwrap();
+                release_rx.await.unwrap();
+                finished_tx.send(()).unwrap();
+            }
+        ));
+        entered_rx.await.unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(30), registry.remove(&spec.mob_id))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            first.contains("HeldUntilProcessExit { child_mobs: 0 }"),
+            "{first}"
+        );
+        assert!(registry.get(&spec.mob_id).await.is_some());
+        assert!(runtime.mob_handle().machine_state_changes().is_closed());
+        assert!(
+            registry.create_local(spec.clone()).await.is_err(),
+            "the retained cleanup owner must never be reused for work"
+        );
+
+        // The root actor is already terminal. Repeating its Shutdown would
+        // lose the successful phase receipt and skip child stand-down. The
+        // exact child owner must instead report the work still held.
+        let retry = tokio::time::timeout(Duration::from_secs(30), registry.remove(&spec.mob_id))
+            .await
+            .unwrap()
+            .unwrap_err();
+        assert!(
+            retry.starts_with("Native child-mob cleanup did not complete:"),
+            "{retry}"
+        );
+        assert!(
+            retry.contains("HeldUntilProcessExit { child_mobs: 0 }"),
+            "{retry}"
+        );
+        assert!(registry.get(&spec.mob_id).await.is_some());
+
+        release_tx.send(()).unwrap();
+        finished_rx.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(30), registry.remove(&spec.mob_id))
+                .await
+                .unwrap()
+                .unwrap()
+        );
+        assert!(registry.get(&spec.mob_id).await.is_none());
+        assert!(runtime.mob_handle().machine_state_changes().is_closed());
+        // Retained clones do not keep the root claim. Read the native
+        // idempotent receipt after removal rather than inferring release
+        // from an empty registry or the parent actor's closed channel.
+        assert!(matches!(
+            runtime
+                .mob_runtime()
+                .stand_down_child_mobs(std::time::Instant::now())
+                .await,
+            meerkat_mobkit::ChildMobStandDownOutcome::Released { child_mobs: 0 }
+        ));
+    });
+}
+
+#[test]
 fn parent_runtime_phase_ack_requires_actual_actor_exit() {
     run(async {
         let fixture =

@@ -18,6 +18,7 @@ import {
 } from "@t3tools/contracts";
 import {
   assertMeerkatBundleBuild,
+  MEERKAT_REQUIRED_METHODS,
   validateMeerkatHealth,
   verifyMeerkatRuntime,
 } from "@t3tools/shared/meerkatRuntime";
@@ -55,11 +56,13 @@ export const readRetainedNativeHistory = Effect.fnUntraced(
           binaryPath: input.binaryPath,
           cwd: input.projectPath,
           env: input.env,
-          shutdownTimeoutMs: 15_000,
         }),
       ),
       (client) => Effect.promise(() => client.close()),
     );
+    // Learn this pinned binary's shutdown horizon before opening retained history.
+    const health = yield* Effect.promise(() => gateway.request("system.v1.health"));
+    ownedServerShutdownBudget(decodeShutdownHealth(health).shutdownHorizonMs);
     const reader = makeMeerkatTeamReader({
       client: gateway,
       path: yield* Path.Path,
@@ -98,6 +101,83 @@ export async function bounded<A>(work: Promise<A>, stage: string, timeoutMs = 30
   } finally {
     clearTimeout(timer);
   }
+}
+
+const maximumNativeShutdownHorizonMs = 360_000;
+const gatewayShutdownFloorMs = 342_000;
+const gatewayShutdownMarginMs = 15_000;
+const serverShutdownMarginMs = 30_000;
+
+export function ownedServerShutdownBudget(nativeShutdownHorizonMs: number): number {
+  if (
+    !Number.isSafeInteger(nativeShutdownHorizonMs) ||
+    nativeShutdownHorizonMs < 1 ||
+    nativeShutdownHorizonMs > maximumNativeShutdownHorizonMs
+  )
+    throw new Error("The pinned native shutdown horizon is missing or exceeds the fixture budget");
+  // Match the production gateway's native horizon plus margin, then leave the
+  // server time to finish its remaining finalizers. Current 0.9.2: 397 seconds.
+  return (
+    Math.max(gatewayShutdownFloorMs, nativeShutdownHorizonMs + gatewayShutdownMarginMs) +
+    serverShutdownMarginMs
+  );
+}
+
+// A preflight phase has at most three 60s requests, then the native close
+// horizon, its 15s margin, and the production client's 5s escalation settlement.
+const nativeProbeSettlementMs = 3 * 60_000 + maximumNativeShutdownHorizonMs + 15_000 + 5_000;
+
+/** Reserve owned servers and one in-progress native probe before disposing its provider. */
+export function fixtureTimeoutMs(
+  workMs: number,
+  serverCount = 1,
+  includeNativeProbe = true,
+): number {
+  return (
+    workMs +
+    serverCount * ownedServerShutdownBudget(maximumNativeShutdownHorizonMs) +
+    (includeNativeProbe ? nativeProbeSettlementMs : 0)
+  );
+}
+
+type OwnedServerExit = { code: number | null; signal: NodeJS.Signals | null };
+type OwnedServerProcess = Pick<
+  NodeChildProcess.ChildProcess,
+  "pid" | "exitCode" | "signalCode" | "kill"
+>;
+
+/** Expiry is a failed cleanup observation, never permission to kill native descendants. */
+export async function closeOwnedServer(
+  child: OwnedServerProcess,
+  exited: Promise<OwnedServerExit>,
+  shutdownTimeoutMs: number,
+  onTerminationRequested: () => void,
+): Promise<OwnedServerExit> {
+  if (
+    !Number.isSafeInteger(shutdownTimeoutMs) ||
+    shutdownTimeoutMs < 1 ||
+    shutdownTimeoutMs > 420_000
+  )
+    throw new Error("Owned server shutdown budget must be bounded to at most seven minutes");
+  let requestedTermination = false;
+  if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
+    if (child.kill("SIGTERM")) {
+      requestedTermination = true;
+      onTerminationRequested();
+    }
+    await bounded(exited, `owned T3 server shutdown (PID ${child.pid})`, shutdownTimeoutMs);
+  }
+  const stopped = await exited;
+  // Effect runMain returns 130 for this owner's requested interruption. A signal
+  // or an unrelated failure exit cannot establish an orderly fixture shutdown.
+  if (
+    stopped.signal !== null ||
+    (stopped.code !== 0 && !(requestedTermination && stopped.code === 130))
+  )
+    throw new Error(
+      `Owned T3 server PID ${child.pid} exited without orderly cleanup (${stopped.code ?? stopped.signal})`,
+    );
+  return stopped;
 }
 
 const decodeRuntimeInfo = Schema.decodeUnknownSync(
@@ -154,9 +234,11 @@ export function ownedServer(
   baseDir: string,
   port: number,
   env: NodeJS.ProcessEnv,
+  nativeShutdownHorizonMs: number,
   diagnosticPath: string,
   executable = serverExecutable,
 ) {
+  const shutdownTimeoutMs = ownedServerShutdownBudget(nativeShutdownHorizonMs);
   const ready = Promise.withResolvers<string>();
   const exited = Promise.withResolvers<{ code: number | null; signal: NodeJS.Signals | null }>();
   const child = NodeChildProcess.spawn(
@@ -185,6 +267,9 @@ export function ownedServer(
   let started = false;
   let stderr = "";
   let stdout = "";
+  let requestedShutdownSignal: "SIGTERM" | null = null;
+  let shutdownTimedOut = false;
+  let closePromise: Promise<OwnedServerExit> | undefined;
   const redact = (value: string) => {
     let sanitized = value
       .replace(/Bearer\s+[^\s"']+/gi, "Bearer [redacted]")
@@ -242,36 +327,48 @@ export function ownedServer(
     child,
     diagnostics,
     ready: ready.promise,
-    async close() {
-      output = "";
-      try {
-        if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-          child.kill("SIGTERM");
-          try {
-            await bounded(exited.promise, "owned T3 server shutdown");
-          } catch (error) {
-            child.kill("SIGKILL");
-            await bounded(exited.promise, "owned T3 server forced exit", 5_000);
-            throw error;
-          }
+    shutdownObservation: () => ({
+      requestedSignal: requestedShutdownSignal,
+      forced: false,
+      timedOut: shutdownTimedOut,
+      budgetMs: shutdownTimeoutMs,
+    }),
+    close() {
+      closePromise ??= (async () => {
+        output = "";
+        try {
+          return await closeOwnedServer(child, exited.promise, shutdownTimeoutMs, () => {
+            requestedShutdownSignal = "SIGTERM";
+          });
+        } catch (error) {
+          shutdownTimedOut = child.exitCode === null && child.signalCode === null;
+          throw new Error(
+            `Owned T3 server cleanup unresolved; PID ${child.pid}; diagnostics: ${diagnosticPath}`,
+            { cause: error },
+          );
+        } finally {
+          await NodeFSP.writeFile(
+            diagnosticPath,
+            encodeObservationDiagnostic({
+              pid: child.pid,
+              code: child.exitCode,
+              signal: child.signalCode,
+              requestedShutdownSignal,
+              forcedShutdown: false,
+              shutdownTimedOut,
+              shutdownTimeoutMs,
+              nativeShutdownHorizonMs,
+              stdout: redact(stdout),
+              stderr: redact(stderr),
+            }),
+            { mode: 0o600 },
+          );
+          stdout = "";
+          stderr = "";
+          startupCredential = undefined;
         }
-        return await exited.promise;
-      } finally {
-        await NodeFSP.writeFile(
-          diagnosticPath,
-          encodeObservationDiagnostic({
-            pid: child.pid,
-            code: child.exitCode,
-            signal: child.signalCode,
-            stdout: redact(stdout),
-            stderr: redact(stderr),
-          }),
-          { mode: 0o600 },
-        );
-        stdout = "";
-        stderr = "";
-        startupCredential = undefined;
-      }
+      })();
+      return closePromise;
     },
   };
 }
@@ -339,7 +436,12 @@ export const watch = Effect.fnUntraced(function* <A, E>(
   );
   return {
     index: () => index,
-    waitFor: (predicate: (value: A) => boolean, stage: string, afterIndex = 0) =>
+    waitFor: (
+      predicate: (value: A) => boolean,
+      stage: string,
+      afterIndex = 0,
+      timeoutMs = 30_000,
+    ) =>
       Effect.tryPromise(async () => {
         const waiting = Promise.withResolvers<A>();
         const check = () => {
@@ -354,7 +456,7 @@ export const watch = Effect.fnUntraced(function* <A, E>(
         listeners.add(check);
         check();
         try {
-          return await bounded(waiting.promise, stage);
+          return await bounded(waiting.promise, stage, timeoutMs);
         } catch (cause) {
           throw new Error(`${stage}: ${encodeObservationDiagnostic(observed).slice(-8_000)}`, {
             cause,
@@ -366,11 +468,72 @@ export const watch = Effect.fnUntraced(function* <A, E>(
   };
 });
 
+export type FixtureHealthContract = "current" | "pre-account-auth-0.8.51-0.8.46";
+
+const decodeHistoricalHealth = Schema.decodeUnknownSync(
+  Schema.Struct({
+    ok: Schema.Literal(true),
+    runtime: Schema.Literal("mobkit"),
+    build: Schema.Struct({
+      gatewayVersion: Schema.String,
+      meerkatVersion: Schema.Literal("0.8.51"),
+      mobkitVersion: Schema.Literal("0.8.46"),
+      cargoLockSha256: Schema.String,
+      platform: Schema.String,
+      arch: Schema.String,
+    }),
+  }),
+);
+const decodeHistoricalCapabilities = Schema.decodeUnknownSync(
+  Schema.Struct({
+    contractVersion: Schema.Literal("pure-mobkit-runtime-v1"),
+    methods: Schema.Array(Schema.String),
+  }),
+);
+const decodeShutdownHealth = Schema.decodeUnknownSync(
+  Schema.Struct({ shutdownHorizonMs: Schema.Number }),
+);
+
+/** The predecessor package is tested against its own API, never today's added account methods. */
+export function validateFixtureHealth(
+  health: unknown,
+  capabilities: unknown,
+  contract: FixtureHealthContract = "current",
+) {
+  if (contract === "current") return validateMeerkatHealth(health, capabilities);
+  const historical = decodeHistoricalHealth(health);
+  const advertised = decodeHistoricalCapabilities(capabilities);
+  if (
+    !/^[a-f0-9]{64}$/.test(historical.build.cargoLockSha256) ||
+    !historical.build.gatewayVersion ||
+    !historical.build.platform ||
+    !historical.build.arch
+  )
+    throw new Error("The predecessor gateway has an invalid build identity");
+  const laterAccountMethods = new Set<string>([
+    "auth.v1.check",
+    "auth.v1.configure",
+    "auth.v1.deviceStart",
+    "auth.v1.devicePoll",
+    "auth.v1.delete",
+    "auth.v1.default",
+  ]);
+  const missing = MEERKAT_REQUIRED_METHODS.filter(
+    (method) => !laterAccountMethods.has(method) && !advertised.methods.includes(method),
+  );
+  if (missing.length > 0)
+    throw new Error(
+      `The predecessor gateway is missing required historical methods: ${missing.join(", ")}`,
+    );
+  return historical.build;
+}
+
 export async function prepareFixture(
   root: string,
   runtime: string,
   providerPort: number,
   environmentOverrides: NodeJS.ProcessEnv = {},
+  healthContract: FixtureHealthContract = "current",
 ) {
   const projectPath = NodePath.join(root, "project");
   const baseDir = NodePath.join(root, "t3-home");
@@ -389,7 +552,14 @@ export async function prepareFixture(
   }
   await NodeFSP.writeFile(env.T3CODE_TRACE_FILE!, "", { mode: 0o600 });
   const manifest = await verifyMeerkatRuntime(runtime);
-  await configureWorkspace(projectPath, nativeRoot, runtime, providerPort, env);
+  const { shutdownHorizonMs } = await configureWorkspace(
+    projectPath,
+    nativeRoot,
+    runtime,
+    providerPort,
+    env,
+    healthContract,
+  );
   const donors = ["codex", "claudeAgent", "cursor", "grok", "opencode", "antigravity"];
   const selection = { instanceId: "meerkat", model: workflowModel };
   const settings = decodeSettings({
@@ -418,11 +588,15 @@ export async function prepareFixture(
     encodeSettings(settings),
     { mode: 0o600 },
   );
-  return { projectPath, baseDir, nativeRoot, evidenceRoot, env, manifest };
+  return { projectPath, baseDir, nativeRoot, evidenceRoot, env, manifest, shutdownHorizonMs };
 }
 
 export const exchangeToken = Effect.fnUntraced(
-  function* (origin: string, credential: string) {
+  function* (
+    origin: string,
+    credential: string,
+    scopes = "orchestration:read orchestration:operate terminal:operate review:write relay:read access:read access:write relay:write",
+  ) {
     const response = yield* HttpClient.execute(
       HttpClientRequest.post(`${origin}/oauth/token`).pipe(
         HttpClientRequest.bodyUrlParams({
@@ -430,8 +604,7 @@ export const exchangeToken = Effect.fnUntraced(
           subject_token: credential,
           subject_token_type: AuthEnvironmentBootstrapTokenType,
           requested_token_type: AuthAccessTokenType,
-          scope:
-            "orchestration:read orchestration:operate terminal:operate review:write relay:read access:read access:write relay:write",
+          scope: scopes,
           client_label: "Native workflow fixture",
         }),
       ),
@@ -444,12 +617,39 @@ export const exchangeToken = Effect.fnUntraced(
   Effect.timeout("15 seconds"),
 );
 
+/** Read a package's own cleanup contract without loading or changing its retained profile. */
+export async function readFixtureShutdownHorizon(
+  runtime: string,
+  projectPath: string,
+  env: NodeJS.ProcessEnv,
+) {
+  const manifest = await verifyMeerkatRuntime(runtime);
+  const gateway = createMeerkatGatewayClient({
+    binaryPath: NodePath.join(runtime, manifest.binary),
+    cwd: projectPath,
+    env,
+  });
+  try {
+    const health = await gateway.request("system.v1.health");
+    assertMeerkatBundleBuild(
+      validateMeerkatHealth(health, await gateway.request("system.v1.capabilities")),
+      manifest,
+    );
+    const { shutdownHorizonMs } = decodeShutdownHealth(health);
+    ownedServerShutdownBudget(shutdownHorizonMs);
+    return shutdownHorizonMs;
+  } finally {
+    await gateway.close();
+  }
+}
+
 export async function configureWorkspace(
   projectPath: string,
   nativeRoot: string,
   runtime: string,
   providerPort: number,
   env: NodeJS.ProcessEnv,
+  healthContract: FixtureHealthContract = "current",
 ) {
   const manifest = await verifyMeerkatRuntime(runtime);
   const configRoot = NodePath.join(
@@ -461,15 +661,19 @@ export async function configureWorkspace(
     binaryPath: NodePath.join(runtime, manifest.binary),
     cwd: projectPath,
     env,
-    shutdownTimeoutMs: 15_000,
   });
   let realm: string;
+  let shutdownHorizonMs: number;
   try {
-    const actual = validateMeerkatHealth(
-      await gateway.request("system.v1.health"),
+    const health = await gateway.request("system.v1.health");
+    const actual = validateFixtureHealth(
+      health,
       await gateway.request("system.v1.capabilities"),
+      healthContract,
     );
     assertMeerkatBundleBuild(actual, manifest);
+    shutdownHorizonMs = decodeShutdownHealth(health).shutdownHorizonMs;
+    ownedServerShutdownBudget(shutdownHorizonMs);
     realm = decodeRuntimeInfo(
       await gateway.request("system.v1.projectRuntimeInfo", { projectPath, stateRoot: configRoot }),
     ).host.realmId;
@@ -501,4 +705,5 @@ enabled = false
 `,
     { mode: 0o600 },
   );
+  return { shutdownHorizonMs };
 }

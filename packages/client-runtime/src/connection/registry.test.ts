@@ -44,6 +44,7 @@ import {
   RelayConnectionTarget,
   SshConnectionTarget,
   type ConnectionTarget,
+  type ConnectionAttemptError,
   type PreparedConnection,
   type SupervisorConnectionState,
 } from "./model.ts";
@@ -144,6 +145,8 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
   initialCredentials: ReadonlyArray<readonly [string, ConnectionCredential]> = [],
   options?: {
     readonly prepareError?: ConnectionBlockedError;
+    readonly requireStoredBearerCredential?: boolean;
+    readonly beforeCredentialPut?: () => Effect.Effect<void, ConnectionAttemptError>;
     readonly beforeSessionConnect?: (environmentId: EnvironmentId) => Effect.Effect<void>;
     readonly beforeRegistrationRegister?: (
       registration: ConnectionRegistration,
@@ -329,10 +332,13 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
         Effect.map((current) => Option.fromUndefinedOr(current.get(connectionId))),
       ),
     put: (connectionId, credential) =>
-      Ref.update(storedCredentials, (current) => {
-        const next = new Map(current);
-        next.set(connectionId, credential);
-        return next;
+      Effect.gen(function* () {
+        yield* options?.beforeCredentialPut?.() ?? Effect.void;
+        yield* Ref.update(storedCredentials, (current) => {
+          const next = new Map(current);
+          next.set(connectionId, credential);
+          return next;
+        });
       }),
     remove: (connectionId) =>
       Ref.update(storedCredentials, (current) => {
@@ -376,6 +382,15 @@ const makeHarness = Effect.fn("TestEnvironmentRegistry.makeHarness")(function* (
         };
         yield* reportProgress({ stage: "preparing" });
         if (options?.prepareError) return yield* options.prepareError;
+        if (
+          options?.requireStoredBearerCredential &&
+          target._tag === "BearerConnectionTarget" &&
+          !(yield* Ref.get(storedCredentials)).has(target.connectionId)
+        )
+          return yield* new ConnectionBlockedError({
+            reason: "authentication",
+            detail: "The connection credential is unavailable.",
+          });
         yield* reportProgress({ stage: "opening", prepared });
         yield* options?.beforeSessionConnect?.(target.environmentId) ?? Effect.void;
         const closed = yield* Deferred.make<never, ConnectionTransientError>();
@@ -455,6 +470,191 @@ function awaitConnectionState(
 }
 
 describe("EnvironmentRegistry", () => {
+  it.effect(
+    "stores each platform credential once across identical polling and renews changed credentials",
+    () =>
+      Effect.gen(function* () {
+        let writes = 0;
+        const harness = yield* makeHarness([], [], [], {
+          beforeCredentialPut: () =>
+            Effect.sync(() => {
+              writes += 1;
+            }),
+        });
+        const registration = new BearerConnectionRegistration({
+          target: BEARER_TARGET,
+          profile: BEARER_PROFILE,
+          credential: BEARER_CREDENTIAL,
+        });
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          yield* registry.reconcilePlatform([registration]);
+          yield* registry.reconcilePlatform([
+            new BearerConnectionRegistration({ ...registration }),
+          ]);
+          yield* registry.retryNow(BEARER_TARGET.environmentId);
+          expect(writes).toBe(1);
+          const renewed = new BearerConnectionRegistration({
+            ...registration,
+            credential: new BearerConnectionCredential({ token: "renewed-token" }),
+          });
+          yield* registry.reconcilePlatform([renewed]);
+          yield* registry.reconcilePlatform([renewed]);
+          expect(writes).toBe(2);
+          expect(
+            (yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId),
+          ).toEqual(renewed.credential);
+          yield* registry.reconcilePlatform([]);
+          yield* registry.retryNow(BEARER_TARGET.environmentId);
+          expect(writes).toBe(2);
+          expect((yield* Ref.get(harness.storedCredentials)).has(BEARER_TARGET.connectionId)).toBe(
+            false,
+          );
+        }).pipe(Effect.provide(harness.layer));
+      }),
+  );
+
+  it.effect("keeps denied enrollment blocked until an explicit credential retry succeeds", () =>
+    Effect.gen(function* () {
+      let writes = 0;
+      let denied = true;
+      const error = new ConnectionTransientError({
+        reason: "remote-unavailable",
+        detail: "Secure storage access was denied.",
+      });
+      const harness = yield* makeHarness([], [], [], {
+        requireStoredBearerCredential: true,
+        beforeCredentialPut: () =>
+          Effect.suspend(() => {
+            writes += 1;
+            return denied ? Effect.fail(error) : Effect.void;
+          }),
+      });
+      const registration = new BearerConnectionRegistration({
+        target: BEARER_TARGET,
+        profile: BEARER_PROFILE,
+        credential: BEARER_CREDENTIAL,
+      });
+      yield* Effect.gen(function* () {
+        const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+        yield* registry.reconcilePlatform([registration]);
+        yield* awaitConnectionState(
+          registry,
+          BEARER_TARGET.environmentId,
+          (state) => state.phase === "blocked",
+        );
+        yield* registry.reconcilePlatform([registration]);
+        expect(writes).toBe(1);
+        expect((yield* Ref.get(harness.storedCredentials)).has(BEARER_TARGET.connectionId)).toBe(
+          false,
+        );
+        expect(yield* Effect.flip(registry.retryNow(BEARER_TARGET.environmentId))).toBe(error);
+        expect(writes).toBe(2);
+        expect(yield* Ref.get(harness.sessions)).toHaveLength(0);
+        denied = false;
+        yield* registry.retryNow(BEARER_TARGET.environmentId);
+        yield* awaitConnectionState(
+          registry,
+          BEARER_TARGET.environmentId,
+          (state) => state.phase === "connected",
+        );
+        yield* registry.reconcilePlatform([registration]);
+        expect(writes).toBe(3);
+        expect((yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId)).toEqual(
+          BEARER_CREDENTIAL,
+        );
+        expect(yield* Ref.get(harness.sessions)).toHaveLength(1);
+      }).pipe(Effect.provide(harness.layer));
+    }),
+  );
+
+  it.effect(
+    "does not publish pending enrollment or let its completion replace a newer host credential",
+    () =>
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>();
+        const continueWrite = yield* Deferred.make<void>();
+        let writes = 0;
+        const harness = yield* makeHarness([], [], [], {
+          beforeCredentialPut: () =>
+            Effect.suspend(() => {
+              writes += 1;
+              return writes === 1
+                ? Deferred.succeed(started, undefined).pipe(
+                    Effect.andThen(Deferred.await(continueWrite)),
+                  )
+                : Effect.void;
+            }),
+        });
+        const original = new BearerConnectionRegistration({
+          target: BEARER_TARGET,
+          profile: BEARER_PROFILE,
+          credential: BEARER_CREDENTIAL,
+        });
+        const replacement = new BearerConnectionRegistration({
+          ...original,
+          credential: new BearerConnectionCredential({ token: "new-host-token" }),
+        });
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          const first = yield* registry.reconcilePlatform([original]).pipe(Effect.forkChild);
+          yield* Deferred.await(started);
+          expect(
+            (yield* SubscriptionRef.get(registry.entries)).has(BEARER_TARGET.environmentId),
+          ).toBe(false);
+          const changed = yield* registry.reconcilePlatform([replacement]).pipe(Effect.forkChild);
+          yield* Deferred.succeed(continueWrite, undefined);
+          yield* Fiber.join(first);
+          yield* Fiber.join(changed);
+          expect(
+            (yield* Ref.get(harness.storedCredentials)).get(BEARER_TARGET.connectionId),
+          ).toEqual(replacement.credential);
+          yield* registry.reconcilePlatform([replacement]);
+          expect(writes).toBe(2);
+        }).pipe(Effect.provide(harness.layer));
+      }),
+  );
+
+  it.effect(
+    "removes a stopped host after pending enrollment settles without reviving its credential",
+    () =>
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>();
+        const continueWrite = yield* Deferred.make<void>();
+        let writes = 0;
+        const harness = yield* makeHarness([], [], [], {
+          beforeCredentialPut: () =>
+            Effect.gen(function* () {
+              writes += 1;
+              yield* Deferred.succeed(started, undefined);
+              yield* Deferred.await(continueWrite);
+            }),
+        });
+        const registration = new BearerConnectionRegistration({
+          target: BEARER_TARGET,
+          profile: BEARER_PROFILE,
+          credential: BEARER_CREDENTIAL,
+        });
+        yield* Effect.gen(function* () {
+          const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+          const starting = yield* registry.reconcilePlatform([registration]).pipe(Effect.forkChild);
+          yield* Deferred.await(started);
+          const stopping = yield* registry.reconcilePlatform([]).pipe(Effect.forkChild);
+          yield* Deferred.succeed(continueWrite, undefined);
+          yield* Fiber.join(starting);
+          yield* Fiber.join(stopping);
+          yield* registry.retryNow(BEARER_TARGET.environmentId);
+          expect(writes).toBe(1);
+          expect(
+            (yield* SubscriptionRef.get(registry.entries)).has(BEARER_TARGET.environmentId),
+          ).toBe(false);
+          expect((yield* Ref.get(harness.storedCredentials)).has(BEARER_TARGET.connectionId)).toBe(
+            false,
+          );
+        }).pipe(Effect.provide(harness.layer));
+      }),
+  );
+
   it.effect("replays connected state when arming a desktop commit observer", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness([TARGET]);

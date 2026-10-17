@@ -1,6 +1,7 @@
-import { EnvironmentThemeFile } from "@t3tools/contracts";
+import { type EnvironmentTheme as PublishedTheme, EnvironmentThemeFile } from "@t3tools/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
@@ -14,6 +15,7 @@ import * as Stream from "effect/Stream";
 import * as ServerConfig from "./config.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import { symlinksSupported } from "@t3tools/shared/testing/symlinks";
+import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 const encodeThemeFile = Schema.encodeSync(Schema.fromJsonString(EnvironmentThemeFile));
 
@@ -225,49 +227,77 @@ it.layer(NodeServices.layer)("environment theme", (it) => {
   );
 });
 
-// The feature's headline claim: rewrite a file and connected clients retint
-// without a restart. Live clock and a real filesystem event, so this proves
-// the watcher rather than a direct read. Kept outside the it.layer block above
-// because only the top-level `it` exposes `live`.
-describe("environment theme watching", () => {
-  it.live("streams a set for every change to the directory", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-theme-watch-" });
-      const themesDir = path.join(baseDir, "userdata", "themes");
-      yield* fs.makeDirectory(themesDir, { recursive: true });
-
-      yield* Effect.gen(function* () {
-        const environmentTheme = yield* EnvironmentTheme.EnvironmentThemeService;
-        const seen = yield* Queue.unbounded<ReadonlyArray<{ readonly id: string }>>();
-        yield* Stream.runForEach(environmentTheme.streamChanges, (themes) =>
-          Queue.offer(seen, themes),
-        ).pipe(Effect.forkScoped);
-
-        // Empty to start.
-        assert.deepEqual(yield* Queue.take(seen), []);
-
-        // Published atomically, the way a theme hook writes it.
-        const staging = path.join(baseDir, "staged.json");
-        yield* fs.writeFileString(staging, encodeThemeFile(NIGHTFALL_THEME));
-        yield* fs.rename(staging, path.join(themesDir, "nightfall.json"));
-        assert.deepEqual(
-          (yield* Queue.take(seen)).map((theme) => theme.id),
-          ["nightfall"],
-        );
-
-        // Removed again, and the set empties without a restart.
-        yield* fs.remove(path.join(themesDir, "nightfall.json"));
-        assert.deepEqual(yield* Queue.take(seen), []);
-      }).pipe(
-        Effect.provide(
-          EnvironmentTheme.layer.pipe(
-            Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
-          ),
+// Exercise the observer with actual file writes and controlled delivery of the
+// filesystem notifications. Waiting for subscription makes this independent of
+// OS watcher startup and event latency; the real debounce/refresh stream runs.
+const assertWatchedThemeChanges = (nativeWatcher = false) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3code-theme-watch-" });
+    const themesDir = path.join(baseDir, "userdata", "themes");
+    yield* fs.makeDirectory(themesDir, { recursive: true });
+    const watcherReady = yield* Deferred.make<void>();
+    const events = yield* Queue.unbounded<FileSystem.WatchEvent>();
+    const controlledFileSystem: FileSystem.FileSystem = {
+      ...fs,
+      watch: (watchedPath) =>
+        Stream.unwrap(
+          Effect.gen(function* () {
+            assert.equal(watchedPath, themesDir);
+            yield* Deferred.succeed(watcherReady, undefined);
+            return Stream.fromQueue(events);
+          }),
         ),
-        Effect.timeout("30 seconds"),
-      );
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    };
+
+    yield* Effect.gen(function* () {
+      const environmentTheme = yield* EnvironmentTheme.EnvironmentThemeService;
+      const seen = yield* Queue.unbounded<ReadonlyArray<PublishedTheme>>();
+      yield* Stream.runForEach(environmentTheme.streamChanges, (themes) =>
+        Queue.offer(seen, themes),
+      ).pipe(Effect.forkScoped);
+
+      assert.deepEqual(yield* Queue.take(seen), []);
+      if (!nativeWatcher) yield* Deferred.await(watcherReady);
+
+      // Published atomically, the way a theme hook writes it.
+      const staging = path.join(baseDir, "staged.json");
+      yield* fs.writeFileString(staging, encodeThemeFile(NIGHTFALL_THEME));
+      yield* fs.rename(staging, path.join(themesDir, "nightfall.json"));
+      if (!nativeWatcher) yield* Queue.offer(events, { _tag: "Create", path: "nightfall.json" });
+      assert.deepEqual(yield* Queue.take(seen), [{ id: "nightfall", ...NIGHTFALL_THEME }]);
+
+      const recoloredTheme = { ...NIGHTFALL_THEME, accent: "#bb9af7" };
+      yield* fs.writeFileString(staging, encodeThemeFile(recoloredTheme));
+      yield* fs.rename(staging, path.join(themesDir, "nightfall.json"));
+      if (!nativeWatcher) yield* Queue.offer(events, { _tag: "Update", path: "nightfall.json" });
+      assert.deepEqual(yield* Queue.take(seen), [{ id: "nightfall", ...recoloredTheme }]);
+
+      // No direct current read: the existing subscriber must observe removal.
+      yield* fs.remove(path.join(themesDir, "nightfall.json"));
+      if (!nativeWatcher) yield* Queue.offer(events, { _tag: "Remove", path: "nightfall.json" });
+      assert.deepEqual(yield* Queue.take(seen), []);
+    }).pipe(
+      Effect.provide(
+        EnvironmentTheme.layer.pipe(
+          Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+        ),
+      ),
+      Effect.provideService(FileSystem.FileSystem, nativeWatcher ? fs : controlledFileSystem),
+      Effect.timeout("30 seconds"),
+    );
+  }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
+
+describe("environment theme watching", () => {
+  it.live("streams a set for every observed change to the directory", () =>
+    assertWatchedThemeChanges(),
+  );
+
+  // Keep OS-event delivery separate from the observer contract. Linux CI runs
+  // this smoke; macOS FSEvents delivery can exceed the unit-test deadline.
+  it.live.skipIf(HostProcessPlatform.defaultValue() !== "linux")(
+    "streams real filesystem changes on Linux",
+    () => assertWatchedThemeChanges(true),
   );
 });

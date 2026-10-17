@@ -1,4 +1,7 @@
-import type { ConnectionTarget } from "@t3tools/client-runtime/connection";
+import {
+  isSharedWorkspaceConnection,
+  type ConnectionTarget,
+} from "@t3tools/client-runtime/connection";
 import type { EnvironmentId } from "@t3tools/contracts";
 
 interface OnboardingEnvironment {
@@ -27,7 +30,9 @@ export function resolveOnboardingTargetEnvironment<TEnvironment extends Onboardi
 }): TEnvironment | null {
   if (mode === "direct" && pairedEnvironmentId !== null) {
     const pairedEnvironment = environments.find(
-      (environment) => environment.environmentId === pairedEnvironmentId,
+      (environment) =>
+        environment.environmentId === pairedEnvironmentId &&
+        !isSharedWorkspaceConnection(environment.entry.target),
     );
     return pairedEnvironment?.connection.phase === "connected" ? pairedEnvironment : null;
   }

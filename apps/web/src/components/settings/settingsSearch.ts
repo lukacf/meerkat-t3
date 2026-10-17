@@ -770,6 +770,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "shared-host",
+    title: "Host shared specialists",
+    to: "/settings/connections",
+    searchTerms: ["shared workspace project specialist team repository register host invite"],
+  },
+  {
     id: "remote-environments",
     title: "Environments",
     to: "/settings/connections",

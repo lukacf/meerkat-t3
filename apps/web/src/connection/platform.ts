@@ -27,6 +27,8 @@ import { managedRelayAccountChanges, managedRelaySessionAtom } from "@t3tools/cl
 import { EnvironmentRpcRequestObserver } from "@t3tools/client-runtime/rpc";
 import {
   AuthStandardClientScopes,
+  AuthAdministrativeScopes,
+  SHARED_LOCAL_ENVIRONMENT_ID,
   type DesktopBridge,
   type DesktopEnvironmentBootstrap,
   PRIMARY_LOCAL_ENVIRONMENT_ID,
@@ -258,7 +260,10 @@ const loadSecondaryConnectionRegistration = Effect.fn(
   const access = yield* bootstrapRemoteBearerSession({
     httpBaseUrl,
     credential: entry.bootstrapToken,
-    scopes: AuthStandardClientScopes,
+    scopes:
+      entry.id === SHARED_LOCAL_ENVIRONMENT_ID
+        ? AuthAdministrativeScopes
+        : AuthStandardClientScopes,
     clientMetadata: clientMetadata(),
   }).pipe(Effect.mapError(mapRemoteEnvironmentError));
   // Keep the desktop pool's stable backend id in the connection id. The

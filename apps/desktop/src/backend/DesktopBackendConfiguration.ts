@@ -61,6 +61,12 @@ export class DesktopBackendConfiguration extends Context.Service<
     // fall-back to Windows), so the env switcher can't show "WSL" for a
     // backend that actually resolved to Windows.
     readonly resolvePrimaryLabel: Effect.Effect<string>;
+    readonly resolveSharedHost: (
+      port: number,
+    ) => Effect.Effect<
+      DesktopBackendManager.DesktopBackendStartConfig,
+      PlatformError.PlatformError
+    >;
   }
 >()("@t3tools/desktop/backend/DesktopBackendConfiguration") {}
 
@@ -914,6 +920,30 @@ export const make = Effect.gen(function* () {
   });
 
   return DesktopBackendConfiguration.of({
+    resolveSharedHost: (port) =>
+      buildWindowsPrimaryConfig.pipe(
+        Effect.map((config) => ({
+          ...config,
+          env: {
+            ...config.env,
+            T3CODE_HOME: undefined,
+            T3CODE_PORT: undefined,
+            MEERKAT_DESKTOP_AUTH_ROOT: environment.path.join(
+              environment.baseDir,
+              "shared-host",
+              "meerkat-auth",
+            ),
+          },
+          bootstrap: {
+            ...config.bootstrap,
+            t3Home: environment.path.join(environment.baseDir, "shared-host"),
+            port,
+            host: "127.0.0.1",
+            tailscaleServeEnabled: false,
+          },
+          httpBaseUrl: new URL(`http://127.0.0.1:${port}`),
+        })),
+      ),
     resolvePrimary: Effect.gen(function* () {
       const { useWsl, wslRequested } = yield* describePrimary;
       if (useWsl) {

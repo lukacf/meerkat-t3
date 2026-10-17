@@ -1,5 +1,6 @@
 import {
   AuthStandardClientScopes,
+  AuthSharedParticipantScopes,
   EnvironmentId,
   ORCHESTRATION_PROTOCOL_VERSION,
 } from "@t3tools/contracts";
@@ -80,6 +81,24 @@ function pairingHttpLayer(
 }
 
 describe("connection onboarding", () => {
+  it.effect("pairs shared collaboration without requesting host workbench permissions", () =>
+    Effect.gen(function* () {
+      const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];
+      const registration = yield* preparePairingRegistration({
+        host: "shared.example.test",
+        pairingCode: "pairing-token",
+        sharedWorkspace: true,
+      }).pipe(Effect.provide(Layer.mergeAll(CLIENT_PRESENTATION_LAYER, pairingHttpLayer(calls))));
+      expect(registration.target.sharedWorkspace).toBe(true);
+      expect(registration.profile.sharedWorkspace).toBe(true);
+      const request = calls.find((call) => call.url.endsWith("/oauth/token"));
+      const body =
+        request?.init.body instanceof Uint8Array
+          ? new TextDecoder().decode(request.init.body)
+          : String(request?.init.body);
+      expect(new URLSearchParams(body).get("scope")).toBe(AuthSharedParticipantScopes.join(" "));
+    }),
+  );
   it.effect("prepares a persisted bearer registration from pairing details", () =>
     Effect.gen(function* () {
       const calls: Array<{ readonly url: string; readonly init: RequestInit }> = [];

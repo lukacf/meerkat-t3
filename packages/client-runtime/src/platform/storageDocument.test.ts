@@ -71,6 +71,22 @@ const REMOTE_TOKEN = new TokenStore.RemoteDpopAccessToken({
 });
 
 describe("ConnectionCatalogDocument", () => {
+  it("retains the narrow shared connection mode across catalog persistence and enable changes", () => {
+    const registration = new BearerConnectionRegistration({
+      target: new BearerConnectionTarget({ ...BEARER_TARGET, sharedWorkspace: true }),
+      profile: new BearerConnectionProfile({ ...BEARER_PROFILE, sharedWorkspace: true }),
+      credential: BEARER_CREDENTIAL,
+    });
+    const registered = registerConnectionInCatalog(EMPTY_CONNECTION_CATALOG_DOCUMENT, registration);
+    const disabled = setConnectionEnabledInCatalog(registered, ENVIRONMENT_ID, false);
+    const codec = Schema.fromJsonString(ConnectionCatalogDocument);
+    const restored = Schema.decodeUnknownSync(codec)(Schema.encodeSync(codec)(disabled));
+    const enabled = setConnectionEnabledInCatalog(restored, ENVIRONMENT_ID, true);
+    expect(enabled.targets).toEqual([registration.target]);
+    expect(enabled.profiles).toEqual([registration.profile]);
+    expect(enabled.disabledEnvironmentIds).toEqual([]);
+  });
+
   it.effect("persists explicit GitHub trust and forgets it when a connection is removed", () =>
     Effect.gen(function* () {
       let document = EMPTY_CONNECTION_CATALOG_DOCUMENT;

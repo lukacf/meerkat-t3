@@ -127,7 +127,10 @@ console.log("App started with React refresh ready.");`,
 });
 
 it("hot updates Tailwind classes when a source file changes in bundled dev", async () => {
-  const root = await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-tailwind-"));
+  // Watch the same canonical path used by the bundler on macOS (/var is a symlink).
+  const root = await NodeFSP.realpath(
+    await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "t3-tailwind-")),
+  );
   const events = new NodeEvents.EventEmitter();
   let server: Awaited<ReturnType<typeof createServer>> | undefined;
   let socket: WebSocket | undefined;
@@ -175,7 +178,12 @@ it("hot updates Tailwind classes when a source file changes in bundled dev", asy
           },
         },
       ],
-      server: { host: "127.0.0.1", port: 0 },
+      server: {
+        host: "127.0.0.1",
+        port: 0,
+        // Temporary directories do not reliably emit native watch events on every runner.
+        watch: { usePolling: true, interval: 50 },
+      },
     });
     await server.listen();
     const address = server.httpServer?.address();

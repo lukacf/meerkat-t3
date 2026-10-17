@@ -10,6 +10,8 @@ import type {
   ProjectId,
   ProviderInstanceId,
   RuntimeMode,
+  SharedProject,
+  SharedSpecialist,
   ThreadId,
 } from "@t3tools/contracts";
 import { useNavigate } from "@tanstack/react-router";
@@ -27,6 +29,7 @@ import { newMessageId } from "../../lib/utils";
 import { meerkatTeamEnvironment, useVisibleTeamRefresh } from "../../state/meerkatTeam";
 import { formatEnvironmentQueryError, useEnvironmentQuery } from "../../state/query";
 import { threadEnvironment } from "../../state/threads";
+import { sharedWorkspaceEnvironment } from "../../state/sharedWorkspace";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
@@ -50,12 +53,18 @@ import {
 import { PROJECT_AGENT_PROPOSAL_PROMPT } from "./projectAgentProposalPrompt";
 import { ProjectAgentPermissions, projectAgentPermissionLabel } from "./ProjectAgentPermissions";
 import { readRestoreReviewWorkBlock, useRestoreReviewWorkBlock } from "./useRestoreReview";
+import { canShareProposalAgent, proposalSpecialistRegistration } from "./sharedProposal";
 
 type ProposalContext = {
   environmentId: EnvironmentId;
   projectId: ProjectId;
   sourceThreadId: ThreadId;
   projectTitle: string;
+};
+type SharedHostContext = {
+  project: SharedProject;
+  specialists: readonly SharedSpecialist[];
+  refresh: () => void;
 };
 
 export function ProjectAgentProposalPanel({
@@ -72,6 +81,13 @@ export function ProjectAgentProposalPanel({
   );
   const snapshot = query.data;
   const visible = proposalVisibleInThread(snapshot, sourceThreadId);
+  const sharedSession = useEnvironmentQuery(
+    visible ? sharedWorkspaceEnvironment.session({ environmentId, input: {} }) : null,
+  );
+  useVisibleTeamRefresh(sharedSession, visible);
+  const sharedProject = sharedSession.data?.snapshot.projects.find(
+    (entry) => entry.hostProjectId === projectId,
+  );
   useVisibleTeamRefresh(query, true);
   const startTurn = useAtomCommand(threadEnvironment.startTurn, { reportFailure: false });
   const [refreshing, setRefreshing] = useState(false);
@@ -84,7 +100,15 @@ export function ProjectAgentProposalPanel({
       setError(currentBlock);
       return;
     }
-    if (busy || inFlight.current || !snapshot?.available) return;
+    if (
+      busy ||
+      inFlight.current ||
+      !snapshot?.available ||
+      !sharedSession.data ||
+      sharedSession.error ||
+      (sharedProject && !sharedSession.data.permissions.admin)
+    )
+      return;
     inFlight.current = true;
     setRefreshing(true);
     setError(null);
@@ -117,7 +141,14 @@ export function ProjectAgentProposalPanel({
   }
   if (!visible) return null;
   const blocked =
-    busy || refreshing || restoreBlock !== null || query.error !== null || !snapshot?.available;
+    busy ||
+    refreshing ||
+    restoreBlock !== null ||
+    query.error !== null ||
+    !snapshot?.available ||
+    sharedSession.data === null ||
+    sharedSession.error !== null ||
+    Boolean(sharedProject && !sharedSession.data?.permissions.admin);
   return (
     <section
       className="min-w-0 shrink-0 border-b border-border/60 bg-background"
@@ -125,7 +156,7 @@ export function ProjectAgentProposalPanel({
     >
       {snapshot?.status === "ready" && snapshot.proposal && snapshot.instanceId ? (
         <ProposalReview
-          key={snapshot.proposal.proposalId}
+          key={`${environmentId}:${projectId}:${sourceThreadId}:${snapshot.proposal.proposalId}:${sharedProject?.sharedProjectId ?? "local"}`}
           environmentId={environmentId}
           projectId={projectId}
           sourceThreadId={sourceThreadId}
@@ -133,17 +164,29 @@ export function ProjectAgentProposalPanel({
           proposal={snapshot.proposal}
           instanceId={snapshot.instanceId}
           busy={blocked}
+          studying={busy || refreshing}
           refreshing={refreshing}
           refreshProposal={() => void refreshProposal()}
           refreshAuthority={query.refresh}
+          sharedHost={
+            sharedProject
+              ? {
+                  project: sharedProject,
+                  specialists: sharedSession.data!.snapshot.specialists,
+                  refresh: sharedSession.refresh,
+                }
+              : null
+          }
         />
       ) : (
         <>
-          <ProjectAgentsGuide
-            environmentId={environmentId}
-            projectId={projectId}
-            sourceThreadId={sourceThreadId}
-          />
+          {!sharedProject && (
+            <ProjectAgentsGuide
+              environmentId={environmentId}
+              projectId={projectId}
+              sourceThreadId={sourceThreadId}
+            />
+          )}
           <div className="flex min-w-0 items-center gap-3 px-4 py-2.5">
             <BookOpenIcon className="size-4 shrink-0 text-muted-foreground" />
             <div className="min-w-0 flex-1">
@@ -180,9 +223,9 @@ export function ProjectAgentProposalPanel({
           </div>
         </>
       )}
-      {query.error || error ? (
+      {query.error || error || sharedSession.error ? (
         <p role="alert" className="px-5 pb-3 text-sm text-warning-foreground">
-          {error ?? query.error}
+          {error ?? query.error ?? sharedSession.error}
         </p>
       ) : null}
     </section>
@@ -197,16 +240,20 @@ function ProposalReview({
   proposal,
   instanceId,
   busy,
+  studying,
   refreshing,
   refreshProposal,
   refreshAuthority,
+  sharedHost,
 }: ProposalContext & {
   proposal: MeerkatProjectAgentProposal;
   instanceId: ProviderInstanceId;
   busy: boolean;
+  studying: boolean;
   refreshing: boolean;
   refreshProposal: () => void;
   refreshAuthority: () => void;
+  sharedHost: SharedHostContext | null;
 }) {
   const navigate = useNavigate();
   const team = useEnvironmentQuery(
@@ -219,16 +266,34 @@ function ProposalReview({
   const prepare = useAtomCommand(meerkatTeamEnvironment.projectAgentPrepare, {
     reportFailure: false,
   });
+  const share = useAtomCommand(sharedWorkspaceEnvironment.registerSpecialist, {
+    reportFailure: false,
+    reportDefect: false,
+  });
   const [selected, setSelected] = useState(() =>
     proposal.agents.filter((entry) => entry.recommended).map((entry) => entry.id),
   );
   const [reviewOpen, setReviewOpen] = useState(false);
-  const [accessMode, setAccessMode] = useState<MeerkatProjectAgentAccessMode>("read-only");
+  const [chosenAccessMode, setAccessMode] =
+    useState<MeerkatProjectAgentAccessMode>("read-and-collaborate");
+  const accessMode = sharedHost ? "repository-read-only" : chosenAccessMode;
+  const [sharedReceipts, setSharedReceipts] = useState<ReadonlySet<string>>(new Set());
   const [pendingIds, setPendingIds] = useState<ReadonlySet<string>>(new Set());
   const [receipts, setReceipts] = useState<ReadonlyMap<string, MeerkatProjectAgent>>(new Map());
   const [errors, setErrors] = useState<ReadonlyMap<string, string>>(new Map());
   const [requestError, setRequestError] = useState<string | null>(null);
   const inFlight = useRef(false);
+  const isShared = (agent: MeerkatProjectAgent | null) =>
+    Boolean(
+      agent &&
+      (sharedReceipts.has(agent.agentId) ||
+        sharedHost?.specialists.some(
+          (entry) =>
+            entry.nativeTarget.projectId === agent.projectId &&
+            entry.nativeTarget.instanceId === agent.instanceId &&
+            entry.nativeTarget.agentId === agent.agentId,
+        )),
+    );
   const rows = proposal.agents.map((candidate) => {
     const observed =
       team.data?.projectAgents.find(
@@ -240,11 +305,20 @@ function ProposalReview({
       );
     const agent = latestProposalAgent(observed, receipts.get(candidate.id));
     const currentState = proposalCandidateState(candidate, agent);
-    const state = agent?.pendingRevision
-      ? { label: "Revision saved", actionable: false, retry: false }
-      : currentState.label === "Different assignment"
-        ? { label: "Revision proposed", actionable: true, retry: false }
-        : currentState;
+    const incompatiblePolicy = sharedHost && agent && agent.accessMode !== "repository-read-only";
+    const state = incompatiblePolicy
+      ? { label: "Local agent has different permissions", actionable: false, retry: false }
+      : sharedHost && isShared(agent)
+        ? {
+            label: "Shared - manage assignments in the shared workspace",
+            actionable: false,
+            retry: false,
+          }
+        : agent?.pendingRevision
+          ? { label: "Revision saved", actionable: false, retry: false }
+          : currentState.label === "Different assignment"
+            ? { label: "Revision proposed", actionable: true, retry: false }
+            : currentState;
     return {
       candidate,
       agent,
@@ -256,7 +330,11 @@ function ProposalReview({
     .filter((row) => selected.includes(row.candidate.id))
     .map((row) => row.candidate.id);
   const progress = proposalPreparationSummary(
-    rows.map((row) => ({ ...row, error: errors.get(row.candidate.id) })),
+    rows.map((row) => ({
+      ...row,
+      agent: sharedHost && row.agent?.accessMode !== "repository-read-only" ? null : row.agent,
+      error: errors.get(row.candidate.id),
+    })),
   );
   const { preparing, ready } = progress;
   const requestIssue = requestError ?? team.error;
@@ -288,6 +366,10 @@ function ProposalReview({
   )?.agent;
   const startTask = () => {
     setReviewOpen(false);
+    if (sharedHost) {
+      void navigate({ to: "/settings/connections" });
+      return;
+    }
     void navigate({
       to: "/$environmentId/projects/$projectId/start",
       params: { environmentId, projectId },
@@ -365,16 +447,72 @@ function ProposalReview({
       setPendingIds(new Set());
     }
   }
+  async function shareCandidate(candidateId: string) {
+    const row = rows.find((entry) => entry.candidate.id === candidateId);
+    if (
+      !sharedHost ||
+      blocked ||
+      inFlight.current ||
+      !row?.agent ||
+      isShared(row.agent) ||
+      !canShareProposalAgent(row.candidate, row.agent)
+    )
+      return;
+    const restoreBlock = readRestoreReviewWorkBlock(environmentId);
+    if (restoreBlock) {
+      setRequestError(restoreBlock);
+      return;
+    }
+    inFlight.current = true;
+    setPendingIds(new Set([candidateId]));
+    setRequestError(null);
+    try {
+      const input = proposalSpecialistRegistration(
+        sharedHost.project,
+        proposal.proposalId,
+        row.candidate,
+        row.agent,
+      );
+      const result = await share({ environmentId, input });
+      if (result._tag === "Failure")
+        setRequestError(
+          "Could not confirm sharing this specialist. Refresh to check, then retry the same registration.",
+        );
+      else if (
+        result.value.nativeTarget.projectId === input.nativeTarget.projectId &&
+        result.value.nativeTarget.instanceId === input.nativeTarget.instanceId &&
+        result.value.nativeTarget.agentId === input.nativeTarget.agentId &&
+        result.value.assignments.some(
+          (assignment) => assignment.sharedProjectId === sharedHost.project.sharedProjectId,
+        )
+      )
+        setSharedReceipts((current) => new Set(current).add(row.agent!.agentId));
+      else
+        setRequestError(
+          "The registration receipt did not match this specialist. Refresh the shared host before continuing.",
+        );
+      sharedHost.refresh();
+    } catch {
+      setRequestError(
+        "This specialist is not ready to share. Refresh its preparation before trying again.",
+      );
+    } finally {
+      inFlight.current = false;
+      setPendingIds(new Set());
+    }
+  }
   return (
     <>
-      <ProjectAgentsGuide
-        environmentId={environmentId}
-        projectId={projectId}
-        sourceThreadId={sourceThreadId}
-        acceptedAgentId={acceptedAgent?.agentId}
-        preparationLabel={progress.label}
-        blocked={blocked || needsAttention}
-      />
+      {!sharedHost && (
+        <ProjectAgentsGuide
+          environmentId={environmentId}
+          projectId={projectId}
+          sourceThreadId={sourceThreadId}
+          acceptedAgentId={acceptedAgent?.agentId}
+          preparationLabel={progress.label}
+          blocked={blocked || needsAttention}
+        />
+      )}
       <div className="flex min-w-0 flex-wrap items-center gap-2 px-4 py-2.5">
         {needsAttention ? (
           <AlertCircleIcon className="size-4 shrink-0 text-warning" />
@@ -396,9 +534,9 @@ function ProposalReview({
               ? "View agents"
               : "Review proposal"}
         </Button>
-        {progress.available > 0 && !reviewOpen && !specialistSetup ? (
+        {(sharedHost || (progress.available > 0 && !specialistSetup)) && !reviewOpen ? (
           <Button size="xs" disabled={submitting} onClick={startTask}>
-            Start a task <ArrowRightIcon />
+            {sharedHost ? "Manage shared host" : "Start a task"} <ArrowRightIcon />
           </Button>
         ) : null}
       </div>
@@ -424,7 +562,14 @@ function ProposalReview({
                 <p className="text-sm leading-relaxed text-muted-foreground">{proposal.summary}</p>
               ) : null}
             </div>
-            {rows.some((row) => !row.agent) ? (
+            {sharedHost ? (
+              <p className="text-xs leading-relaxed text-muted-foreground">
+                These specialists belong to a shared host. They can inspect the registered
+                repository; shell commands, file changes and direct peer messages are blocked.
+                Collaboration uses the shared workspace. Review their completed study, then share
+                each specialist.
+              </p>
+            ) : rows.some((row) => !row.agent) ? (
               <ProjectAgentPermissions
                 value={accessMode}
                 onChange={setAccessMode}
@@ -467,6 +612,7 @@ function ProposalReview({
               {rows.map(({ candidate, agent, state }) => {
                 const pending = pendingIds.has(candidate.id);
                 const error = errors.get(candidate.id) ?? agent?.preparation?.error;
+                const registered = isShared(agent);
                 return (
                   <article key={candidate.id} className="rounded-lg border border-border p-3">
                     <div className="flex items-start gap-3">
@@ -509,6 +655,11 @@ function ProposalReview({
                               Ready
                             </Badge>
                           ) : null}
+                          {sharedHost && registered && (
+                            <Badge size="sm" variant="success">
+                              Shared
+                            </Badge>
+                          )}
                         </div>
                         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                           {candidate.focus}
@@ -554,6 +705,12 @@ function ProposalReview({
                             </p>
                           </div>
                         ) : null}
+                        {state.label === "Local agent has different permissions" ? (
+                          <p className="mt-2 text-xs text-muted-foreground">
+                            This role stays local. Ask the setup conversation to propose a distinct
+                            role for the shared specialist.
+                          </p>
+                        ) : null}
                         {error ? (
                           <p role="status" className="mt-2 text-xs text-warning-foreground">
                             {error}
@@ -580,6 +737,19 @@ function ProposalReview({
                                 Retry study
                               </Button>
                             ) : null}
+                            {sharedHost &&
+                              agent &&
+                              !registered &&
+                              canShareProposalAgent(candidate, agent) && (
+                                <Button
+                                  size="xs"
+                                  variant="outline"
+                                  disabled={blocked}
+                                  onClick={() => void shareCandidate(candidate.id)}
+                                >
+                                  {pending ? "Sharing..." : "Share specialist"}
+                                </Button>
+                              )}
                             {errors.has(candidate.id) && !agent ? (
                               <Button
                                 size="xs"
@@ -630,9 +800,9 @@ function ProposalReview({
                 ) : null}
               </div>
             ) : null}
-            {busy || submitting || preparing ? (
+            {studying || submitting || preparing ? (
               <p role="status" className="text-xs text-muted-foreground">
-                {busy
+                {studying
                   ? "Repository study is running."
                   : submitting
                     ? "Preparing selected agents..."
@@ -647,15 +817,20 @@ function ProposalReview({
                 to study their areas using the configured model accounts. Each run can incur API
                 charges. Usage shows recorded Meerkat lifetime tokens separately from period charts
                 and cost estimates.{" "}
-                {accessMode === "read-only"
-                  ? "Read-only agents cannot change files or send peer replies."
-                  : "Full-access agents can run commands, change files, and send peer replies."}
+                {accessMode === "repository-read-only"
+                  ? "Shared specialists are restricted to repository inspection. They cannot run commands, change files, or send direct peer replies."
+                  : accessMode === "read-and-collaborate"
+                    ? "Agents can inspect files and exchange peer messages. Commands and file changes are blocked."
+                    : accessMode === "read-only"
+                      ? "Read-only agents cannot change files or send peer replies."
+                      : "Full-access agents can run commands, change files, and send peer replies."}
               </p>
             ) : null}
             {progress.available > 0 ? (
               <p className="text-xs text-muted-foreground">
-                Open a specialist from the sidebar to follow its preparation. Connect specialists
-                with each other or with task threads when you are ready.
+                {sharedHost
+                  ? "Open a specialist to follow its preparation. When its study is ready, share it here so participants can collaborate through this workspace."
+                  : "Open a specialist from the sidebar to follow its preparation. Connect specialists with each other or with task threads when you are ready."}
               </p>
             ) : null}
           </DialogPanel>
@@ -668,9 +843,9 @@ function ProposalReview({
               <Button size="sm" disabled={blocked} onClick={() => void createSelected(selectedIds)}>
                 Apply {selectedIds.length} {selectedIds.length === 1 ? "assignment" : "assignments"}
               </Button>
-            ) : progress.available > 0 && !specialistSetup ? (
+            ) : sharedHost || (progress.available > 0 && !specialistSetup) ? (
               <Button size="sm" disabled={submitting} onClick={startTask}>
-                Start a task <ArrowRightIcon />
+                {sharedHost ? "Manage shared host" : "Start a task"} <ArrowRightIcon />
               </Button>
             ) : (
               <Button size="sm" variant="outline" onClick={() => setReviewOpen(false)}>

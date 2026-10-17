@@ -1,5 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
+import * as NodeNet from "node:net";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
@@ -22,6 +24,106 @@ import {
 } from "./DesktopTelemetryReceiver.ts";
 
 describe("DesktopTelemetryReceiver", () => {
+  it("exits after receiver cleanup while the parent keeps the telemetry writer open", async () => {
+    const directory = NodeFS.mkdtempSync(
+      NodePath.join(NodeOS.tmpdir(), "t3-desktop-telemetry-exit-test-"),
+    );
+    const child = NodeChildProcess.spawn(
+      process.execPath,
+      [
+        "--input-type=module",
+        "--eval",
+        `import * as Effect from ${JSON.stringify(import.meta.resolve("effect/Effect"))};
+import * as Option from ${JSON.stringify(import.meta.resolve("effect/Option"))};
+import * as Stream from ${JSON.stringify(import.meta.resolve("effect/Stream"))};
+import * as NodeServices from ${JSON.stringify(import.meta.resolve("@effect/platform-node/NodeServices"))};
+const ServerConfig = await import(${JSON.stringify(new URL("../config.ts", import.meta.url).href)});
+const ServerSettings = await import(${JSON.stringify(new URL("../serverSettings.ts", import.meta.url).href)});
+const { make } = await import(${JSON.stringify(new URL("./DesktopTelemetryReceiver.ts", import.meta.url).href)});
+const stop = new Promise((resolve) => process.once("message", resolve));
+await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
+  const config = yield* ServerConfig.ServerConfig;
+  const receiver = yield* make().pipe(Effect.provideService(ServerConfig.ServerConfig, {
+    ...config, mode: "desktop", desktopTelemetryFd: 3,
+  }));
+  const subscription = yield* receiver.subscribeHealth;
+  process.send("ready");
+  yield* subscription.changes.pipe(
+    Stream.filter((health) => health.status === "healthy"),
+    Stream.runHead,
+  );
+  if (Option.isSome(yield* receiver.latest)) throw new Error("Hello became a resource sample");
+  // Let the reader wait for the next frame before asking it to shut down.
+  yield* Effect.promise(() => new Promise((resolve) => setImmediate(resolve)));
+  process.send("healthy");
+  yield* Effect.promise(() => stop);
+})).pipe(
+  Effect.provide(ServerSettings.layerTest()),
+  Effect.provide(ServerConfig.layerTest(${JSON.stringify(directory)}, ${JSON.stringify(directory)})),
+  Effect.provide(NodeServices.layer),
+));
+await new Promise((resolve, reject) => process.send("finalized", (error) => error ? reject(error) : resolve()));
+process.exit(0);`,
+      ],
+      { stdio: ["ignore", "ignore", "pipe", "pipe", "ipc"] },
+    );
+    const telemetry = child.stdio[3];
+    let stderr = "";
+    child.stderr?.on("data", (data) => {
+      stderr += String(data);
+    });
+    const exited = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+      (resolve, reject) => {
+        child.once("error", reject);
+        child.once("exit", (code, signal) => resolve({ code, signal }));
+      },
+    );
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    let stage = "starting";
+    const timedOut = new Promise<never>((_, reject) => {
+      // The deadline measures an actual child exit outside the Effect test clock.
+      // @effect-diagnostics-next-line globalTimers:off
+      deadline = setTimeout(
+        () =>
+          reject(new Error(`Telemetry child stalled at ${stage} with its writer open. ${stderr}`)),
+        10_000,
+      );
+    });
+    const nextMessage = () =>
+      Promise.race([
+        new Promise<unknown>((resolve) => child.once("message", resolve)),
+        exited.then(({ code, signal }) => {
+          throw new Error(`Telemetry child exited early (${code}, ${signal}). ${stderr}`);
+        }),
+        timedOut,
+      ]);
+    try {
+      assert.ok(telemetry instanceof NodeNet.Socket);
+      telemetry.allowHalfOpen = true;
+      assert.equal(await nextMessage(), "ready");
+      stage = "waiting for hello";
+      const healthy = nextMessage();
+      // NDJSON framing must survive both split writes and empty lines.
+      telemetry.write('\n{"version":1,"type":"desktopTelemetry');
+      telemetry.write('Hello","electronPid":1}\n');
+      assert.equal(await healthy, "healthy");
+      stage = "receiver cleanup";
+      const finalized = nextMessage();
+      child.send("stop");
+      assert.equal(await finalized, "finalized");
+      stage = "process exit after receiver cleanup";
+      assert.equal(telemetry.writableEnded, false);
+      assert.deepEqual(await Promise.race([exited, timedOut]), { code: 0, signal: null });
+    } finally {
+      clearTimeout(deadline);
+      // Closing the writer is cleanup only, never what allows this test to pass.
+      telemetry?.destroy();
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      await exited.catch(() => undefined);
+      NodeFS.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("degrades a hello-only stream after the first-sample deadline", () => {
     expect(isDesktopTelemetryContactStale(Option.some(1_000), 90_999)).toBe(false);
     expect(isDesktopTelemetryContactStale(Option.some(1_000), 91_000)).toBe(true);

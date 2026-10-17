@@ -98,6 +98,11 @@ minimumReleaseAgeExclude:
   - cn@0.3.2
 
 overrides:
+  # Security fixes within the existing major versions. Keep the router and
+  # retained Claude history dependencies clear of the published advisories.
+  "seroval@<1.6.3": 1.6.3
+  "proxy-addr@>=1.1.0 <2.0.8": 2.0.8
+  "@modelcontextprotocol/sdk@>=1.12.0 <1.31.0": 1.31.0
   # Earlier React Navigation declarations create a circular type alias in TypeScript 7.
   "@react-navigation/core": 7.21.13
   # The dbus-next patch drops usocket from the package, but pnpm resolves from the

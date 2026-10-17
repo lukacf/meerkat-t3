@@ -58,6 +58,7 @@ impl Fixture {
         let store = Arc::new(ControlledStore::default());
         Self {
             auth: DesktopProviderAuth {
+                auth_scope: Ok(None),
                 global_config_path: default_global_config_path(),
                 copilot_accounts: Default::default(),
                 account_mutations: Default::default(),
@@ -82,7 +83,7 @@ impl Fixture {
     }
 
     async fn config(&self) -> Config {
-        self.auth.global_runtime().get().await.unwrap().config
+        self.auth.global_runtime().unwrap().get().await.unwrap().config
     }
 }
 
@@ -133,7 +134,7 @@ async fn removing_copilot_deletes_all_routes_defaults_and_only_its_profiles_afte
     let other = fixture.configure("github-copilot", "Other").await;
     let direct = fixture.configure("openai-api-key", "Direct").await;
     assert_eq!(account["supportsRemoval"], true);
-    let runtime = fixture.auth.global_runtime();
+    let runtime = fixture.auth.global_runtime().unwrap();
     runtime
         .patch(
             ConfigDelta(json!({
@@ -219,7 +220,7 @@ async fn deleting_one_key_preserves_shared_profiles_and_other_account_credential
     let first_target = resolve_target(&before, target(&first).as_object().unwrap()).unwrap();
     let second_target = resolve_target(&before, target(&second).as_object().unwrap()).unwrap();
     let route = &before.realm["global"].binding[first["bindingId"].as_str().unwrap()];
-    fixture.auth.global_runtime().patch(ConfigDelta(json!({"realm":{"global":{"default_binding":second["bindingId"],"binding":{
+    fixture.auth.global_runtime().unwrap().patch(ConfigDelta(json!({"realm":{"global":{"default_binding":second["bindingId"],"binding":{
         second["bindingId"].as_str().unwrap():{"auth_profile":route.auth_profile,"backend_profile":route.backend_profile}
     }}}})), None).await.unwrap();
     let shared = fixture.config().await;
@@ -285,7 +286,7 @@ async fn disconnected_accounts_remain_removable_but_logout_preserves_config() {
         .delete_account(Some(&target(row)))
         .await
         .unwrap();
-    assert!(fixture.config().await.realm["global"].binding.is_empty());
+    assert!(fixture.config().await.realm.get("global").is_none_or(|realm| realm.binding.is_empty()));
 }
 
 #[tokio::test]
@@ -317,7 +318,7 @@ async fn removal_rejects_stale_profiles_project_scope_and_external_credentials_w
     };
     fixture
         .auth
-        .global_runtime()
+        .global_runtime().unwrap()
         .set(config, None)
         .await
         .unwrap();
@@ -388,7 +389,7 @@ async fn concurrent_config_write_reports_partial_removal_and_preserves_the_new_w
         fixture.store.entered.notified().await;
         fixture
             .auth
-            .global_runtime()
+            .global_runtime().unwrap()
             .patch(ConfigDelta(json!({"max_tokens":8765})), None)
             .await
             .unwrap();
@@ -420,7 +421,7 @@ async fn concurrent_config_write_reports_partial_removal_and_preserves_the_new_w
             .is_none()
     );
     fixture.auth.delete_account(Some(&input)).await.unwrap();
-    assert!(fixture.config().await.realm["global"].binding.is_empty());
+    assert!(fixture.config().await.realm.get("global").is_none_or(|realm| realm.binding.is_empty()));
 }
 
 #[tokio::test]
@@ -483,7 +484,7 @@ async fn credential_update_waiting_on_removal_cannot_recreate_the_removed_accoun
     };
     let (result, ()) = tokio::join!(removal, late_update);
     assert_eq!(result.unwrap()["deleted"], true);
-    assert!(fixture.config().await.realm["global"].binding.is_empty());
+    assert!(fixture.config().await.realm.get("global").is_none_or(|realm| realm.binding.is_empty()));
     assert!(fixture.store.list().await.unwrap().is_empty());
 }
 

@@ -1,4 +1,18 @@
+import { makeSharedDelegationService } from "./shared/SharedDelegationService.ts";
+import { makeSharedLocalCheckoutValidator } from "./shared/SharedLocalCheckoutValidator.ts";
+import { makeSharedLocalDelegationService } from "./shared/SharedLocalDelegationService.ts";
+import { sharedDelegationRemote } from "./shared/SharedDelegationRemote.ts";
+import { makeSharedLocalNativeResolver } from "./shared/SharedLocalNativeResolver.ts";
+import { makeSharedDelegationInvoker } from "./shared/SharedDelegationInvoker.ts";
+import { makeSharedNativeToolRouter } from "./shared/SharedNativeToolRouter.ts";
 import { makeMeerkatWorkspaceCheckpoints } from "./provider/meerkat/MeerkatWorkspaceCheckpoints.ts";
+import { makeSharedWorkspaceStore } from "./shared/SharedWorkspaceStore.ts";
+import { makeSharedCompositionService } from "./shared/SharedCompositionService.ts";
+import { SharedToolHost } from "./shared/SharedToolHost.ts";
+import { makeSharedToolService } from "./shared/SharedToolService.ts";
+import { makeSharedRepositoryReader } from "./shared/SharedRepositoryReader.ts";
+import { makeSharedSpecialistService } from "./shared/SharedSpecialistService.ts";
+import { makeSharedWorkspaceRpcLayer } from "./shared/SharedWorkspaceRpc.ts";
 import { makeMeerkatUsageService } from "./provider/meerkat/MeerkatUsageService.ts";
 import { ensureNativeProviderSettingsIntent } from "./providerSettingsIntent.ts";
 import {
@@ -98,6 +112,7 @@ import {
   type PullRequestRef,
   WS_METHODS,
   WsRpcGroup,
+  WorkbenchRpcGroup,
   WORKTREE_SETUP_ACTIVITY_KIND,
   worktreeSetupActivityId,
   type WorktreeSetupSnapshot,
@@ -542,7 +557,7 @@ const makeWsRpcLayer = (
   previewAutomationBroker: PreviewAutomationBroker.PreviewAutomationBroker["Service"],
   meerkat: Effect.Success<typeof makeMeerkatServerServices>,
 ) =>
-  WsRpcGroup.toLayer(
+  WorkbenchRpcGroup.toLayer(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
       const crypto = yield* Crypto.Crypto;
@@ -1512,7 +1527,9 @@ const makeWsRpcLayer = (
               // no-op once the snapshot has been dropped.
               const completionFiber = yield* setupResult.completion.pipe(
                 Effect.tap((completion) =>
-                  updatePreparedTurn({ setup: completion.exitCode === 0 ? "finished" : "failed" }),
+                  updatePreparedTurn({
+                    setup: completion.exitCode === 0 ? "finished" : "failed",
+                  }),
                 ),
                 Effect.flatMap((completion) => {
                   if (completion.exitCode === 0) {
@@ -2270,7 +2287,7 @@ const makeWsRpcLayer = (
           Effect.andThen(work),
         );
 
-      return WsRpcGroup.of({
+      return WorkbenchRpcGroup.of({
         [ORCHESTRATION_WS_METHODS.retryPreparedTurn]: (input) =>
           observeRpcEffect(
             ORCHESTRATION_WS_METHODS.retryPreparedTurn,
@@ -4576,7 +4593,7 @@ const makeWsRpcLayer = (
           ),
       });
     }),
-  );
+  ).pipe(Layer.merge(makeSharedWorkspaceRpcLayer(currentSession, meerkat)));
 
 // Native queue ownership and observation outlive any client connection. One shared
 // service instance also lets a mutation on one socket wake subscribers on another.
@@ -4602,10 +4619,64 @@ const makeMeerkatServerServices = Effect.gen(function* () {
   const meerkatControls = yield* makeMeerkatControlsService(meerkatTeam);
   const meerkatAgentQueue = yield* makeMeerkatAgentQueueService(meerkatTeam, meerkatControls);
   const meerkatAttention = yield* makeMeerkatAttentionService(meerkatTeam, meerkatControls);
+  const sharedWorkspace = yield* makeSharedWorkspaceStore;
+  const sharedSpecialists = yield* makeSharedSpecialistService(sharedWorkspace, meerkatTeam);
+  const sharedComposition = yield* makeSharedCompositionService(sharedWorkspace, meerkatTeam);
+  const sharedDelegations = yield* makeSharedDelegationService(sharedWorkspace);
+  const sharedDelegationInvoker = makeSharedDelegationInvoker(
+    sharedWorkspace,
+    sharedDelegations,
+    sharedSpecialists,
+  );
+  const sharedLocalDelegations = yield* makeSharedLocalDelegationService(
+    sharedDelegationRemote,
+    yield* makeSharedLocalNativeResolver(meerkatTeam),
+    yield* makeSharedLocalCheckoutValidator(sharedDelegationRemote),
+  );
+  const sharedTools = yield* SharedToolHost;
+  if (sharedTools) {
+    const repositories = yield* makeSharedRepositoryReader(sharedWorkspace);
+    const tools = yield* makeSharedToolService(
+      sharedWorkspace,
+      sharedSpecialists,
+      meerkatTeam,
+      repositories,
+      sharedComposition,
+      { environmentId: yield* (yield* ServerEnvironment.ServerEnvironment).getEnvironmentId },
+    );
+    const router = yield* makeSharedNativeToolRouter(tools, sharedLocalDelegations);
+    const runPromise = Effect.runPromiseWith(yield* Effect.context<never>());
+    const uninstall = sharedTools.install((invocation, signal) =>
+      runPromise(
+        router.invoke(invocation).pipe(
+          Effect.catch((error) =>
+            Effect.succeed({
+              content: { code: error.code, message: error.message },
+              isError: true,
+            }),
+          ),
+        ),
+        { signal },
+      ),
+    );
+    yield* Effect.addFinalizer(() => Effect.sync(uninstall));
+  }
   yield* meerkatAgentQueue.recoverInterrupted;
   yield* Effect.forkScoped(meerkatAgentQueue.run);
   yield* Effect.forkScoped(meerkatAttention.run);
-  return { meerkatTeam, meerkatControls, meerkatAgentQueue, meerkatAttention };
+  yield* Effect.forkScoped(sharedComposition.run);
+  return {
+    meerkatTeam,
+    meerkatControls,
+    meerkatAgentQueue,
+    meerkatAttention,
+    sharedWorkspace,
+    sharedSpecialists,
+    sharedComposition,
+    sharedDelegations,
+    sharedLocalDelegations,
+    sharedDelegationInvoker,
+  };
 });
 
 export const websocketRpcRouteLayer = Layer.unwrap(

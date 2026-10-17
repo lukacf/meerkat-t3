@@ -814,7 +814,11 @@ export const makeMeerkatProjectProposalService = (deps: {
             fingerprint,
             assignmentId: `domain-recon-${candidate.role}-${fingerprint.slice(0, 16)}`,
           };
-          const instructions = `You are ${candidate.label}, a long-lived project specialist.\nFocus: ${candidate.focus}\nCharter: ${candidate.charter}\nOwnership paths: ${candidate.ownershipPaths.join(", ")}\nPreserve this domain's context and collaborate through native Meerkat messaging. Re-inspect relevant working files before giving advice or making changes; previous study is a dated snapshot. Make changes only when explicitly tasked.`;
+          const collaboration =
+            input.accessMode === "repository-read-only"
+              ? "Preserve this domain's context. Collaborate through attributed requests in the shared workspace; direct peer messaging, shell commands and file changes are unavailable. Re-inspect relevant repository files before giving advice; previous study is a dated snapshot."
+              : "Preserve this domain's context and collaborate through native Meerkat messaging. Re-inspect relevant working files before giving advice or making changes; previous study is a dated snapshot. Make changes only when explicitly tasked.";
+          const instructions = `You are ${candidate.label}, a long-lived project specialist.\nFocus: ${candidate.focus}\nCharter: ${candidate.charter}\nOwnership paths: ${candidate.ownershipPaths.join(", ")}\n${collaboration}`;
           let revised = false;
           const requestId = `proposal:${input.proposalId}:${candidateId}`;
           const saved = yield* deps.store.list(input.projectId);
@@ -849,6 +853,15 @@ export const makeMeerkatProjectProposalService = (deps: {
                 item.role === candidate.role &&
                 !item.archived,
             );
+          if (
+            row &&
+            input.accessMode === "repository-read-only" &&
+            row.access_mode !== "repository-read-only"
+          )
+            return yield* failure(
+              input.projectId,
+              "An existing local agent owns this role with different permissions. It was not changed or shared. Propose a distinct role for the shared specialist.",
+            );
           if (row) {
             const existing = row.assignment_json
               ? yield* decodeAgentAssignment(row.assignment_json).pipe(
@@ -856,6 +869,16 @@ export const makeMeerkatProjectProposalService = (deps: {
                 )
               : null;
             if (!existing || existing.fingerprint !== fingerprint) {
+              if (row.access_mode === "repository-read-only") {
+                const registered = yield* sql`SELECT specialist_id FROM shared_specialists
+                  WHERE native_project_id=${input.projectId} AND native_instance_id=${row.instance_id}
+                  AND native_agent_id=${row.agent_id}`;
+                if (registered.length)
+                  return yield* failure(
+                    input.projectId,
+                    "This specialist is already shared. Revise its assignments through the shared workspace to preserve shared composition history.",
+                  );
+              }
               row = yield* deps.revise(
                 input.projectId,
                 row,

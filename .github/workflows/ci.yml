@@ -56,7 +56,7 @@ jobs:
   native_macos:
     name: Mac native integration
     runs-on: macos-15
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_INCREMENTAL: "0"
@@ -107,6 +107,20 @@ jobs:
         run: pnpm build:desktop
       - name: Verify preload bundle
         run: node apps/desktop/scripts/verify-preload-bundle.mjs
+      - name: Qualify local workflows, shared collaboration and offline recovery
+        run: >-
+          pnpm release:qualify
+          --server-entry "$GITHUB_WORKSPACE/apps/server/dist/bin.mjs"
+          --runtime-dir "$GITHUB_WORKSPACE/apps/server/resources/meerkat-runtime"
+          --evidence-dir "$RUNNER_TEMP/meerkat-release-qualification"
+      - name: Retain qualification results and cleanup receipts
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: meerkat-native-qualification-${{ github.sha }}
+          path: ${{ runner.temp }}/meerkat-release-qualification/
+          if-no-files-found: ignore
+          retention-days: 14
 
   secrets:
     name: Secret scan

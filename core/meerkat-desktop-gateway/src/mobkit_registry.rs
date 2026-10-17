@@ -11,7 +11,7 @@ use meerkat_core::service::{SessionError, SessionQuery, SessionServiceCommsExt};
 use meerkat_core::session_store::SessionStoreError;
 use meerkat_core::{
     derive_workspace_realm_id, ConfigDelta, ConfigError, ConfigRuntime, ConfigSnapshot,
-    ConfigStore, EffectiveConfigReader, FileConfigStore, ModelCatalog, RealmConfigSource,
+    ConfigStore, EffectiveConfigReader, FileConfigStore, RealmConfigSource,
 };
 use meerkat_mob::store::{MobSpecStore, SqliteMobStores};
 use meerkat_mob::{
@@ -34,7 +34,6 @@ use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::host_tools::HostToolTransport;
@@ -49,6 +48,8 @@ type ObserverDisposalRegistry =
     std::sync::Mutex<BTreeMap<PathBuf, Arc<MobStoreObserverDisposal>>>;
 #[cfg(test)]
 mod initial_model_tests;
+#[cfg(test)]
+mod config_write_tests;
 #[cfg(test)]
 mod observer_registration_tests;
 #[cfg(test)]
@@ -142,6 +143,7 @@ pub struct ProjectMobkitRegistry {
     observer_disposals: ObserverDisposalRegistry,
     admission: RwLock<bool>,
     host_tools: Arc<HostToolTransport>,
+    shared_tools: Arc<crate::shared_specialist::SharedWorkspaceHost>,
     #[cfg(test)]
     test_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
 }
@@ -176,81 +178,6 @@ pub struct EffectiveRealmConfig {
     pub head_store: Arc<dyn ConfigStore>,
     pub source: Arc<dyn RealmConfigSource>,
     pub realm_id: RealmId,
-}
-
-/// Raw-head filesystem store whose merge-patch path preserves TOML key
-/// presence. The upstream FileConfigStore typed patch path reserializes every
-/// `Config::default()` section; in an inherited realm, those newly materialized
-/// empty tables are meaningful tombstones (not harmless formatting) and can
-/// erase inherited self-hosted aliases or scalar policy. Desktop config writes
-/// therefore retain the raw document shape while still delegating typed reads,
-/// full replacements, and canonical validation to Meerkat.
-pub(crate) struct PresencePreservingFileConfigStore {
-    path: PathBuf,
-    catalog: ModelCatalog,
-}
-
-impl PresencePreservingFileConfigStore {
-    pub(crate) fn new(path: PathBuf, catalog: ModelCatalog) -> Self {
-        Self { path, catalog }
-    }
-
-    fn typed_store(&self) -> FileConfigStore {
-        FileConfigStore::new(self.path.clone(), self.catalog)
-    }
-}
-
-#[async_trait::async_trait]
-impl ConfigStore for PresencePreservingFileConfigStore {
-    async fn get(&self) -> Result<Config, ConfigError> {
-        self.typed_store().get().await
-    }
-
-    async fn set(&self, config: Config) -> Result<(), ConfigError> {
-        self.typed_store().set(config).await
-    }
-
-    async fn patch(&self, delta: ConfigDelta) -> Result<Config, ConfigError> {
-        let mut raw_json = if tokio::fs::try_exists(&self.path).await? {
-            let content = tokio::fs::read_to_string(&self.path).await?;
-            let raw: toml::Value = toml::from_str(&content).map_err(ConfigError::Parse)?;
-            serde_json::to_value(raw).map_err(ConfigError::Json)?
-        } else {
-            json!({})
-        };
-        meerkat_core::merge_patch(&mut raw_json, delta.0);
-        let updated: Config =
-            serde_json::from_value(raw_json.clone()).map_err(ConfigError::Json)?;
-        updated.validate(self.catalog)?;
-
-        if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        // Serialize the presence-preserving raw document, not `updated`.
-        let content = toml::to_string_pretty(&raw_json).map_err(ConfigError::TomlSerialize)?;
-        let parent = self
-            .path
-            .parent()
-            .map_or_else(|| PathBuf::from("."), std::path::Path::to_path_buf);
-        let tmp_path = parent.join(format!(".config.tmp.{}", uuid::Uuid::new_v4()));
-        let write_result = async {
-            let mut tmp = tokio::fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&tmp_path)
-                .await?;
-            tmp.write_all(content.as_bytes()).await?;
-            tmp.sync_all().await?;
-            drop(tmp);
-            tokio::fs::rename(&tmp_path, &self.path).await
-        }
-        .await;
-        if write_result.is_err() {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-        }
-        write_result?;
-        Ok(updated)
-    }
 }
 
 /// Compose and validate an effective realm view over an authoritative raw-head
@@ -306,6 +233,15 @@ pub async fn load_effective_realm_config(
     project_path: &std::path::Path,
     config_state_root: &std::path::Path,
 ) -> Result<EffectiveRealmConfig, String> {
+    let global_doc = realm_global_config_path(config_state_root)?;
+    load_effective_realm_config_with_global(project_path, config_state_root, &global_doc).await
+}
+
+pub(crate) async fn load_effective_realm_config_with_global(
+    project_path: &std::path::Path,
+    config_state_root: &std::path::Path,
+    global_doc: &std::path::Path,
+) -> Result<EffectiveRealmConfig, String> {
     std::fs::create_dir_all(config_state_root).map_err(|error| {
         format!(
             "failed to create realm config state root {}: {error}",
@@ -314,17 +250,21 @@ pub async fn load_effective_realm_config(
     })?;
     let realm_id = RealmId::parse(&derive_workspace_realm_id(project_path))
         .map_err(|error| format!("invalid workspace realm id: {error}"))?;
-    let global_doc = realm_global_config_path(config_state_root);
     let concrete_source = Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
         config_state_root,
         global_doc,
         meerkat_models::canonical(),
     ));
     let source: Arc<dyn RealmConfigSource> = concrete_source.clone();
-    let head_store: Arc<dyn ConfigStore> = Arc::new(PresencePreservingFileConfigStore::new(
-        concrete_source.config_doc_path(&realm_id),
-        meerkat_models::canonical(),
-    ));
+    // Native patches preserve document presence and enforce administration
+    // checks over the same realm chain used by runtime construction.
+    let head_store: Arc<dyn ConfigStore> = Arc::new(
+        FileConfigStore::new(
+            concrete_source.config_doc_path(&realm_id),
+            meerkat_models::canonical(),
+        )
+        .with_realm_chain(realm_id.clone(), Arc::clone(&source)),
+    );
     let raw_head = head_store
         .get()
         .await
@@ -344,30 +284,41 @@ pub async fn load_effective_realm_config(
     })
 }
 
-fn realm_global_config_path(config_state_root: &std::path::Path) -> std::path::PathBuf {
+fn realm_global_config_path(config_state_root: &std::path::Path) -> Result<std::path::PathBuf, String> {
+    if let Some(scope) = crate::desktop_auth_scope::DesktopAuthScope::from_env()? {
+        return Ok(scope.global_config_path());
+    }
     #[cfg(not(test))]
     {
-        Config::global_config_path()
-            .unwrap_or_else(|| config_state_root.join("__no_global__").join("config.toml"))
+        Ok(Config::global_config_path()
+            .unwrap_or_else(|| config_state_root.join("__no_global__").join("config.toml")))
     }
     #[cfg(test)]
     {
         // Each fixture owns its entire config chain, including the global layer.
         // Never inherit the developer's credentials or provider policy in tests.
-        config_state_root
+        Ok(config_state_root
             .join("__test_global__")
-            .join("config.toml")
+            .join("config.toml"))
     }
 }
 
 impl ProjectMobkitRegistry {
     pub fn new(host_tools: Arc<HostToolTransport>) -> Self {
+        Self::with_shared_tools(host_tools, Arc::new(crate::shared_specialist::SharedWorkspaceHost::default()))
+    }
+
+    pub(crate) fn with_shared_tools(
+        host_tools: Arc<HostToolTransport>,
+        shared_tools: Arc<crate::shared_specialist::SharedWorkspaceHost>,
+    ) -> Self {
         Self {
             mobs: RwLock::new(HashMap::new()),
             local_bootstrap_locks: Mutex::new(HashMap::new()),
             observer_disposals: ObserverDisposalRegistry::default(),
             admission: RwLock::new(true),
             host_tools,
+            shared_tools,
             #[cfg(test)]
             test_llm_client: None,
         }
@@ -388,6 +339,7 @@ impl ProjectMobkitRegistry {
             observer_disposals: ObserverDisposalRegistry::default(),
             admission: RwLock::new(true),
             host_tools,
+            shared_tools: Arc::new(crate::shared_specialist::SharedWorkspaceHost::default()),
             test_llm_client: Some(test_llm_client),
         }
     }
@@ -488,6 +440,7 @@ impl ProjectMobkitRegistry {
             Arc::clone(&self.host_tools),
             test_llm_client,
             Some(&self.observer_disposals),
+            Some(&self.shared_tools),
         ).await?;
         let mob = Arc::new(bootstrapped);
         self.mobs
@@ -1167,9 +1120,10 @@ async fn build_ui_mcp_dispatcher(
     // Fail-closed staging requires a runtime-backed surface handle; the unbound
     // default handle rejects `stage_add`. An ephemeral handle lets us stage and
     // connect the server outside of a live session.
-    let mut router = McpRouter::new_with_surface_handle(Arc::new(
-        meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
-    ));
+    let mut router = McpRouter::new_with_surface_handle_and_stdio_profile(
+        Arc::new(meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral()),
+        meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
+    );
     let mut env = HashMap::new();
     env.insert("MEERKAT_UI_BRIDGE_URL".to_string(), bridge_url);
     env.insert("MEERKAT_UI_BRIDGE_TOKEN".to_string(), bridge_token);
@@ -1278,9 +1232,10 @@ async fn connect_project_agent_proposal_dispatcher(
         vec![server_js],
         HashMap::new(),
     );
-    let mut router = McpRouter::new_with_surface_handle(Arc::new(
-        meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
-    ))
+    let mut router = McpRouter::new_with_surface_handle_and_stdio_profile(
+        Arc::new(meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral()),
+        meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
+    )
     .with_call_context_provider(Arc::new(PureProjectAgentProposal {
         selected: selected.clone(),
     }));
@@ -1360,7 +1315,7 @@ async fn bootstrap_local_runtime(
     input: CreateMobInput,
     host_tools: Arc<HostToolTransport>,
 ) -> Result<MobkitMobRuntime, String> {
-    bootstrap_local_runtime_inner(input, host_tools, None, None).await
+    bootstrap_local_runtime_inner(input, host_tools, None, None, None).await
 }
 
 async fn bootstrap_local_runtime_inner(
@@ -1368,6 +1323,7 @@ async fn bootstrap_local_runtime_inner(
     host_tools: Arc<HostToolTransport>,
     test_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
     observer_disposals: Option<&ObserverDisposalRegistry>,
+    shared_host: Option<&crate::shared_specialist::SharedWorkspaceHost>,
 ) -> Result<MobkitMobRuntime, String> {
     let proposal_dispatcher = if input.kind == "thread" {
         project_agent_proposal_dispatcher().await?
@@ -1380,6 +1336,7 @@ async fn bootstrap_local_runtime_inner(
         test_llm_client,
         proposal_dispatcher,
         observer_disposals,
+        shared_host,
     )
     .await
 }
@@ -1390,6 +1347,7 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
     test_llm_client: Option<Arc<dyn meerkat::LlmClient>>,
     proposal_dispatcher: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
     observer_disposals: Option<&ObserverDisposalRegistry>,
+    shared_host: Option<&crate::shared_specialist::SharedWorkspaceHost>,
 ) -> Result<MobkitMobRuntime, String> {
     // The desktop is the credential owner and opts into Keychain-aware native
     // persistence. Tests can exercise the same runtime with an isolated store.
@@ -1399,6 +1357,7 @@ async fn bootstrap_local_runtime_with_proposal_dispatcher(
     bootstrap_local_runtime_with_provider_persistence(
         input, host_tools, test_llm_client, proposal_dispatcher, persistence,
         observer_disposals,
+        shared_host,
     ).await
 }
 
@@ -1430,6 +1389,7 @@ async fn bootstrap_local_runtime_with_provider_persistence(
     proposal_dispatcher: Option<Arc<dyn meerkat_core::AgentToolDispatcher>>,
     provider_auth_persistence: meerkat_providers::auth_store::ProviderAuthPersistence,
     observer_disposals: Option<&ObserverDisposalRegistry>,
+    shared_host: Option<&crate::shared_specialist::SharedWorkspaceHost>,
 ) -> Result<MobkitMobRuntime, String> {
     let (mob_root, _, mob_db_path) = local_mob_storage(&input);
     std::fs::create_dir_all(&mob_root).map_err(|error| error.to_string())?;
@@ -1464,6 +1424,20 @@ async fn bootstrap_local_runtime_with_provider_persistence(
         return Err("Supervised access is available for threads and their workers, not project agents.".into());
     }
     let desktop_access_mode = crate::native_approvals::resolve_mode(&mob_root, existing_mob, input.access_mode, definition_access_mode)?;
+    let shared_specialist = desktop_access_mode == crate::native_execution_modes::ExecutionMode::RepositoryReadOnly;
+    let local_collaborator = desktop_access_mode == crate::native_execution_modes::ExecutionMode::ReadAndCollaborate;
+    let restricted_specialist = shared_specialist || local_collaborator;
+    if shared_specialist && input.kind != "domain" {
+        return Err("Repository-read-only access is reserved for shared project specialists".into());
+    }
+    if local_collaborator && input.kind != "domain" {
+        return Err("Read-and-collaborate access is reserved for local project specialists".into());
+    }
+    let shared_tools = if shared_specialist {
+        Some(shared_host.ok_or("The shared workspace tool host is not configured")?.dispatcher(&input.mob_id)?)
+    } else if input.kind == "thread" {
+        shared_host.and_then(|host| host.local_dispatcher(&input.mob_id))
+    } else { None };
     if input.kind == "domain" && desktop_access_mode == crate::native_execution_modes::ExecutionMode::Approvals {
         return Err("Supervised access is available for threads and their workers. Project agents require the native responsibility-revision host, which this runtime cannot compose with the approval builder.".into());
     }
@@ -1507,19 +1481,24 @@ async fn bootstrap_local_runtime_with_provider_persistence(
         &runtime_adapter,
         mob_root.clone(),
     );
-    let factory = AgentFactory::new(&mob_root)
+    let convention_root = if shared_specialist { mob_root.join("shared-host-context") }
+        else if local_collaborator { mob_root.join("local-specialist-context") }
+        else { input.project_path.clone() };
+    if restricted_specialist { std::fs::create_dir_all(&convention_root).map_err(|error| error.to_string())?; }
+    let mut factory = AgentFactory::new(&mob_root)
         .with_provider_auth_persistence(provider_auth_persistence)
         .session_store(session_store.clone())
         .runtime_root(mob_root.clone())
-        .project_root(input.project_path.clone())
-        .context_root(input.project_path.clone())
-        .builtins(true)
-        .shell(true)
-        .mob(true)
+        .project_root(convention_root.clone())
+        .context_root(convention_root.clone())
+        .builtins(!restricted_specialist)
+        .shell(!restricted_specialist)
+        .mob(!restricted_specialist)
         .comms(true)
-        .memory(true)
-        .schedule(true)
-        .workgraph(true);
+        .memory(!restricted_specialist)
+        .schedule(!restricted_specialist)
+        .workgraph(!restricted_specialist);
+    if restricted_specialist { factory = factory.user_config_root(convention_root); }
     let realm_config =
         load_effective_realm_config(&input.config_project_path, &input.config_state_root).await?;
     let runtime_config_store = configured_auth::mob_config_store(
@@ -1530,15 +1509,19 @@ async fn bootstrap_local_runtime_with_provider_persistence(
         &input.mob_id,
         realm_config.realm_id.clone(),
     )?;
+    let builder_config: Arc<dyn ConfigStore> = if restricted_specialist {
+        Arc::new(crate::shared_specialist::RestrictedSpecialistConfigStore {
+            inner: runtime_config_store.clone(), source: Arc::clone(&realm_config.source), head: realm_config.realm_id.clone(),
+        })
+    } else { runtime_config_store.clone() };
     let mut builder = FactoryAgentBuilder::new_with_config_store(
         factory,
         realm_config.raw_head,
-        runtime_config_store.clone(),
-    )
-    .with_realm_inheritance(
-        Arc::clone(&realm_config.source),
-        realm_config.realm_id.clone(),
+        builder_config,
     );
+    if !restricted_specialist {
+        builder = builder.with_realm_inheritance(Arc::clone(&realm_config.source), realm_config.realm_id.clone());
+    }
     // `test_llm_client` is reachable only through the cfg(test) constructor
     // above. Keeping it on the factory-backed session service lets the proof
     // exercise the real MobKit turn pipeline without exposing a production
@@ -1693,7 +1676,8 @@ async fn bootstrap_local_runtime_with_provider_persistence(
             .and_then(|metadata| metadata.session_metadata)
             .ok_or_else(|| "The saved conversation has no native access policy metadata".to_string())?;
         let native_mode = crate::native_execution_modes::persisted_mode(saved.tooling.tool_access_policy.as_ref())?;
-        if native_mode != definition_access_mode { return Err("Saved native tool policy differs from the mob definition".into()); }
+        let expected_native_mode = if restricted_specialist { desktop_access_mode } else { definition_access_mode };
+        if native_mode != expected_native_mode { return Err("Saved native tool policy differs from the mob definition".into()); }
         desktop_access_mode
     } else { desktop_access_mode };
     let mut spec = MobBootstrapSpec::new(definition, storage, session_service)
@@ -1716,9 +1700,14 @@ async fn bootstrap_local_runtime_with_provider_persistence(
     // The native gateway preserves each tool owner's mutation declaration.
     // ComposedExternalTools in this release does not project those declarations,
     // so file readers, questions and the pure proposal tool use their own children.
-    let mut tools = meerkat_core::ToolGatewayBuilder::new()
-        .add_dispatcher(crate::native_execution_modes::workspace_reader(input.project_path.clone()))
-        .add_dispatcher(crate::browser_bridge::dispatcher(input.project_path.clone(), input.state_root.clone(), input.mob_id.clone()));
+    let mut tools = meerkat_core::ToolGatewayBuilder::new();
+    if let Some(shared) = shared_tools { tools = tools.add_dispatcher(shared); }
+    if !shared_specialist {
+        tools = tools.add_dispatcher(crate::native_execution_modes::workspace_reader(input.project_path.clone()));
+    }
+    if !restricted_specialist {
+        tools = tools
+            .add_dispatcher(crate::browser_bridge::dispatcher(input.project_path.clone(), input.state_root.clone(), input.mob_id.clone()));
     if let Some(questions) = crate::user_questions::dispatcher(
         input.project_path.clone(), input.state_root.clone(), input.mob_id.clone(),
     ) {
@@ -1726,6 +1715,7 @@ async fn bootstrap_local_runtime_with_provider_persistence(
     }
     if let Some(proposal) = proposal_dispatcher {
         tools = tools.add_dispatcher(proposal);
+    }
     }
     let dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> = Arc::new(
         tools.build().map_err(|error| format!("Cannot assemble workspace read tools: {error}"))?,
@@ -1860,7 +1850,7 @@ async fn bootstrap_local_runtime_with_provider_persistence(
         // agents get the thread-independent UI tools only (they serve many
         // threads, so there is no single thread_id to bind flow tools to).
         // Building the dispatcher spawns a node MCP child, so skip other kinds.
-        let fallback = if input.kind == "thread" || input.kind == "domain" {
+        let fallback = if !shared_specialist && (input.kind == "thread" || input.kind == "domain") {
             build_ui_mcp_dispatcher(input.kind == "thread").await
         } else {
             None
@@ -1875,8 +1865,10 @@ async fn bootstrap_local_runtime_with_provider_persistence(
                     .push(instructions);
             }
         }
-        let host_dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> = host_tools;
-        spawn.external_tools = Some(ComposedExternalTools::over(host_dispatcher, fallback));
+        if !shared_specialist {
+            let host_dispatcher: Arc<dyn meerkat_core::AgentToolDispatcher> = host_tools;
+            spawn.external_tools = Some(ComposedExternalTools::over(host_dispatcher, fallback));
+        }
         if let Err(error) = runtime.spawn(spawn).await {
             // `spawn_event_drain_task` retains the runtime Arc. A failed
             // coordinator restore must therefore shut the runtime down
@@ -2420,6 +2412,8 @@ fn classify_member_session_listing<T>(
 }
 
 fn definition_toml(input: &CreateMobInput) -> String {
+    let shared = input.access_mode == Some(crate::native_execution_modes::ExecutionMode::RepositoryReadOnly);
+    let restricted = shared || input.access_mode == Some(crate::native_execution_modes::ExecutionMode::ReadAndCollaborate);
     format!(
         r#"
 [mob]
@@ -2433,11 +2427,11 @@ external_addressable = true
 peer_description = {instructions:?}
 
 [profiles.{role}.tools]
-builtins = true
-shell = true
+builtins = {local_tools}
+shell = {local_tools}
 comms = true
-mob = true
-schedule = true
+mob = {local_tools}
+schedule = {local_tools}
 {access_policy}
 {workgraph}
 
@@ -2449,10 +2443,11 @@ auto_wire_orchestrator = false
         model = escape_toml_string(&input.model),
         runtime_mode = runtime_mode_toml(&input.kind),
         instructions = input.instructions,
+        local_tools = !restricted,
         access_policy = if input.access_mode == Some(crate::native_execution_modes::ExecutionMode::ReadOnly) {
             "read_only = true"
         } else { "" },
-        workgraph = if input.kind == "domain" {
+        workgraph = if input.kind == "domain" && !restricted {
             "workgraph = true"
         } else {
             ""
@@ -2855,6 +2850,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                     Some(llm.clone()),
                     Some(Arc::clone(&dispatcher)),
                     None,
+                    None,
                 ),
             )
             .await
@@ -2966,6 +2962,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
     struct ReadOnlyFixtureLlm {
         calls: std::sync::atomic::AtomicUsize,
         marker: std::path::PathBuf,
+        collaborate: bool,
     }
 
     #[async_trait::async_trait]
@@ -2974,7 +2971,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
             Ok(messages.to_vec())
         }
         fn stream<'a>(&'a self, request: &'a meerkat::LlmRequest) -> std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<meerkat::LlmEvent, meerkat::LlmError>> + Send + 'a>> {
-            let phase = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % 3;
+            let phase = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) % if self.collaborate { 4 } else { 3 };
             let latest = request.messages.iter().rev().find_map(|message| match message {
                 meerkat_core::Message::ToolResults { results, .. } => results.last(),
                 _ => None,
@@ -2982,20 +2979,35 @@ for await (const line of readline.createInterface({input: process.stdin})) {
             let events = match phase {
                 0 => {
                     assert!(request.tools.iter().any(|tool| tool.name.as_str() == "workspace_read_file"));
+                    if self.collaborate {
+                        assert!(request.tools.iter().any(|tool| tool.name.as_str() == "send_message"));
+                        assert!(!request.tools.iter().any(|tool| matches!(tool.name.as_str(), "shell" | "write_file" | "shared_workspace" | "browser")));
+                    }
                     vec![meerkat::LlmEvent::ToolCallComplete { id: "read-proof".into(), name: "workspace_read_file".into(), args: json!({"path":"source.txt"}), meta: None },
                          meerkat::LlmEvent::Done { outcome: meerkat::LlmDoneOutcome::Success { stop_reason: meerkat_core::StopReason::ToolUse } }]
                 }
-                1 => {
+                1 if self.collaborate => {
                     let result = latest.expect("read result");
                     assert!(!result.is_error, "{}", result.text_content());
                     assert!(result.text_content().contains("native reader composition works"));
+                    vec![meerkat::LlmEvent::ToolCallComplete { id: "peer-proof".into(), name: "peers".into(), args: json!({}), meta: None },
+                         meerkat::LlmEvent::Done { outcome: meerkat::LlmDoneOutcome::Success { stop_reason: meerkat_core::StopReason::ToolUse } }]
+                }
+                phase if phase == if self.collaborate { 2 } else { 1 } => {
+                    let result = latest.expect("read result");
+                    assert!(!result.is_error, "{}", result.text_content());
+                    if !self.collaborate { assert!(result.text_content().contains("native reader composition works")); }
                     vec![meerkat::LlmEvent::ToolCallComplete { id: "denied-shell".into(), name: "shell".into(), args: json!({"command":format!("touch '{}'", self.marker.display())}), meta: None },
                          meerkat::LlmEvent::Done { outcome: meerkat::LlmDoneOutcome::Success { stop_reason: meerkat_core::StopReason::ToolUse } }]
                 }
                 _ => {
                     let result = latest.expect("shell denial");
                     assert!(result.is_error);
-                    assert!(result.text_content().contains("access_denied"), "{}", result.text_content());
+                    // Collaboration mode never installs an executor; legacy read-only mode
+                    // installs one behind an access guard. Both must prevent the mutation.
+                    let denied = if self.collaborate { "tool_not_found" } else { "access_denied" };
+                    let failure: Value = serde_json::from_str(&result.text_content()).unwrap();
+                    assert_eq!(failure["error"], denied, "{}", result.text_content());
                     assert!(!self.marker.exists());
                     vec![meerkat::LlmEvent::TextDelta { delta: "Read-only enforcement verified.".into(), meta: None },
                          meerkat::LlmEvent::Done { outcome: meerkat::LlmDoneOutcome::Success { stop_reason: meerkat_core::StopReason::EndTurn } }]
@@ -3008,8 +3020,9 @@ for await (const line of readline.createInterface({input: process.stdin})) {
     }
 
     #[test]
-    fn read_only_mob_enforces_tools_after_restart_with_omitted_access_preference() {
-        for kind in ["sub", "domain"] {
+    fn restricted_mob_enforces_tools_after_restart_with_omitted_access_preference() {
+        use crate::native_execution_modes::ExecutionMode;
+        for (kind, access_mode) in [("sub", ExecutionMode::ReadOnly), ("domain", ExecutionMode::ReadOnly), ("domain", ExecutionMode::ReadAndCollaborate)] {
         std::thread::Builder::new().name("read-only-mob-proof".into()).stack_size(32 * 1024 * 1024).spawn(move || {
             tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_stack_size(16 * 1024 * 1024).enable_all().build().unwrap().block_on(async {
                 let fixture = std::env::temp_dir().join(format!("meerkat-read-only-mob-{}", uuid::Uuid::new_v4()));
@@ -3017,18 +3030,19 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                 std::fs::create_dir_all(&project).unwrap();
                 std::fs::write(project.join("source.txt"), "native reader composition works").unwrap();
                 let marker = project.join("must-not-exist");
-                let llm = Arc::new(ReadOnlyFixtureLlm { calls: Default::default(), marker: marker.clone() });
+                let collaborate = access_mode == ExecutionMode::ReadAndCollaborate;
+                let llm = Arc::new(ReadOnlyFixtureLlm { calls: Default::default(), marker: marker.clone(), collaborate });
                 let host = HostToolTransport::new();
                 let mut input = CreateMobInput {
                     mob_id: "readonly-proof".into(), kind: kind.into(), label: "Read-only proof".into(), role: "ingress".into(),
                     coordinator_identity: "ingress".into(), model: "gpt-5.5".into(), initial_llm: None, instructions: "Inspect repository files.".into(),
-                    thread_id: None, include_native_workers: false, access_mode: Some(crate::native_execution_modes::ExecutionMode::ReadOnly),
+                    thread_id: None, include_native_workers: false, access_mode: Some(access_mode),
                     config_project_path: project.clone(), project_path: project, state_root: fixture.join("state"), config_state_root: fixture.join("state"),
                 };
                 let mut saved_session = None;
                 for _ in 0..2 {
-                    let runtime = bootstrap_local_runtime_with_proposal_dispatcher(input.clone(), host.clone(), Some(llm.clone()), None, None).await.unwrap();
-                    assert_eq!(runtime.access_mode, crate::native_execution_modes::ExecutionMode::ReadOnly);
+                    let runtime = bootstrap_local_runtime_with_proposal_dispatcher(input.clone(), host.clone(), Some(llm.clone()), None, None, None).await.unwrap();
+                    assert_eq!(runtime.access_mode, access_mode);
                     let unified = runtime.runtime.as_ref().unwrap();
                     let session = unified.mob_handle().resolve_bridge_session_id(&member_comms_id::mob_member_id("ingress")).await.unwrap();
                     if let Some(previous) = &saved_session { assert_eq!(&session, previous); }
@@ -3041,7 +3055,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                     assert!(registry.remove(&input.mob_id).await.unwrap());
                     input.access_mode = None;
                 }
-                assert_eq!(llm.calls.load(std::sync::atomic::Ordering::SeqCst), 6);
+                assert_eq!(llm.calls.load(std::sync::atomic::Ordering::SeqCst), if collaborate { 8 } else { 6 });
                 std::fs::remove_dir_all(fixture).unwrap();
             });
         }).unwrap().join().unwrap();
@@ -3056,7 +3070,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
         ));
         let project_path = fixture.join("project");
         let state_root = fixture.join("state");
-        let global_path = realm_global_config_path(&state_root);
+        let global_path = realm_global_config_path(&state_root).unwrap();
         std::fs::create_dir_all(global_path.parent().expect("global parent"))
             .expect("create global fixture");
         let global_document = "[model_fallback]\nenabled = true\n\n[realm.global]\n";
@@ -3691,6 +3705,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
             Arc::clone(&host_tools),
             Some(llm.clone()),
             None,
+            None,
         )
         .await
         .expect("bootstrap legacy persisted mob");
@@ -3804,6 +3819,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
             },
             host_tools,
             Some(llm.clone()),
+            None,
             None,
         )
         .await

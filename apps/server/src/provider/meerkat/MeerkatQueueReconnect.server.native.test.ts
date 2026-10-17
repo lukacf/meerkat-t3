@@ -1,7 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off globalTimers:off - this opt-in integration owns real child processes, loopback HTTP and bounded failure deadlines.
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";
-import * as NodeChildProcess from "node:child_process";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
@@ -45,6 +44,11 @@ import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import { describe, expect, it } from "@effect/vitest";
 
 import { createMeerkatGatewayClient } from "./MeerkatGatewayClient.ts";
+import {
+  fixtureTimeoutMs,
+  ownedServer,
+  ownedServerShutdownBudget,
+} from "./MeerkatWorkflow.server.native.support.ts";
 
 const serverEntry = process.env.T3CODE_TEST_MEERKAT_SERVER_ENTRY;
 const serverExecutable = process.env.T3CODE_TEST_MEERKAT_SERVER_EXECUTABLE;
@@ -89,6 +93,9 @@ const decodeUserInput = Schema.decodeUnknownOption(
 );
 const decodeRuntimeInfo = Schema.decodeUnknownSync(
   Schema.Struct({ host: Schema.Struct({ realmId: Schema.String }) }),
+);
+const decodeShutdownHealth = Schema.decodeUnknownSync(
+  Schema.Struct({ shutdownHorizonMs: Schema.Number }),
 );
 const decodeNativeReceipt = Schema.decodeUnknownSync(
   Schema.Struct({ receipt: Schema.Struct({ interaction_id: Schema.String }) }),
@@ -235,92 +242,6 @@ function isolatedEnvironment(root: string, runtime: string): NodeJS.ProcessEnv {
     MEERKAT_RECONNECT_FIXTURE_KEY: fixtureKey,
     T3CODE_TELEMETRY_ENABLED: "false",
     T3CODE_OTEL_SDK_DISABLED: "true",
-  };
-}
-
-function ownedServer(
-  entry: string,
-  projectPath: string,
-  baseDir: string,
-  port: number,
-  env: NodeJS.ProcessEnv,
-) {
-  const ready = Promise.withResolvers<string>();
-  const exited = Promise.withResolvers<{ code: number | null; signal: NodeJS.Signals | null }>();
-  const child = NodeChildProcess.spawn(
-    serverExecutable ?? process.execPath,
-    [
-      entry,
-      "serve",
-      "--host",
-      "127.0.0.1",
-      "--port",
-      String(port),
-      "--base-dir",
-      baseDir,
-      "--no-browser",
-    ],
-    {
-      cwd: projectPath,
-      env: serverExecutable ? { ...env, ELECTRON_RUN_AS_NODE: "1" } : env,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      shell: false,
-    },
-  );
-  let output = "";
-  const diagnostics: string[] = [];
-  const collectDiagnostic = (chunk: string) => {
-    for (const line of chunk.split("\n")) {
-      if (/Native (attention|agent queue)/.test(line)) {
-        diagnostics.push(line.replace(/Bearer\s+\S+/g, "Bearer [redacted]"));
-        if (diagnostics.length > 10) diagnostics.shift();
-      }
-    }
-  };
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", (chunk: string) => {
-    collectDiagnostic(chunk);
-    output = (output + chunk).slice(-65_536);
-    const origin = /(?:^|\n)Connection string: ([^\r\n]+)/.exec(output)?.[1];
-    const token = /(?:^|\n)Token: ([^\r\n]+)/.exec(output)?.[1];
-    if (origin && token && output.includes("T3 Code server is ready.")) {
-      if (origin !== `http://127.0.0.1:${port}`)
-        ready.reject(new Error("Owned server reported an unexpected origin"));
-      else ready.resolve(token);
-      output = "";
-    }
-  });
-  // Startup output contains one-time credentials and QR data. Never publish it.
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", collectDiagnostic);
-  child.once("error", (error) => {
-    ready.reject(error);
-    exited.resolve({ code: null, signal: null });
-  });
-  child.once("exit", (code, signal) => {
-    exited.resolve({ code, signal });
-    ready.reject(new Error(`Owned T3 server exited (${code ?? signal})`));
-  });
-  void ready.promise.catch(() => undefined);
-  return {
-    child,
-    diagnostics,
-    ready: ready.promise,
-    async close() {
-      output = "";
-      if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
-        child.kill("SIGTERM");
-        try {
-          await bounded(exited.promise, "owned T3 server shutdown");
-        } catch (error) {
-          child.kill("SIGKILL");
-          await bounded(exited.promise, "owned T3 server forced exit", 5_000);
-          throw error;
-        }
-      }
-      return exited.promise;
-    },
   };
 }
 
@@ -481,6 +402,7 @@ async function prepareFixture(root: string, runtime: string, providerPort: numbe
   for (const directory of [
     projectPath,
     NodePath.join(baseDir, "userdata"),
+    NodePath.join(root, "evidence"),
     nativeRoot,
     env.HOME!,
     env.TMPDIR!,
@@ -497,15 +419,15 @@ async function prepareFixture(root: string, runtime: string, providerPort: numbe
     binaryPath: NodePath.join(runtime, manifest.binary),
     cwd: projectPath,
     env,
-    shutdownTimeoutMs: 15_000,
   });
   let realm: string;
+  let shutdownHorizonMs: number;
   try {
-    const actual = validateMeerkatHealth(
-      await gateway.request("system.v1.health"),
-      await gateway.request("system.v1.capabilities"),
-    );
+    const health = await gateway.request("system.v1.health");
+    const actual = validateMeerkatHealth(health, await gateway.request("system.v1.capabilities"));
     assertMeerkatBundleBuild(actual, manifest);
+    shutdownHorizonMs = decodeShutdownHealth(health).shutdownHorizonMs;
+    ownedServerShutdownBudget(shutdownHorizonMs);
     realm = decodeRuntimeInfo(
       await gateway.request("system.v1.projectRuntimeInfo", { projectPath, stateRoot: configRoot }),
     ).host.realmId;
@@ -565,7 +487,7 @@ enabled = false
     encodeSettings(settings),
     { mode: 0o600 },
   );
-  return { projectPath, baseDir, env, manifest };
+  return { projectPath, baseDir, env, manifest, shutdownHorizonMs };
 }
 
 const exchangeToken = Effect.fnUntraced(
@@ -617,29 +539,43 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
           yield* Effect.promise(() => NodeFSP.chmod(root, 0o700));
           const fixture = controlledProvider();
           let server: ReturnType<typeof ownedServer> | undefined;
+          const servers: ReturnType<typeof ownedServer>[] = [];
           yield* Effect.addFinalizer((exit) =>
             Effect.promise(async () => {
               for (const held of fixture.release) held.resolve();
+              let cleanupComplete = false;
               try {
-                await server?.close();
+                for (const owned of servers.toReversed()) await owned.close();
+                cleanupComplete = true;
               } finally {
-                fixture.provider.closeAllConnections();
-                try {
+                if (cleanupComplete) {
+                  fixture.provider.closeAllConnections();
                   if (fixture.provider.listening)
                     await new Promise<void>((resolve, reject) =>
                       fixture.provider.close((error) => (error ? reject(error) : resolve())),
                     );
-                } finally {
-                  if (Exit.isSuccess(exit)) {
-                    await NodeFSP.rm(root, { recursive: true, force: true });
-                  } else {
-                    process.stderr.write(
-                      `Queue reconnect failed; private evidence retained at ${root}\n`,
-                    );
-                  }
                 }
+                const evidence = NodePath.join(root, "evidence");
+                await NodeFSP.mkdir(evidence, { recursive: true, mode: 0o700 });
+                await NodeFSP.writeFile(
+                  NodePath.join(evidence, "queue-reconnect-acceptance.json"),
+                  encodeObservationDiagnostic({
+                    passed: Exit.isSuccess(exit) && cleanupComplete,
+                    cleanupComplete,
+                    providerErrors: fixture.errors,
+                    requests: fixture.requests,
+                    shutdown: servers.map((owned) => ({
+                      pid: owned.child.pid,
+                      code: owned.child.exitCode,
+                      signal: owned.child.signalCode,
+                      ...owned.shutdownObservation(),
+                    })),
+                  }),
+                  { mode: 0o600 },
+                );
               }
             }).pipe(
+              Effect.ensuring(Effect.logInfo(`Queue reconnect evidence retained at ${root}`)),
               Effect.ensuring(
                 Effect.suspend(() =>
                   server?.diagnostics.length
@@ -661,7 +597,7 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
             throw new Error("Provider fixture has no TCP address");
           const prepared = yield* Effect.promise(() =>
             prepareFixture(root, runtimeDirectory, address.port),
-          );
+          ).pipe(Effect.uninterruptible);
           const port = yield* Effect.promise(availablePort);
           const origin = `http://127.0.0.1:${port}`;
           server = ownedServer(
@@ -670,7 +606,10 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
             prepared.baseDir,
             port,
             prepared.env,
+            prepared.shutdownHorizonMs,
+            NodePath.join(root, "evidence/server-first-diagnostics.json"),
           );
+          servers.push(server);
           const ready = server.ready;
           const bearer = yield* exchangeToken(
             origin,
@@ -936,7 +875,10 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
             prepared.baseDir,
             port,
             prepared.env,
+            prepared.shutdownHorizonMs,
+            NodePath.join(root, "evidence/server-restarted-diagnostics.json"),
           );
+          servers.push(server);
           expect(server.child.pid).not.toBe(previousPid);
           const restartedReady = server.ready;
           const restartedBearer = yield* exchangeToken(
@@ -1056,8 +998,8 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
               expect(fixture.errors).toEqual([]);
             }),
           );
-        }),
-      { timeout: 180_000 },
+        }).pipe(Effect.timeout(180_000), Effect.scoped),
+      { timeout: fixtureTimeoutMs(180_000, 2) + 10_000 },
     );
   },
 );

@@ -4,17 +4,18 @@ MeerkaT3 is a desktop workspace for long-lived project specialists and the conne
 
 ## Use MeerkaT3
 
-| I want to...                              | Read                                                    |
-| ----------------------------------------- | ------------------------------------------------------- |
-| Install a preview build                   | [Installation and availability](user/install.md)        |
-| Set up my first repository                | [Start with your project](user/getting-started.md)      |
-| Sign in and choose a model                | [Providers and accounts](user/accounts.md)              |
-| Generate specialists and connect projects | [Project specialists and peering](user/agents.md)       |
-| Understand what agents can do             | [Permissions and access](user/permission-modes.md)      |
-| Recover interrupted work or report a bug  | [Recovery and troubleshooting](user/troubleshooting.md) |
-| Replace a preview build                   | [Updates](user/updating.md)                             |
-| Understand local data and model requests  | [Data and privacy](user/telemetry.md)                   |
-| Find dependency attribution               | [Open-source licenses](user/open-source-licenses.md)    |
+| I want to...                              | Read                                                            |
+| ----------------------------------------- | --------------------------------------------------------------- |
+| Install a preview build                   | [Installation and availability](user/install.md)                |
+| Set up my first repository                | [Start with your project](user/getting-started.md)              |
+| Sign in and choose a model                | [Providers and accounts](user/accounts.md)                      |
+| Generate specialists and connect projects | [Project specialists and peering](user/agents.md)               |
+| Share specialists across local checkouts  | [Shared specialists (experimental)](user/shared-specialists.md) |
+| Understand what agents can do             | [Permissions and access](user/permission-modes.md)              |
+| Recover interrupted work or report a bug  | [Recovery and troubleshooting](user/troubleshooting.md)         |
+| Replace a preview build                   | [Updates](user/updating.md)                                     |
+| Understand local data and model requests  | [Data and privacy](user/telemetry.md)                           |
+| Find dependency attribution               | [Open-source licenses](user/open-source-licenses.md)            |
 
 These guides are also bundled offline in **Help > MeerkaT3 Guide** and the sidebar **Help** button, including before you connect a model account.
 
@@ -32,6 +33,9 @@ These guides are also bundled offline in **Help > MeerkaT3 Guide** and the sideb
 
 Start with [Contributing](../CONTRIBUTING.md) and the [development runbook](operations/development.md). The [distribution runbook](operations/meerkat-distribution.md) describes app identity, runtime packaging, notices, and manual previews.
 
+For a shared workspace, see [Operating a shared specialist host](operations/shared-host.md)
+for HTTPS access, maintenance, backup and acceptance checks.
+
 The source includes the T3 workspace and its Meerkat integration. Public source availability does not mean a public binary has been released. Use the [repository release page](https://github.com/lukacf/meerkat-t3/releases) for published artifacts and the installation guide for supported use.
 
 For architecture and integration boundaries:
@@ -42,6 +46,7 @@ For architecture and integration boundaries:
 - [Provider integration](internals/providers.md)
 - [Model classification](internals/model-manifest.md)
 - [Environment authentication](internals/environment-auth.md)
+- [Shared specialist authority and recovery](internals/shared-workspace.md)
 - [License notice pipeline](internals/open-source-licenses.md)
 - [Reproduce native notice inputs](operations/native-notices.md)
 

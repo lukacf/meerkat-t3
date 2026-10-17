@@ -143,6 +143,18 @@ export function resourceMonitorExecutableName(platform: typeof BuildPlatform.Typ
   return platform === "win" ? "t3-resource-monitor.exe" : "t3-resource-monitor";
 }
 
+export const createDesktopStageRoot = Effect.fn("createDesktopStageRoot")(function* (input: {
+  readonly platform: typeof BuildPlatform.Type;
+  readonly keepStage: boolean;
+}) {
+  const fs = yield* FileSystem.FileSystem;
+  const mkdir = input.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
+  const temporaryRoot = yield* mkdir({ prefix: `t3code-desktop-${input.platform}-stage-` });
+  // electron-builder canonicalizes its workspace before checking DMG contents.
+  // Derive every staged path from the same physical root, including on macOS /var.
+  return yield* fs.realPath(temporaryRoot);
+});
+
 const PLATFORM_CONFIG: Record<typeof BuildPlatform.Type, PlatformConfig> = {
   mac: {
     cliFlag: "--mac",
@@ -3685,10 +3697,7 @@ export const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* 
   const appVersion = options.version ?? serverPackageJson.version;
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
   const commitHash = yield* resolveGitCommitHash(repoRoot);
-  const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
-  const stageRoot = yield* mkdir({
-    prefix: `t3code-desktop-${options.platform}-stage-`,
-  });
+  const stageRoot = yield* createDesktopStageRoot(options);
 
   if (options.keepStage) {
     yield* Effect.log(`[desktop-artifact] Keeping stage at ${stageRoot}`);
@@ -3877,6 +3886,7 @@ export const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* 
     destinationDir: nativeNoticesDir,
     target: { platform: meerkatBuildPlatform, arch: meerkatBuildArch },
     gateway: {
+      cargoLockPath: path.join(repoRoot, "core/Cargo.lock"),
       cargoLockSha256: meerkatManifest.build.cargoLockSha256,
       binarySha256: meerkatManifest.files[meerkatManifest.binary]!,
     },

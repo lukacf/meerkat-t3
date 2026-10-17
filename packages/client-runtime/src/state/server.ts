@@ -35,6 +35,7 @@ import {
   scheduleAtomCommandEffect,
 } from "./runtime.ts";
 import { EnvironmentRegistry } from "../connection/registry.ts";
+import { isSharedWorkspaceConnection } from "../connection/model.ts";
 import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
 import { EnvironmentCacheStore } from "../platform/persistence.ts";
@@ -380,6 +381,9 @@ export interface ServerConfigSubscriptionOptions {
 export const makeEnvironmentServerConfigState = Effect.fn("EnvironmentServerConfigState.make")(
   function* (subscription: ServerConfigSubscriptionOptions) {
     const supervisor = yield* EnvironmentSupervisor;
+    if (isSharedWorkspaceConnection(supervisor.target)) {
+      return yield* SubscriptionRef.make<Option.Option<ServerConfigProjection>>(Option.none());
+    }
     const cache = yield* EnvironmentCacheStore;
     const environmentId = supervisor.target.environmentId;
     const cachedConfig = yield* cache.loadServerConfig(environmentId).pipe(
@@ -845,7 +849,13 @@ export function createServerEnvironmentAtoms<R, E>(
         // letting the supervisor climb its backoff ladder.
         yield* nudgeReconnectDuringUpdateRestart({
           stateChanges: environmentRegistry.stateChanges(target.environmentId),
-          retryNow: environmentRegistry.retryNow(target.environmentId),
+          // Automatic transport recovery must not re-open a denied credential store.
+          retryNow: environmentRegistry
+            .run(
+              target.environmentId,
+              EnvironmentSupervisor.pipe(Effect.flatMap((supervisor) => supervisor.retryNow)),
+            )
+            .pipe(Effect.catchTag("EnvironmentNotRegisteredError", () => Effect.void)),
         }).pipe(Effect.forkChild);
 
         if (result.method === "desktop-app" && desktopCommitLostTransport) {
@@ -1159,7 +1169,7 @@ export function createServerEnvironmentAtoms<R, E>(
             });
           }
           const config = yield* session.value.initialConfig;
-          if (config.environment.capabilities.providerSettingsIntents !== true) {
+          if (config?.environment.capabilities.providerSettingsIntents !== true) {
             return yield* new ProviderSettingsUnsupportedError({});
           }
           // The server composes intent and persists inside its settings lock.

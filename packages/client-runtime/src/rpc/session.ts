@@ -33,6 +33,7 @@ import type {
 } from "../connection/model.ts";
 import {
   ConnectionBlockedError,
+  isSharedWorkspaceConnection,
   ConnectionTransientError as ConnectionTransientErrorClass,
 } from "../connection/model.ts";
 import {
@@ -46,7 +47,7 @@ const SOCKET_OPEN_TIMEOUT = "15 seconds";
 
 export interface RpcSession {
   readonly client: WsRpcProtocolClient;
-  readonly initialConfig: Effect.Effect<ServerConfig, ConnectionAttemptError>;
+  readonly initialConfig: Effect.Effect<ServerConfig | null, ConnectionAttemptError>;
   readonly subscribeServerConfig: (
     input: ServerConfigSubscriptionInput,
   ) => ServerConfigSubscription;
@@ -211,6 +212,36 @@ export const make = Effect.fn("RpcSessionFactory.make")(function* (
       Effect.withSpan("environment.websocket.connect"),
     );
     const protocolClient = yield* makeWsRpcProtocolClient.pipe(Effect.provide(protocolContext));
+    if (isSharedWorkspaceConnection(connection.target)) {
+      const probe = protocolClient[WS_METHODS.sharedWorkspaceSession]({}).pipe(
+        Effect.mapError((error): ConnectionAttemptError => {
+          if (error._tag === "SharedWorkspaceError") {
+            return new ConnectionBlockedError({ reason: "permission", detail: error.message });
+          }
+          return mapRpcError(error);
+        }),
+        Effect.filterOrElse(
+          (session) => session.environment.environmentId === connection.environmentId,
+          (session) =>
+            environmentMismatchError({
+              expected: connection.environmentId,
+              actual: session.environment.environmentId,
+            }),
+        ),
+        Effect.asVoid,
+      );
+      return {
+        client: protocolClient,
+        initialConfig: Effect.succeed(null),
+        subscribeServerConfig: () => Stream.empty,
+        ready: Deferred.await(connected).pipe(
+          Effect.andThen(probe),
+          Effect.raceFirst(Deferred.await(disconnected)),
+        ),
+        probe,
+        closed: Deferred.await(disconnected),
+      } satisfies RpcSession;
+    }
     const initialConfigDeferred = yield* Deferred.make<ServerConfig>();
     const serverConfigExit = yield* Deferred.make<void, ServerConfigSubscriptionError>();
     const configSubscriptionClosed = yield* Deferred.make<never, ConnectionAttemptError>();

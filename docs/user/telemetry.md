@@ -1,8 +1,12 @@
 # Data and privacy
 
-MeerkaT3 runs its agent runtime locally, but using a hosted model sends that model's request context to the provider account you selected. Context can include your messages, attached images, project files, and tool results. Review the provider's terms and your project's data requirements before using sensitive material.
+For ordinary local work, MeerkaT3 runs its agent runtime on your computer. Using a hosted model sends that model's request context to the provider account you selected. Context can include your messages, attached images, project files, and tool results. Review the provider's terms and your project's data requirements before using sensitive material.
 
-Conversations, agent state, settings, and media are saved in this app's local profile. Project files stay in their selected checkout. A connection between agents allows messages; it does not merge all conversation histories. Sharing a browser workspace is an additional explicit capability.
+Local conversations, agent state, settings, and media are saved in this app's local profile. Project files stay in their selected checkout. A connection between agents allows messages; it does not merge all conversation histories. Sharing a browser workspace is an additional explicit capability.
+
+[Shared specialists](shared-specialists.md) run on their host, using the host's model accounts. That host retains shared conversations, requests, task objectives and revision context, observations, and explicitly shared patch snapshots. Workspace participants can read this shared material. Previewing a patch stays local; choosing **Share snapshot** uploads it. Merely opening a task or discovering specialists does not publish its objective or copy its private task history.
+
+Enabling collaboration for a local task requires explicit consent to store your paired shared-account credential on the selected local server. The credential is not given to the model. The grant retains the selected task, revision and actions; the optional **Publish this task's objective and observations** action controls the objective announcement. Removing the stored account deletes that local credential copy, while confirmed remote revocation is a separate outcome. Shared history and snapshots are retained after access is revoked.
 
 Product analytics are **off by default in this preview**. To enable them, the server operator must set `T3CODE_TELEMETRY_ENABLED=true`, `T3CODE_POSTHOG_KEY` to their own PostHog project key, and `T3CODE_POSTHOG_HOST` to that project's ingestion base URL. There is no built-in analytics destination. If either destination setting is missing or blank, analytics stay disabled and no analytics identifier is read or created.
 

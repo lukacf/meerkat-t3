@@ -495,4 +495,47 @@ describe("MeerkatGatewayClient", () => {
     await expect(client.close()).rejects.toBe(error);
     expect(await sibling.request("echo", { alive: true })).toEqual({ alive: true });
   });
+
+  it.each([false, true])(
+    "preserves unsettled credential custody even when cleanupCompleted is %s",
+    async (cleanupCompleted) => {
+      const details = {
+        cleanupCompleted,
+        errors: ["Credential work is still running at exit; outcome unknown"],
+        credentialSettlement: { status: "unsettled", pending: 1 },
+      };
+      const client = makeShutdownClient([
+        details,
+        { cleanupCompleted: true, credentialSettlement: { status: "settled" } },
+      ]);
+      expectedCloseFailures.set(client, "credential_unsettled");
+      await client.request("ready");
+      const first = client.close();
+      const error = await first.catch((cause: unknown) => cause);
+      expect(error).toMatchObject({ kind: "credential_unsettled", outcomeUnknown: true, details });
+      expect(client.close()).toBe(first);
+      await expect(client.close()).rejects.toBe(error);
+    },
+  );
+
+  it("accepts an explicit settled credential receipt only with successful cleanup", async () => {
+    const client = makeShutdownClient([
+      { cleanupCompleted: true, credentialSettlement: { status: "settled" } },
+    ]);
+    await client.request("ready");
+    await expect(client.close()).resolves.toBeUndefined();
+  });
+
+  it.each([{ status: "not_observed" }, { status: "unsettled", pending: 0 }, null])(
+    "rejects a clean claim with unconfirmed credential settlement %j",
+    async (credentialSettlement) => {
+      const client = makeShutdownClient([{ cleanupCompleted: true, credentialSettlement }]);
+      expectedCloseFailures.set(client, "cleanup_failed");
+      await client.request("ready");
+      await expect(client.close()).rejects.toMatchObject({
+        kind: "cleanup_failed",
+        outcomeUnknown: true,
+      });
+    },
+  );
 });

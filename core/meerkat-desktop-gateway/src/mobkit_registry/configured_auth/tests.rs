@@ -107,10 +107,13 @@ async fn http_auth_proof(label: &str, child_tools: bool, oauth: bool) {
         workspace_config
     };
     std::fs::write(realm_dir.join("config.toml"), workspace_config).unwrap();
-    let persistence = meerkat_providers::auth_store::ProviderAuthPersistence::new(
-        Arc::new(meerkat_providers::auth_store::EphemeralTokenStore::new()),
-        Arc::new(meerkat_providers::auth_store::InMemoryCoordinator::new()),
-    );
+    // Every HTTP proof owns its native credential store and refresh locks.
+    // Loopback requests must never address the developer's OS credential store.
+    let persistence = meerkat_providers::auth_store::TokenStoreBackend::File {
+        root: root.join("credentials"),
+    }
+    .open_with_refresh_authority()
+    .unwrap();
     let binding = meerkat_core::AuthBindingRef {
         realm: RealmId::parse(&realm).unwrap(),
         binding: meerkat_core::BindingId::parse("fixture").unwrap(),
@@ -234,38 +237,28 @@ async fn http_auth_proof(label: &str, child_tools: bool, oauth: bool) {
     for attempt in 0..2 {
         let registry = ProjectMobkitRegistry::new(HostToolTransport::new());
         let bootstrap_started = std::time::Instant::now();
-        let mob = if oauth {
-            let mob = Arc::new(
-                tokio::time::timeout(
-                    HTTP_PROOF_BOOTSTRAP_TIMEOUT,
-                    bootstrap_local_runtime_with_provider_persistence(
-                        input.clone(),
-                        HostToolTransport::new(),
-                        None,
-                        None,
-                        persistence.clone(),
-                        Some(&registry.observer_disposals),
-                    ),
-                )
-                .await
-                .unwrap_or_else(|error| panic!("HTTP auth fixture {label} attempt {attempt}: OAuth bootstrap timed out after {:?}: {error}", bootstrap_started.elapsed()))
-                .unwrap(),
-            );
-            registry
-                .mobs
-                .write()
-                .await
-                .insert(input.mob_id.clone(), mob.clone());
-            mob
-        } else {
+        let mob = Arc::new(
             tokio::time::timeout(
                 HTTP_PROOF_BOOTSTRAP_TIMEOUT,
-                registry.create_local(input.clone()),
+                bootstrap_local_runtime_with_provider_persistence(
+                    input.clone(),
+                    HostToolTransport::new(),
+                    None,
+                    None,
+                    persistence.clone(),
+                    Some(&registry.observer_disposals),
+                    None,
+                ),
             )
             .await
             .unwrap_or_else(|error| panic!("HTTP auth fixture {label} attempt {attempt}: bootstrap timed out after {:?}: {error}", bootstrap_started.elapsed()))
-            .unwrap()
-        };
+            .unwrap(),
+        );
+        registry
+            .mobs
+            .write()
+            .await
+            .insert(input.mob_id.clone(), mob.clone());
         let runtime = mob.runtime.as_ref().unwrap();
         let session = runtime
             .mob_handle()

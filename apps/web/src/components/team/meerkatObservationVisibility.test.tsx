@@ -28,7 +28,11 @@ vi.mock("../../state/entities", () => ({ useProjects: () => [state.project] }));
 vi.mock("../../state/environments", () => ({
   useEnvironments: () => ({
     environments: [
-      { environmentId: "environment", serverConfig: { providers: [{ driver: "meerkat" }] } },
+      {
+        environmentId: "environment",
+        entry: { target: { _tag: "PrimaryConnectionTarget" } },
+        serverConfig: { providers: [{ driver: "meerkat" }] },
+      },
     ],
   }),
 }));

@@ -31,7 +31,13 @@ const TeamSnapshot = Schema.Struct({
       kind: Schema.String,
       label: Schema.String,
       accessMode: Schema.optional(
-        Schema.Literals(["read-only", "full-access", "approval-required"]),
+        Schema.Literals([
+          "read-only",
+          "read-and-collaborate",
+          "repository-read-only",
+          "full-access",
+          "approval-required",
+        ]),
       ),
       consoleStatus: Schema.Literals(["ready", "unavailable", "error"]),
       error: Schema.optional(Schema.String),
@@ -76,9 +82,18 @@ const NativeAcceptedReceipt = Schema.Struct({
     "redacted",
   ]),
 });
+const NativeCompletionBinding = Schema.Struct({
+  source: Schema.Literal("native-console-exact-interaction"),
+  identity: Schema.String,
+  runtimeKey: Schema.String,
+  sessionId: Schema.String,
+  interactionId: Schema.String,
+  frameId: Schema.String,
+});
 const NativeConsoleReceipt = Schema.Struct({
   ...NativeAcceptedReceipt.fields,
   completion: Schema.optional(Schema.NullOr(ConsoleFrame)),
+  completionBinding: Schema.optional(Schema.NullOr(NativeCompletionBinding)),
 });
 const NativeRuntimeReceipt = Schema.Struct({
   kind: Schema.Literal("runtime_input"),
@@ -100,6 +115,7 @@ const ReceiptResponse = Schema.Union([
     found: Schema.Literal(true),
     receipt: Schema.Union([NativeRuntimeReceipt, NativeAcceptedReceipt]),
     completion: Schema.optional(Schema.NullOr(ConsoleFrame)),
+    completionBinding: Schema.optional(Schema.NullOr(NativeCompletionBinding)),
   }),
 ]);
 
@@ -495,7 +511,8 @@ export function makeMeerkatTeamReader(options: {
           response.receipt.sessionId !== input.record.session_id ||
           response.receipt.requestId !== input.requestId ||
           !response.receipt.idempotencyKey.startsWith("meerkat-app:steer:v1:") ||
-          response.completion != null
+          response.completion != null ||
+          response.completionBinding != null
         )
           return yield* error(
             new Error(
@@ -512,6 +529,19 @@ export function makeMeerkatTeamReader(options: {
           new Error("Meerkat returned a receipt for a different native session."),
         );
       const completion = response.completion;
+      const binding = response.completionBinding;
+      if (
+        binding &&
+        (!completion ||
+          binding.identity !== input.record.identity ||
+          binding.runtimeKey !== input.record.runtime_key ||
+          binding.sessionId !== input.record.session_id ||
+          binding.interactionId !== response.receipt.interaction_id ||
+          binding.frameId !== completion.id)
+      )
+        return yield* error(
+          new Error("Meerkat returned a completion binding for a different native interaction."),
+        );
       if (
         completion &&
         (completion.identity !== input.record.identity ||
@@ -526,7 +556,11 @@ export function makeMeerkatTeamReader(options: {
         return yield* error(
           new Error("Meerkat returned a completion for a different native interaction."),
         );
-      return { ...response.receipt, ...(completion ? { completion } : {}) };
+      return {
+        ...response.receipt,
+        ...(completion ? { completion } : {}),
+        ...(binding ? { completionBinding: binding } : {}),
+      };
     }),
     resume: (input) => request("mobs.v1.consoleResume", targetParams(input)),
     stop: Effect.fn("MeerkatTeamReader.stop")(function* (input) {

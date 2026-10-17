@@ -16,6 +16,7 @@ import {
   MeerkatAgentLifecycleInput,
   type MeerkatAgentControlReceipt,
   type MeerkatProjectAgent,
+  type MeerkatProjectAgentAccessMode,
   type ProviderOptionSelections,
   ThreadId,
   MeerkatAgentActivityInput,
@@ -38,6 +39,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { isSqlError } from "effect/unstable/sql/SqlError";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 import { extractMeerkatConsoleSkillSelections } from "@t3tools/shared/meerkatSkills";
 import { ProviderInstanceRegistry } from "../Services/ProviderInstanceRegistry.ts";
@@ -121,10 +123,22 @@ interface ActivityTarget {
   readonly stateRoot?: string;
   readonly projectAgentId?: string;
   readonly threadId?: ThreadId;
+  readonly observedAccessMode?: NonNullable<MeerkatTeamAgent["observedAccessMode"]>;
   readonly mobKind: string;
   readonly mobId: string;
   readonly record: ConsoleIdentityRecord;
   readonly ambiguous: boolean;
+}
+
+export interface MeerkatAgentAdmission<E = never, R = never> {
+  readonly accessMode?: MeerkatProjectAgentAccessMode;
+  /** Database-only authorization, committed atomically with the first delivery claim. */
+  readonly check: Effect.Effect<void, E, R>;
+}
+
+function withoutObservedPolicy(agent: MeerkatTeamAgent): MeerkatTeamAgent {
+  const { observedAccessMode: _observed, ...historical } = agent;
+  return historical;
 }
 
 /** Project-owned definitions and controls. Observation never admits or restores runtimes. */
@@ -374,7 +388,13 @@ export const makeMeerkatTeamService = Effect.gen(function* () {
           loadedMobCount += snapshot.mobs.length;
           for (const mob of snapshot.mobs) {
             if (domain && mob.mobId !== domain.mob_id) continue;
-            if (domain && (mob.accessMode === "read-only" || mob.accessMode === "full-access")) {
+            if (
+              domain &&
+              (mob.accessMode === "read-only" ||
+                mob.accessMode === "read-and-collaborate" ||
+                mob.accessMode === "full-access" ||
+                mob.accessMode === "repository-read-only")
+            ) {
               const projected = projectAgents.find((row) => row.agentId === domain.agent_id)!;
               projected.accessMode = mob.accessMode;
             }
@@ -422,6 +442,9 @@ export const makeMeerkatTeamService = Effect.gen(function* () {
                   !!mob.stoppedCrewIds?.includes(record.labels.source_mob_id),
                 durableId,
                 availability: record.visibility === "retired_readable" ? "retired" : "live",
+                ...(record.visibility !== "retired_readable" && mob.accessMode
+                  ? { observedAccessMode: mob.accessMode }
+                  : {}),
                 lastSeenAt: observedAt,
                 work: { status: "unknown", observedAt },
                 agentRef,
@@ -451,6 +474,7 @@ export const makeMeerkatTeamService = Effect.gen(function* () {
                 ...(stateRoot ? { stateRoot } : {}),
                 ...(domain ? { projectAgentId: domain.agent_id } : {}),
                 ...(ownerThread ? { threadId: ownerThread } : {}),
+                ...(mob.accessMode ? { observedAccessMode: mob.accessMode } : {}),
                 mobKind: mob.kind,
                 mobId: mob.mobId,
                 record,
@@ -524,7 +548,7 @@ export const makeMeerkatTeamService = Effect.gen(function* () {
               ? ("retired" as const)
               : ("unknown" as const);
         agents.push({
-          ...row.agent,
+          ...withoutObservedPolicy(row.agent),
           canResume: false,
           availability,
           lastSeenAt: row.last_seen_at,
@@ -560,7 +584,7 @@ export const makeMeerkatTeamService = Effect.gen(function* () {
         if (durableIds.has(row.durable_id)) continue;
         durableIds.add(row.durable_id);
         dormant.push({
-          ...row.agent,
+          ...withoutObservedPolicy(row.agent),
           availability: "unknown",
           record: { ...row.agent.record, addressable: false },
           work: { status: "unknown", observedAt },
@@ -645,7 +669,7 @@ export const makeMeerkatTeamService = Effect.gen(function* () {
         };
         historical = true;
         activityAgent = {
-          ...saved.agent,
+          ...withoutObservedPolicy(saved.agent),
           canResume: false,
           availability: activityAgent?.availability ?? "retired",
           record: { ...saved.agent.record, addressable: false },
@@ -985,7 +1009,11 @@ export const makeMeerkatTeamService = Effect.gen(function* () {
             stateRoot: row.state_root,
             mobId: row.mob_id,
             identity: row.agent_identity,
-            instructions: specialistRuntimeInstructions(pending.instructions, pending.assignment),
+            instructions: specialistRuntimeInstructions(
+              pending.instructions,
+              pending.assignment,
+              row.access_mode,
+            ),
             revisionId: pending.revisionId,
           }),
         catch: (cause) => failure(projectId, "project-agent", cause),
@@ -1138,6 +1166,64 @@ export const makeMeerkatTeamService = Effect.gen(function* () {
         );
     return yield* projection(input.projectId, input.agentId);
   }, mutationLock.withPermits(1));
+  // Shared assignment changes use the same native instruction activation boundary,
+  // without launching a study of this host's mutable checkout.
+  const projectAgentReviseShared = Effect.fn("MeerkatTeam.projectAgentReviseShared")(
+    function* (input: {
+      projectId: ProjectId;
+      agentId: string;
+      requestId: string;
+      instructions: string;
+    }) {
+      const row = yield* store.get(input.projectId, input.agentId);
+      if (row.access_mode !== "repository-read-only")
+        return yield* failure(
+          input.projectId,
+          "project-agent",
+          "Shared revisions require repository-read-only policy.",
+        );
+      if (!input.instructions.trim() || Buffer.byteLength(input.instructions) > 48 * 1024)
+        return yield* failure(
+          input.projectId,
+          "project-agent",
+          "Shared responsibilities must be nonempty and at most 48 KiB.",
+        );
+      const fingerprint = agentFingerprint([input.instructions]);
+      const result = yield* revise(
+        input.projectId,
+        row,
+        {
+          sourceThreadId: "shared-composition",
+          proposalId: "shared-composition",
+          candidateId: row.role,
+          focus: "Shared workspace responsibilities",
+          charter: "Serve the explicit shared-project responsibilities below.",
+          ownershipPaths: [],
+          assignmentId: `shared-${fingerprint}`,
+          fingerprint,
+        },
+        input.instructions,
+        input.requestId,
+      );
+      const revisionId = `revision-${agentFingerprint([row.agent_id, input.requestId])}`;
+      // Only the existing native-acknowledged revision journal proves application.
+      const applied = yield* sql`SELECT revision_id FROM meerkat_project_agent_revisions
+      WHERE agent_id=${row.agent_id} AND revision_id=${revisionId}`.pipe(
+        Effect.mapError((cause) => failure(input.projectId, "project-agent", cause)),
+      );
+      return {
+        applied: applied.length === 1,
+        revisionId,
+        detail: applied.length
+          ? null
+          : result.pending_revision_json
+            ? ((yield* decodeAgentRevision(result.pending_revision_json)).error ??
+              "The revision is pending its native idle boundary.")
+            : "Native responsibility acknowledgement is unavailable.",
+      };
+    },
+    mutationLock.withPermits(1),
+  );
   const projectAgentLifecycle = Effect.fn("MeerkatTeam.projectAgentLifecycle")(function* (
     raw: MeerkatProjectAgentLifecycleInput,
   ) {
@@ -1364,230 +1450,271 @@ export const makeMeerkatTeamService = Effect.gen(function* () {
     }
     return { agent, target };
   });
-  const agentSend = Effect.fn("MeerkatTeam.agentSend")(function* (raw: MeerkatAgentSendInput) {
-    const input = yield* decodeSendInput(raw).pipe(
-      Effect.mapError((cause) => failure(raw.projectId, "agent-control", cause)),
-    );
-    const messageText = projectComposerContextForProvider({
-      text: input.text,
-      records: input.context?.records ?? [],
-    });
-    yield* Effect.try({
-      try: () => extractMeerkatConsoleSkillSelections(input.text, input.handlingMode),
-      catch: (cause) => failure(input.projectId, "agent-control", cause),
-    });
-    const target = yield* controlTarget(input);
-    const providerStateRoot = target.reader.stateRoot;
-    if (!target.reader.send)
-      return yield* failure(
-        input.projectId,
-        "agent-control",
-        "This provider cannot send to agents.",
+  const agentSend = <E = never, R = never>(
+    raw: MeerkatAgentSendInput,
+    admission?: MeerkatAgentAdmission<E, R>,
+  ): Effect.Effect<MeerkatAgentControlReceipt, MeerkatTeamError | E, R> =>
+    Effect.gen(function* () {
+      const input = yield* decodeSendInput(raw).pipe(
+        Effect.mapError((cause) => failure(raw.projectId, "agent-control", cause)),
       );
-    const selectionKey = input.modelSelection ? encodeModelSelection(input.modelSelection) : "";
-    if (!input.text.trim() && !input.images?.length)
-      return yield* failure(input.projectId, "agent-control", "A message needs text or an image.");
-    const imagesKey = encodeImages(input.images ?? []);
-    const fingerprint = agentFingerprint([
-      input.agentRef,
-      messageText,
-      input.handlingMode,
-      selectionKey,
-      imagesKey,
-    ]);
-    const stableFingerprint = agentFingerprint([
-      input.projectId,
-      input.instanceId,
-      providerStateRoot,
-      target.stateRoot ?? "",
-      target.projectPath,
-      target.mobId,
-      target.record.identity,
-      target.record.runtime_key,
-      target.record.labels.source_mob_id ?? "",
-      messageText,
-      input.handlingMode,
-      selectionKey,
-      imagesKey,
-    ]);
-    const claimDelivery = () =>
-      store.claimDelivery(
-        input.projectId,
-        input.instanceId,
-        input.requestId,
-        fingerprint,
-        stableFingerprint,
-      );
-    const existingReceipt = yield* Effect.gen(function* () {
-      if (!(yield* store.delivery(input.projectId, input.instanceId, input.requestId)))
-        return undefined;
-      const claim = yield* claimDelivery();
-      if (claim.receipt.status === "uncertain")
-        return yield* agentDeliveryReconcileUnlocked(input).pipe(
-          Effect.map((receipt) => receipt ?? claim.receipt),
-          Effect.orElseSucceed(() => claim.receipt),
-        );
-      return claim.receipt;
-    }).pipe(mutationLock.withPermits(1));
-    if (existingReceipt) return existingReceipt;
-
-    if (input.modelSelection) {
-      if (input.handlingMode !== "queue")
-        return yield* failure(
-          input.projectId,
-          "agent-control",
-          "Model changes apply only to queued turns, not steering.",
-        );
-      if (input.modelSelection.instanceId !== input.instanceId)
-        return yield* failure(
-          input.projectId,
-          "agent-control",
-          "Choose a model from this agent's provider instance.",
-        );
-      const { instance } = yield* providerForAgent(input.projectId, input.instanceId);
-      yield* requireAgentModel({
-        projectId: input.projectId,
-        operation: "agent-control",
-        instance,
-        projectPath: target.projectPath,
-        model: input.modelSelection.model,
+      const messageText = projectComposerContextForProvider({
+        text: input.text,
+        records: input.context?.records ?? [],
       });
       yield* Effect.try({
-        try: () => {
-          meerkatProviderParams(input.modelSelection!.options);
-          return decodeMeerkatModel(input.modelSelection!.model);
-        },
+        try: () => extractMeerkatConsoleSkillSelections(input.text, input.handlingMode),
         catch: (cause) => failure(input.projectId, "agent-control", cause),
       });
-    }
-    const sendInput = {
-      ...target,
-      text: messageText,
-      skillSelectionText: input.text,
-      ...(input.images ? { images: input.images } : {}),
-      handlingMode: input.handlingMode,
-      requestId: input.requestId,
-      ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
-    };
-    // Catalog reads are definite preflight, not native admission. Keep them
-    // outside the shared mutation permit so they cannot delay another Stop.
-    const prepared = target.reader.prepareSend
-      ? yield* target.reader
-          .prepareSend(sendInput)
-          .pipe(Effect.mapError((cause) => failure(input.projectId, "agent-control", cause.detail)))
-      : { dispatch: () => target.reader.send!(sendInput) };
-    return yield* Effect.gen(function* () {
-      const current = yield* controlTarget(input);
-      if (
-        current.reader !== target.reader ||
-        current.reader.stateRoot !== providerStateRoot ||
-        current.projectPath !== target.projectPath ||
-        current.stateRoot !== target.stateRoot ||
-        current.mobId !== target.mobId ||
-        current.record.identity !== target.record.identity ||
-        current.record.runtime_key !== target.record.runtime_key ||
-        current.record.runtime_member_id !== target.record.runtime_member_id ||
-        current.record.session_id !== target.record.session_id ||
-        current.record.labels.source_mob_id !== target.record.labels.source_mob_id
-      )
+      const target = yield* controlTarget(input);
+      const providerStateRoot = target.reader.stateRoot;
+      if (!target.reader.send)
         return yield* failure(
           input.projectId,
           "agent-control",
-          "The agent changed while preparing this message. Refresh before sending.",
+          "This provider cannot send to agents.",
         );
-      if (target.projectAgentId)
-        yield* peers.apply({
-          kind: "project-agent",
-          projectId: input.projectId,
-          instanceId: input.instanceId,
-          agentId: target.projectAgentId,
-        });
-      const claim = yield* claimDelivery();
-      if (!claim.claimed) {
+      const selectionKey = input.modelSelection ? encodeModelSelection(input.modelSelection) : "";
+      if (!input.text.trim() && !input.images?.length)
+        return yield* failure(
+          input.projectId,
+          "agent-control",
+          "A message needs text or an image.",
+        );
+      const imagesKey = encodeImages(input.images ?? []);
+      const fingerprint = agentFingerprint([
+        input.agentRef,
+        messageText,
+        input.handlingMode,
+        selectionKey,
+        imagesKey,
+      ]);
+      const stableFingerprint = agentFingerprint([
+        input.projectId,
+        input.instanceId,
+        providerStateRoot,
+        target.stateRoot ?? "",
+        target.projectPath,
+        target.mobId,
+        target.record.identity,
+        target.record.runtime_key,
+        target.record.labels.source_mob_id ?? "",
+        messageText,
+        input.handlingMode,
+        selectionKey,
+        imagesKey,
+      ]);
+      const claimDelivery = () =>
+        store.claimDelivery(
+          input.projectId,
+          input.instanceId,
+          input.requestId,
+          fingerprint,
+          stableFingerprint,
+        );
+      const existingReceipt = yield* Effect.gen(function* () {
+        if (!(yield* store.delivery(input.projectId, input.instanceId, input.requestId)))
+          return undefined;
+        const claim = yield* claimDelivery();
         if (claim.receipt.status === "uncertain")
           return yield* agentDeliveryReconcileUnlocked(input).pipe(
             Effect.map((receipt) => receipt ?? claim.receipt),
             Effect.orElseSucceed(() => claim.receipt),
           );
         return claim.receipt;
+      }).pipe(mutationLock.withPermits(1));
+      if (existingReceipt) return existingReceipt;
+
+      if (input.modelSelection) {
+        if (input.handlingMode !== "queue")
+          return yield* failure(
+            input.projectId,
+            "agent-control",
+            "Model changes apply only to queued turns, not steering.",
+          );
+        if (input.modelSelection.instanceId !== input.instanceId)
+          return yield* failure(
+            input.projectId,
+            "agent-control",
+            "Choose a model from this agent's provider instance.",
+          );
+        const { instance } = yield* providerForAgent(input.projectId, input.instanceId);
+        yield* requireAgentModel({
+          projectId: input.projectId,
+          operation: "agent-control",
+          instance,
+          projectPath: target.projectPath,
+          model: input.modelSelection.model,
+        });
+        yield* Effect.try({
+          try: () => {
+            meerkatProviderParams(input.modelSelection!.options);
+            return decodeMeerkatModel(input.modelSelection!.model);
+          },
+          catch: (cause) => failure(input.projectId, "agent-control", cause),
+        });
       }
-      const result: MeerkatAgentControlReceipt = yield* prepared.dispatch().pipe(
-        Effect.map((receipt): MeerkatAgentControlReceipt => ({
-          status: "accepted",
-          requestId: input.requestId,
-          receipt,
-          message: null,
-        })),
-        Effect.catch((cause) =>
-          Effect.succeed({
-            status: "uncertain" as const,
-            requestId: input.requestId,
-            receipt: null,
-            message: `${cause.detail} Delivery was not replayed. Check native activity before submitting new work.`,
-          }),
-        ),
-      );
-      return yield* store.saveReceipt(input.projectId, input.instanceId, input.requestId, result);
-    }).pipe(mutationLock.withPermits(1));
-  });
-  const agentDeliveryReconcileUnlocked = Effect.fn("MeerkatTeam.agentDeliveryReconcile")(function* (
-    raw: MeerkatAgentSendInput,
-  ) {
-    const input = yield* decodeSendInput(raw).pipe(
-      Effect.mapError((cause) => failure(raw.projectId, "agent-control", cause)),
-    );
-    yield* readProject(input.projectId);
-    const delivery = yield* store.delivery(input.projectId, input.instanceId, input.requestId);
-    if (!delivery) return undefined;
-    const fingerprint = agentFingerprint([
-      input.agentRef,
-      projectComposerContextForProvider({
-        text: input.text,
-        records: input.context?.records ?? [],
-      }),
-      input.handlingMode,
-      input.modelSelection ? encodeModelSelection(input.modelSelection) : "",
-      encodeImages(input.images ?? []),
-    ]);
-    if (delivery.fingerprint !== fingerprint)
-      return yield* failure(
-        input.projectId,
-        "agent-control",
-        "Receipt lookup requires the original agent session and message.",
-      );
-    const saved = (yield* observedAgents
-      .list(input.projectId, input.instanceId, input.agentRef)
-      .pipe(Effect.mapError((cause) => failure(input.projectId, "agent-control", cause))))[0];
-    const { reader } = yield* providerForAgent(input.projectId, input.instanceId);
-    if (!saved || saved.provider_state_root !== reader.stateRoot || !saved.agent.record.session_id)
-      return yield* failure(
-        input.projectId,
-        "agent-control",
-        "The original agent session and provider storage are required to reconcile delivery.",
-      );
-    if (!reader.receipt) return delivery.receipt;
-    const receipt = yield* reader
-      .receipt({
-        projectPath: saved.project_path,
-        ...(saved.state_root ? { stateRoot: saved.state_root } : {}),
-        mobId: saved.agent.mobId,
-        record: saved.agent.record,
+      const sendInput = {
+        ...target,
+        text: messageText,
+        skillSelectionText: input.text,
+        ...(input.images ? { images: input.images } : {}),
+        handlingMode: input.handlingMode,
         requestId: input.requestId,
-      })
-      .pipe(Effect.mapError((cause) => failure(input.projectId, "agent-control", cause)));
-    if (!receipt) return delivery.receipt;
-    const failed = receipt.status === "delivery_failed" || receipt.status === "redacted";
-    return yield* store.saveReceipt(input.projectId, input.instanceId, input.requestId, {
-      status: failed ? "uncertain" : "accepted",
-      requestId: input.requestId,
-      receipt: { mobId: saved.agent.mobId, identity: saved.agent.record.identity, receipt },
-      message: failed
-        ? `Native delivery is ${receipt.status}. The message was not replayed.`
-        : null,
+        ...(input.modelSelection ? { modelSelection: input.modelSelection } : {}),
+      };
+      // Catalog reads are definite preflight, not native admission. Keep them
+      // outside the shared mutation permit so they cannot delay another Stop.
+      const prepared = target.reader.prepareSend
+        ? yield* target.reader
+            .prepareSend(sendInput)
+            .pipe(
+              Effect.mapError((cause) => failure(input.projectId, "agent-control", cause.detail)),
+            )
+        : { dispatch: () => target.reader.send!(sendInput) };
+      return yield* Effect.gen(function* () {
+        const current = yield* controlTarget(input);
+        if (
+          current.reader !== target.reader ||
+          current.reader.stateRoot !== providerStateRoot ||
+          current.projectPath !== target.projectPath ||
+          current.stateRoot !== target.stateRoot ||
+          current.mobId !== target.mobId ||
+          current.record.identity !== target.record.identity ||
+          current.record.runtime_key !== target.record.runtime_key ||
+          current.record.runtime_member_id !== target.record.runtime_member_id ||
+          current.record.session_id !== target.record.session_id ||
+          current.record.labels.source_mob_id !== target.record.labels.source_mob_id
+        )
+          return yield* failure(
+            input.projectId,
+            "agent-control",
+            "The agent changed while preparing this message. Refresh before sending.",
+          );
+        if (admission?.accessMode && current.observedAccessMode !== admission.accessMode)
+          return yield* failure(
+            input.projectId,
+            "agent-control",
+            "The agent no longer has the required observed execution policy. Nothing was sent.",
+          );
+        if (target.projectAgentId)
+          yield* peers.apply({
+            kind: "project-agent",
+            projectId: input.projectId,
+            instanceId: input.instanceId,
+            agentId: target.projectAgentId,
+          });
+        const claim = yield* sql
+          .withTransaction(
+            Effect.gen(function* () {
+              if (!(yield* store.delivery(input.projectId, input.instanceId, input.requestId)))
+                yield* admission?.check ?? Effect.void;
+              return yield* claimDelivery();
+            }),
+          )
+          .pipe(
+            Effect.mapError((cause) =>
+              isSqlError(cause) ? failure(input.projectId, "agent-control", cause) : cause,
+            ),
+          );
+        if (!claim.claimed) {
+          if (claim.receipt.status === "uncertain")
+            return yield* agentDeliveryReconcileUnlocked(input).pipe(
+              Effect.map((receipt) => receipt ?? claim.receipt),
+              Effect.orElseSucceed(() => claim.receipt),
+            );
+          return claim.receipt;
+        }
+        const result: MeerkatAgentControlReceipt = yield* prepared.dispatch().pipe(
+          Effect.map((receipt): MeerkatAgentControlReceipt => ({
+            status: "accepted",
+            requestId: input.requestId,
+            receipt,
+            message: null,
+          })),
+          Effect.catch((cause) =>
+            Effect.succeed({
+              status: "uncertain" as const,
+              requestId: input.requestId,
+              receipt: null,
+              message: `${cause.detail} Delivery was not replayed. Check native activity before submitting new work.`,
+            }),
+          ),
+        );
+        return yield* store.saveReceipt(input.projectId, input.instanceId, input.requestId, result);
+      }).pipe(mutationLock.withPermits(1));
     });
-  });
-  const agentDeliveryReconcile = (input: MeerkatAgentSendInput) =>
-    agentDeliveryReconcileUnlocked(input).pipe(mutationLock.withPermits(1));
+  const agentDeliveryReconcileUnlocked = <E = never, R = never>(
+    raw: MeerkatAgentSendInput,
+    onMissing: Effect.Effect<void, E, R> = Effect.void,
+  ) =>
+    Effect.gen(function* () {
+      const input = yield* decodeSendInput(raw).pipe(
+        Effect.mapError((cause) => failure(raw.projectId, "agent-control", cause)),
+      );
+      yield* readProject(input.projectId);
+      const delivery = yield* store.delivery(input.projectId, input.instanceId, input.requestId);
+      if (!delivery) {
+        // The shared caller may retain this observation while the admission lock is
+        // held. Absence of native receipt data after a claim is never this branch.
+        yield* onMissing;
+        return undefined;
+      }
+      const fingerprint = agentFingerprint([
+        input.agentRef,
+        projectComposerContextForProvider({
+          text: input.text,
+          records: input.context?.records ?? [],
+        }),
+        input.handlingMode,
+        input.modelSelection ? encodeModelSelection(input.modelSelection) : "",
+        encodeImages(input.images ?? []),
+      ]);
+      if (delivery.fingerprint !== fingerprint)
+        return yield* failure(
+          input.projectId,
+          "agent-control",
+          "Receipt lookup requires the original agent session and message.",
+        );
+      const saved = (yield* observedAgents
+        .list(input.projectId, input.instanceId, input.agentRef)
+        .pipe(Effect.mapError((cause) => failure(input.projectId, "agent-control", cause))))[0];
+      const { reader } = yield* providerForAgent(input.projectId, input.instanceId);
+      if (
+        !saved ||
+        saved.provider_state_root !== reader.stateRoot ||
+        !saved.agent.record.session_id
+      )
+        return yield* failure(
+          input.projectId,
+          "agent-control",
+          "The original agent session and provider storage are required to reconcile delivery.",
+        );
+      if (!reader.receipt) return delivery.receipt;
+      const receipt = yield* reader
+        .receipt({
+          projectPath: saved.project_path,
+          ...(saved.state_root ? { stateRoot: saved.state_root } : {}),
+          mobId: saved.agent.mobId,
+          record: saved.agent.record,
+          requestId: input.requestId,
+        })
+        .pipe(Effect.mapError((cause) => failure(input.projectId, "agent-control", cause)));
+      if (!receipt) return delivery.receipt;
+      const failed = receipt.status === "delivery_failed" || receipt.status === "redacted";
+      return yield* store.saveReceipt(input.projectId, input.instanceId, input.requestId, {
+        status: failed ? "uncertain" : "accepted",
+        requestId: input.requestId,
+        receipt: { mobId: saved.agent.mobId, identity: saved.agent.record.identity, receipt },
+        message: failed
+          ? `Native delivery is ${receipt.status}. The message was not replayed.`
+          : null,
+      });
+    });
+  const agentDeliveryReconcile = <E = never, R = never>(
+    input: MeerkatAgentSendInput,
+    onMissing: Effect.Effect<void, E, R> = Effect.void,
+  ) => agentDeliveryReconcileUnlocked(input, onMissing).pipe(mutationLock.withPermits(1));
   const agentStopCrew = Effect.fn("MeerkatTeam.agentStopCrew")(function* (
     raw: MeerkatAgentLifecycleInput,
   ) {
@@ -2298,6 +2425,7 @@ export const makeMeerkatTeamService = Effect.gen(function* () {
     interactionTarget,
     queueTarget,
     projectAgentCreate: admit(projectAgentCreate),
+    projectAgentReviseShared: admit(projectAgentReviseShared),
     projectAgentUpdate: (input: Parameters<typeof projectAgentUpdate>[0]) =>
       input.revision || input.applyPending
         ? admit(projectAgentUpdate)(input)
@@ -2306,7 +2434,15 @@ export const makeMeerkatTeamService = Effect.gen(function* () {
       input.action === "connect"
         ? admit(projectAgentLifecycle)(input)
         : projectAgentLifecycle(input),
-    agentSend: admit(agentSend),
+    agentSend: admit((input: MeerkatAgentSendInput) => agentSend(input)),
+    agentSendWithAdmission: <E, R>(
+      input: MeerkatAgentSendInput,
+      admission: MeerkatAgentAdmission<E, R>,
+    ): Effect.Effect<MeerkatAgentControlReceipt, MeerkatTeamError | E, R> =>
+      requireRestoreReviewReleased.pipe(
+        Effect.mapError((cause) => failure(input.projectId, "agent-control", cause.message)),
+        Effect.andThen(agentSend(input, admission)),
+      ),
     agentDeliveryReconcile,
     agentStop,
     agentResume: admit(agentResume),

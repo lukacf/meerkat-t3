@@ -372,7 +372,13 @@ function HostedStaticEnvironmentBootstrap() {
       return;
     }
 
-    const firstSavedEnvironment = environments[0];
+    const firstSavedEnvironment = environments.find(
+      (environment) =>
+        !(
+          environment.entry.target._tag === "BearerConnectionTarget" &&
+          environment.entry.target.sharedWorkspace
+        ),
+    );
     if (!firstSavedEnvironment) {
       return;
     }

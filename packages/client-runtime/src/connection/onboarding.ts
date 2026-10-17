@@ -1,4 +1,8 @@
-import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
+import {
+  AuthSharedParticipantScopes,
+  type DesktopSshEnvironmentTarget,
+  type EnvironmentId,
+} from "@t3tools/contracts";
 import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -37,6 +41,8 @@ export interface PairingConnectionInput {
   readonly pairingUrl?: string;
   readonly host?: string;
   readonly pairingCode?: string;
+  /** Opt in to shared-only authorization while retaining the local environment. */
+  readonly sharedWorkspace?: boolean;
 }
 
 export interface SshConnectionInput {
@@ -97,7 +103,7 @@ export const preparePairingRegistration = Effect.fn(
   const access = yield* bootstrapRemoteBearerSession({
     httpBaseUrl: target.httpBaseUrl,
     credential: target.credential,
-    scopes: presentation.scopes,
+    scopes: input.sharedWorkspace === true ? AuthSharedParticipantScopes : presentation.scopes,
     clientMetadata: presentation.metadata,
   }).pipe(Effect.mapError(mapRemoteEnvironmentError));
   const connectionId = `bearer:${descriptor.environmentId}`;
@@ -107,6 +113,7 @@ export const preparePairingRegistration = Effect.fn(
       environmentId: descriptor.environmentId,
       label: descriptor.label,
       connectionId,
+      ...(input.sharedWorkspace === true ? { sharedWorkspace: true } : {}),
     }),
     profile: new BearerConnectionProfile({
       connectionId,
@@ -114,6 +121,7 @@ export const preparePairingRegistration = Effect.fn(
       label: descriptor.label,
       httpBaseUrl: target.httpBaseUrl,
       wsBaseUrl: target.wsBaseUrl,
+      ...(input.sharedWorkspace === true ? { sharedWorkspace: true } : {}),
     }),
     credential: new BearerConnectionCredential({
       token: access.access_token,
@@ -201,6 +209,7 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       environmentId: options.input.environmentId,
       label,
       connectionId,
+      ...(entry.target.sharedWorkspace === true ? { sharedWorkspace: true } : {}),
     }),
     profile: new BearerConnectionProfile({
       connectionId,
@@ -208,6 +217,7 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       label,
       httpBaseUrl,
       wsBaseUrl: deriveWsBaseUrl(httpBaseUrl),
+      ...(entry.target.sharedWorkspace === true ? { sharedWorkspace: true } : {}),
     }),
     credential: credential.value,
   });

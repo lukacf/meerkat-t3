@@ -31,6 +31,7 @@
     "build:desktop": "vp run --filter @t3tools/desktop --filter t3 build",
     "native:build": "node scripts/build-meerkat-runtime.ts",
     "native:test": "scripts/repo-cargo test --locked -p meerkat-desktop-contracts -p meerkat-desktop-gateway -p meerkat-desktop-stdio",
+    "release:qualify": "node scripts/qualify-meerkat-release.ts",
     "build:resource-monitor": "cargo build --locked --release --manifest-path native/resource-monitor/Cargo.toml",
     "typecheck": "vp run --filter @t3tools/contracts --filter @t3tools/shared --filter @t3tools/client-runtime --filter @t3tools/ssh --filter @t3tools/tailscale --filter t3 --filter @t3tools/web --filter @t3tools/desktop --filter @t3tools/scripts --concurrency-limit 2 typecheck",
     "tc": "pnpm typecheck",

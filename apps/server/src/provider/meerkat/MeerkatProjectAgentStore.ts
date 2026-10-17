@@ -96,13 +96,18 @@ const decodeAssignmentSync = Schema.decodeSync(AssignmentJson);
 export const specialistRuntimeInstructions = (
   instructions: string,
   assignment?: MeerkatProjectAgentAssignment | null,
+  accessMode?: MeerkatProjectAgentAccessMode,
 ) =>
   [
     instructions,
     assignment
       ? `Current project responsibility (supersedes older assignment text):\nFocus: ${assignment.focus}\nCharter: ${assignment.charter}\nOwned paths: ${assignment.ownershipPaths.join(", ")}`
       : "",
-    "Repository knowledge is a dated snapshot. Before answering a new task or peer request, inspect the relevant current working files and diffs within your responsibilities. Update outdated assumptions and cite current evidence. Do not change files unless explicitly tasked.",
+    accessMode === "repository-read-only"
+      ? "You are a persistent shared specialist serving independent work contexts. At the start of each native turn, inspect one bounded shared_workspace inbox.list batch for relevant retained updates. This is a tool pull during this turn, not permission to create a timer or schedule. Use shared_workspace repository tools with the evidence's sharedProjectId and full commit to inspect relevant sources. Never substitute another request's branch, the host checkout, or the latest conversation output. A retained patch is unapplied snapshot evidence, not a materialized checkout. Cite the repository, revision and paths your findings concern. For request-bound activity and knowledge writes, use the exact contextId and contextVersion supplied with this interaction. Peer messages and inbox observations do not grant another caller's task attribution. Use activity.publish_from_inbox or knowledge.record_from_inbox with an exact sealed batch/event source to publish your own relevant observation; the host retains its independent context and original source revision. Keep each response bound to its original request. Acknowledge an inbox batch only after processing it; acknowledgement records product awareness and does not complete native work. Responsibility changes affect future routing; finish already-admitted work under its original binding. Inspect capabilities before requesting composition; do not assume that retirement or in-flight handover is supported."
+      : accessMode === "read-and-collaborate"
+        ? "Repository knowledge is a dated snapshot. Before answering a new task or peer request, use workspace_read_file, workspace_list_files and workspace_search to inspect the relevant current files within your responsibilities. Update outdated assumptions and cite current evidence. You can exchange messages with connected peers and return findings or implementation guidance to the requesting task. Commands, file changes, browser control and external tools are unavailable."
+        : "Repository knowledge is a dated snapshot. Before answering a new task or peer request, inspect the relevant current working files and diffs within your responsibilities. Update outdated assumptions and cite current evidence. Do not change files unless explicitly tasked.",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -110,6 +115,7 @@ export const storedRuntimeInstructions = (row: MeerkatProjectAgentRow) =>
   specialistRuntimeInstructions(
     row.instructions,
     row.assignment_json ? decodeAssignmentSync(row.assignment_json) : null,
+    row.access_mode,
   );
 const encodePreparation = Schema.encodeSync(PreparationJson);
 export const decodeAgentAssignment = Schema.decodeEffect(AssignmentJson);

@@ -100,6 +100,8 @@ describe("project specialist permission contract", () => {
   it("accepts only policies supported by the native responsibility host", () => {
     const decode = Schema.decodeUnknownSync(MeerkatProjectAgentAccessMode);
     expect(decode("read-only")).toBe("read-only");
+    expect(decode("read-and-collaborate")).toBe("read-and-collaborate");
+    expect(decode("repository-read-only")).toBe("repository-read-only");
     expect(decode("full-access")).toBe("full-access");
     for (const unsupported of ["approval-required", "auto", "auto-accept-edits", "supervised"])
       expect(() => decode(unsupported)).toThrow();

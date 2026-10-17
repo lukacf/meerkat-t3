@@ -1,4 +1,68 @@
+import {
+  SharedDelegationSession,
+  SharedDelegationContextInput,
+  SharedDelegationContext,
+  SharedDelegationRegisterInput,
+  SharedDelegationRevokeInput,
+  SharedDelegationInvokeInput,
+  SharedDelegation,
+  SharedLocalConnectionCreateInput,
+  SharedLocalConnection,
+  SharedLocalConnectionDisconnectResult,
+  SharedLocalConnectionCancelSetupInput,
+  SharedLocalConnectionCancelSetupResult,
+  SharedLocalDelegationEnableInput,
+  SharedLocalDelegation,
+} from "./sharedDelegation.ts";
 import { MeerkatUsageInput, MeerkatUsageSnapshot, MeerkatUsageError } from "./meerkatUsage.ts";
+import { SharedWorkspaceSession, SharedWorkspaceError } from "./sharedWorkspace.ts";
+import { SharedDiscoveryInput, SharedDiscoveryResult } from "./sharedDiscovery.ts";
+import {
+  SharedCompositionInput,
+  SharedCompositionHistoryInput,
+  SharedCompositionHistory,
+  SharedCompositionOperationInput,
+  SharedCompositionOperation,
+} from "./sharedComposition.ts";
+import {
+  SharedWorkspaceConfigureInput,
+  SharedWorkspace,
+  SharedWorkspaceJoinInput,
+  SharedParticipant,
+  SharedProjectRegisterInput,
+  SharedProject,
+  SharedSpecialistRegisterInput,
+  SharedSpecialist,
+  SharedCheckoutAttachInput,
+  SharedCheckout,
+  SharedWorkContextInput,
+  SharedWorkContext,
+  SharedActivityPublishInput,
+  SharedActivity,
+  SharedInboxReadInput,
+  SharedInbox,
+  SharedInboxAcknowledgeInput,
+  SharedSnapshotPutInput,
+  SharedSnapshot,
+  SharedKnowledgePutInput,
+  SharedKnowledge,
+  SharedKnowledgeSearchInput,
+  SharedKnowledgeSearchResult,
+} from "./sharedWorkspace.ts";
+import {
+  SharedSpecialistConversationInput,
+  SharedSpecialistConversation,
+  SharedSpecialistSendInput,
+  SharedSpecialistRequest,
+  SharedSpecialistRequestInput,
+} from "./sharedSpecialist.ts";
+import {
+  SharedCheckoutPatchInput,
+  SharedCheckoutPatch,
+  SharedCheckoutRevisionInput,
+  SharedCheckoutRevision,
+  SharedCheckoutRevisionError,
+} from "./sharedCheckout.ts";
 import {
   RestoreReviewConsentInput,
   RestoreReviewError,
@@ -396,6 +460,40 @@ import {
 import { VcsError } from "./vcs.ts";
 
 export const WS_METHODS = {
+  sharedWorkspaceSession: "sharedWorkspace.session",
+  sharedWorkspaceConfigure: "shared.sharedWorkspaceConfigure",
+  sharedWorkspaceJoin: "shared.sharedWorkspaceJoin",
+  sharedProjectRegister: "shared.sharedProjectRegister",
+  sharedSpecialistRegister: "shared.sharedSpecialistRegister",
+  sharedCheckoutAttach: "shared.sharedCheckoutAttach",
+  sharedWorkContextPut: "shared.sharedWorkContextPut",
+  sharedActivityPublish: "shared.sharedActivityPublish",
+  sharedInboxRead: "shared.sharedInboxRead",
+  sharedInboxAcknowledge: "shared.sharedInboxAcknowledge",
+  sharedSnapshotPut: "shared.sharedSnapshotPut",
+  sharedKnowledgePut: "shared.sharedKnowledgePut",
+  sharedKnowledgeSearch: "shared.sharedKnowledgeSearch",
+  sharedSpecialistConversation: "shared.sharedSpecialistConversation",
+  sharedSpecialistSend: "shared.sharedSpecialistSend",
+  sharedSpecialistRequest: "shared.sharedSpecialistRequest",
+  sharedSpecialistDiscover: "shared.sharedSpecialistDiscover",
+  sharedCompositionExecute: "shared.sharedCompositionExecute",
+  sharedCompositionOperation: "shared.sharedCompositionOperation",
+  sharedCompositionHistory: "shared.sharedCompositionHistory",
+  sharedDelegationSession: "shared.sharedDelegationSession",
+  sharedDelegationContext: "shared.sharedDelegationContext",
+  sharedDelegationRegister: "shared.sharedDelegationRegister",
+  sharedDelegationRevoke: "shared.sharedDelegationRevoke",
+  sharedDelegationInvoke: "shared.sharedDelegationInvoke",
+  sharedLocalConnectionCreate: "shared.sharedLocalConnectionCreate",
+  sharedLocalConnectionList: "shared.sharedLocalConnectionList",
+  sharedLocalConnectionDisconnect: "shared.sharedLocalConnectionDisconnect",
+  sharedLocalConnectionCancelSetup: "shared.sharedLocalConnectionCancelSetup",
+  sharedLocalDelegationEnable: "shared.sharedLocalDelegationEnable",
+  sharedLocalDelegationList: "shared.sharedLocalDelegationList",
+  sharedLocalDelegationRevoke: "shared.sharedLocalDelegationRevoke",
+  sharedCheckoutRevision: "shared.sharedCheckoutRevision",
+  sharedCheckoutPatch: "shared.sharedCheckoutPatch",
   meerkatBrowserStatus: "meerkat.browserStatus",
   meerkatBrowserGrant: "meerkat.browserGrant",
   meerkatImageUpload: "meerkat.imageUpload",
@@ -630,6 +728,175 @@ export const WS_METHODS = {
   subscribeResourceTelemetry: "subscribeResourceTelemetry",
 } as const;
 
+const WsSharedWorkspaceConfigureRpc = Rpc.make(WS_METHODS.sharedWorkspaceConfigure, {
+  payload: SharedWorkspaceConfigureInput,
+  success: SharedWorkspace,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedWorkspaceJoinRpc = Rpc.make(WS_METHODS.sharedWorkspaceJoin, {
+  payload: SharedWorkspaceJoinInput,
+  success: SharedParticipant,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedProjectRegisterRpc = Rpc.make(WS_METHODS.sharedProjectRegister, {
+  payload: SharedProjectRegisterInput,
+  success: SharedProject,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedSpecialistRegisterRpc = Rpc.make(WS_METHODS.sharedSpecialistRegister, {
+  payload: SharedSpecialistRegisterInput,
+  success: SharedSpecialist,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedCheckoutAttachRpc = Rpc.make(WS_METHODS.sharedCheckoutAttach, {
+  payload: SharedCheckoutAttachInput,
+  success: SharedCheckout,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedWorkContextPutRpc = Rpc.make(WS_METHODS.sharedWorkContextPut, {
+  payload: SharedWorkContextInput,
+  success: SharedWorkContext,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedActivityPublishRpc = Rpc.make(WS_METHODS.sharedActivityPublish, {
+  payload: SharedActivityPublishInput,
+  success: SharedActivity,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedInboxReadRpc = Rpc.make(WS_METHODS.sharedInboxRead, {
+  payload: SharedInboxReadInput,
+  success: SharedInbox,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedInboxAcknowledgeRpc = Rpc.make(WS_METHODS.sharedInboxAcknowledge, {
+  payload: SharedInboxAcknowledgeInput,
+  success: Schema.Void,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedSnapshotPutRpc = Rpc.make(WS_METHODS.sharedSnapshotPut, {
+  payload: SharedSnapshotPutInput,
+  success: SharedSnapshot,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedKnowledgePutRpc = Rpc.make(WS_METHODS.sharedKnowledgePut, {
+  payload: SharedKnowledgePutInput,
+  success: SharedKnowledge,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedKnowledgeSearchRpc = Rpc.make(WS_METHODS.sharedKnowledgeSearch, {
+  payload: SharedKnowledgeSearchInput,
+  success: SharedKnowledgeSearchResult,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedSpecialistConversationRpc = Rpc.make(WS_METHODS.sharedSpecialistConversation, {
+  payload: SharedSpecialistConversationInput,
+  success: SharedSpecialistConversation,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedSpecialistSendRpc = Rpc.make(WS_METHODS.sharedSpecialistSend, {
+  payload: SharedSpecialistSendInput,
+  success: SharedSpecialistRequest,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedSpecialistRequestRpc = Rpc.make(WS_METHODS.sharedSpecialistRequest, {
+  payload: SharedSpecialistRequestInput,
+  success: SharedSpecialistRequest,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedSpecialistDiscoverRpc = Rpc.make(WS_METHODS.sharedSpecialistDiscover, {
+  payload: SharedDiscoveryInput,
+  success: SharedDiscoveryResult,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedCompositionExecuteRpc = Rpc.make(WS_METHODS.sharedCompositionExecute, {
+  payload: SharedCompositionInput,
+  success: SharedCompositionOperation,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedCompositionHistoryRpc = Rpc.make(WS_METHODS.sharedCompositionHistory, {
+  payload: SharedCompositionHistoryInput,
+  success: SharedCompositionHistory,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedCompositionOperationRpc = Rpc.make(WS_METHODS.sharedCompositionOperation, {
+  payload: SharedCompositionOperationInput,
+  success: SharedCompositionOperation,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedDelegationSessionRpc = Rpc.make(WS_METHODS.sharedDelegationSession, {
+  payload: Schema.Struct({}),
+  success: SharedDelegationSession,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedDelegationContextRpc = Rpc.make(WS_METHODS.sharedDelegationContext, {
+  payload: SharedDelegationContextInput,
+  success: SharedDelegationContext,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedDelegationRegisterRpc = Rpc.make(WS_METHODS.sharedDelegationRegister, {
+  payload: SharedDelegationRegisterInput,
+  success: SharedDelegation,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedDelegationRevokeRpc = Rpc.make(WS_METHODS.sharedDelegationRevoke, {
+  payload: SharedDelegationRevokeInput,
+  success: SharedDelegation,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedDelegationInvokeRpc = Rpc.make(WS_METHODS.sharedDelegationInvoke, {
+  payload: SharedDelegationInvokeInput,
+  success: Schema.Unknown,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedLocalConnectionCreateRpc = Rpc.make(WS_METHODS.sharedLocalConnectionCreate, {
+  payload: SharedLocalConnectionCreateInput,
+  success: SharedLocalConnection,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedLocalConnectionListRpc = Rpc.make(WS_METHODS.sharedLocalConnectionList, {
+  payload: Schema.Struct({}),
+  success: Schema.Array(SharedLocalConnection),
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedLocalConnectionDisconnectRpc = Rpc.make(WS_METHODS.sharedLocalConnectionDisconnect, {
+  payload: Schema.Struct({ connectionId: Schema.String }),
+  success: SharedLocalConnectionDisconnectResult,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedLocalConnectionCancelSetupRpc = Rpc.make(
+  WS_METHODS.sharedLocalConnectionCancelSetup,
+  {
+    payload: SharedLocalConnectionCancelSetupInput,
+    success: SharedLocalConnectionCancelSetupResult,
+    error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+  },
+);
+const WsSharedLocalDelegationEnableRpc = Rpc.make(WS_METHODS.sharedLocalDelegationEnable, {
+  payload: SharedLocalDelegationEnableInput,
+  success: SharedLocalDelegation,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedLocalDelegationListRpc = Rpc.make(WS_METHODS.sharedLocalDelegationList, {
+  payload: Schema.Struct({ connectionId: Schema.String }),
+  success: Schema.Array(SharedLocalDelegation),
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedLocalDelegationRevokeRpc = Rpc.make(WS_METHODS.sharedLocalDelegationRevoke, {
+  payload: Schema.Struct({ localId: Schema.String }),
+  success: SharedLocalDelegation,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
+});
+const WsSharedCheckoutPatchRpc = Rpc.make(WS_METHODS.sharedCheckoutPatch, {
+  payload: SharedCheckoutPatchInput,
+  success: SharedCheckoutPatch,
+  error: Schema.Union([SharedCheckoutRevisionError, EnvironmentAuthorizationError]),
+});
+const WsSharedCheckoutRevisionRpc = Rpc.make(WS_METHODS.sharedCheckoutRevision, {
+  payload: SharedCheckoutRevisionInput,
+  success: SharedCheckoutRevision,
+  error: Schema.Union([SharedCheckoutRevisionError, EnvironmentAuthorizationError]),
+});
+
 const WsServerUpsertKeybindingRpc = Rpc.make(WS_METHODS.serverUpsertKeybinding, {
   payload: ServerUpsertKeybindingInput,
   success: ServerUpsertKeybindingResult,
@@ -646,6 +913,12 @@ const WsServerProbeRpc = Rpc.make(WS_METHODS.serverProbe, {
   payload: Schema.Struct({}),
   success: Schema.Struct({}),
   error: EnvironmentAuthorizationError,
+});
+
+const WsSharedWorkspaceSessionRpc = Rpc.make(WS_METHODS.sharedWorkspaceSession, {
+  payload: Schema.Struct({}),
+  success: SharedWorkspaceSession,
+  error: Schema.Union([SharedWorkspaceError, EnvironmentAuthorizationError]),
 });
 
 const WsServerGetConfigRpc = Rpc.make(WS_METHODS.serverGetConfig, {
@@ -1904,7 +2177,44 @@ const WsMeerkatImageReadRpc = Rpc.make(WS_METHODS.meerkatImageRead, {
   error: Schema.Union([MeerkatMediaError, EnvironmentAuthorizationError]),
 });
 
-export const WsRpcGroup = RpcGroup.make(
+export const SharedWorkspaceRpcGroup = RpcGroup.make(
+  WsSharedDelegationSessionRpc,
+  WsSharedDelegationRegisterRpc,
+  WsSharedDelegationContextRpc,
+  WsSharedDelegationRevokeRpc,
+  WsSharedDelegationInvokeRpc,
+  WsSharedLocalConnectionCreateRpc,
+  WsSharedLocalConnectionListRpc,
+  WsSharedLocalConnectionDisconnectRpc,
+  WsSharedLocalConnectionCancelSetupRpc,
+  WsSharedLocalDelegationEnableRpc,
+  WsSharedLocalDelegationListRpc,
+  WsSharedLocalDelegationRevokeRpc,
+  WsSharedWorkspaceConfigureRpc,
+  WsSharedWorkspaceJoinRpc,
+  WsSharedProjectRegisterRpc,
+  WsSharedSpecialistRegisterRpc,
+  WsSharedCheckoutAttachRpc,
+  WsSharedWorkContextPutRpc,
+  WsSharedActivityPublishRpc,
+  WsSharedInboxReadRpc,
+  WsSharedInboxAcknowledgeRpc,
+  WsSharedSnapshotPutRpc,
+  WsSharedKnowledgePutRpc,
+  WsSharedKnowledgeSearchRpc,
+  WsSharedSpecialistConversationRpc,
+  WsSharedSpecialistSendRpc,
+  WsSharedSpecialistRequestRpc,
+  WsSharedSpecialistDiscoverRpc,
+  WsSharedCompositionExecuteRpc,
+  WsSharedCompositionOperationRpc,
+  WsSharedCompositionHistoryRpc,
+  WsSharedCheckoutRevisionRpc,
+  WsSharedCheckoutPatchRpc,
+  WsSharedWorkspaceSessionRpc,
+);
+
+export const WorkbenchRpcGroup = RpcGroup.make(
   WsMeerkatBrowserStatusRpc,
   WsMeerkatBrowserGrantRpc,
   WsMeerkatImageUploadRpc,
@@ -2121,3 +2431,5 @@ import {
   MeerkatApprovals,
   MeerkatApprovalDecisionInput,
 } from "./meerkatApprovals.ts";
+
+export const WsRpcGroup = WorkbenchRpcGroup.merge(SharedWorkspaceRpcGroup);

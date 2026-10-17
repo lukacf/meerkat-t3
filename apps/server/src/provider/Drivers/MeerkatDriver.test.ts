@@ -16,6 +16,7 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import { ServerConfig } from "../../config.ts";
+import { SharedToolHost } from "../../shared/SharedToolHost.ts";
 import {
   ProfileRestoreReview,
   RESTORE_REVIEW_MESSAGE,
@@ -34,92 +35,112 @@ import {
 const decodeConfig = Schema.decodeUnknownSync(MeerkatDriverConfig);
 
 describe("MeerkatDriver restored-profile boundary", () => {
-  effectIt.effect(
-    "rejects new native work before transport and preserves receipt, history, and stop",
-    () =>
-      Effect.gen(function* () {
-        const root = yield* Effect.promise(() =>
-          NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "meerkat-driver-restore-")),
-        );
-        yield* Effect.addFinalizer(() =>
-          Effect.promise(() => NodeFSP.rm(root, { recursive: true, force: true })),
-        );
-        const calls: string[] = [];
-        const stub = vi.spyOn(GatewayClient, "createMeerkatGatewayClient").mockReturnValue({
-          pid: undefined,
-          request: async (method) => {
-            calls.push(method);
-            return {};
-          },
-          subscribe: () => () => {},
-          onClose: () => () => {},
-          close: async () => {},
-        });
-        yield* Effect.addFinalizer(() => Effect.sync(() => stub.mockRestore()));
-        const restoreHold: RestoreReviewService = {
-          held: true,
-          status: () => ({
-            status: "restart-required",
-            restoreId: "restore",
-            restoredAt: null,
-            backupCreatedAt: null,
-            message: RESTORE_REVIEW_MESSAGE,
-          }),
-          consent: async () => {
-            throw new Error("Unused consent");
-          },
-        };
-        yield* Effect.gen(function* () {
-          const instance = yield* MeerkatDriver.create({
-            instanceId: ProviderInstanceId.make("restore-test"),
-            displayName: "Restore test",
-            environment: [],
-            enabled: false,
-            config: { gatewayBinaryPath: "unused-mocked-gateway", projectPath: root },
+  for (const withSharedHost of [false, true])
+    effectIt.effect(
+      `rejects new native work and preserves passive inspection with shared host=${withSharedHost}`,
+      () =>
+        Effect.gen(function* () {
+          const root = yield* Effect.promise(() =>
+            NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "meerkat-driver-restore-")),
+          );
+          yield* Effect.addFinalizer(() =>
+            Effect.promise(() => NodeFSP.rm(root, { recursive: true, force: true })),
+          );
+          const calls: string[] = [];
+          const sharedConfiguration = {
+            url: "http://127.0.0.1:1234/native-tool",
+            token: "fixture-private-host-token",
+            actions: ["projects.list"],
+          };
+          const configured: unknown[] = [];
+          const stub = vi.spyOn(GatewayClient, "createMeerkatGatewayClient").mockReturnValue({
+            pid: undefined,
+            request: async (method, params) => {
+              calls.push(method);
+              if (method === "sharedTools.v1.configure") configured.push(params);
+              return {};
+            },
+            subscribe: () => () => {},
+            onClose: () => () => {},
+            close: async () => {},
           });
-          for (const method of [
-            "mobs.v1.consoleSend",
-            "mobs.v1.consoleResume",
-            "mobs.v1.createThreadMob",
-            "mobs.v1.turnStart",
-            "mobs.v1.createDomainMob",
-            "mobs.v1.peerLocal",
-            "mobs.v1.recoverThread",
-            "questions.v1.answer",
-            "approvals.v1.respond",
-            "text.v1.generate",
-            "future.v1.work",
-          ]) {
-            yield* Effect.promise(() =>
-              expect(instance.meerkatControls!.request(method, {})).rejects.toMatchObject({
-                kind: "restore_review_required",
-                outcomeUnknown: false,
-              }),
-            );
-          }
-          expect(calls).toEqual([]);
-          const passive = [
-            "models.v1.catalog",
-            "mobs.v1.teamSnapshot",
-            "mobs.v1.consoleHistory",
-            "mobs.v1.consoleReceipt",
-            "mobs.v1.consoleStop",
-            "mobs.v1.coordinatorStop",
-          ];
-          for (const method of passive)
-            yield* Effect.promise(() => instance.meerkatControls!.request(method, {}));
-          expect(calls).toEqual(passive);
-        }).pipe(
-          Effect.provideService(ProfileRestoreReview, restoreHold),
-          Effect.provide(
-            Layer.mergeAll(
-              Layer.mock(MeerkatCheckpointStoreService)({}),
-              ServerConfig.layerTest(root, root).pipe(Layer.provideMerge(NodeServices.layer)),
+          yield* Effect.addFinalizer(() => Effect.sync(() => stub.mockRestore()));
+          const restoreHold: RestoreReviewService = {
+            held: true,
+            status: () => ({
+              status: "restart-required",
+              restoreId: "restore",
+              restoredAt: null,
+              backupCreatedAt: null,
+              message: RESTORE_REVIEW_MESSAGE,
+            }),
+            consent: async () => {
+              throw new Error("Unused consent");
+            },
+          };
+          yield* Effect.gen(function* () {
+            const instance = yield* MeerkatDriver.create({
+              instanceId: ProviderInstanceId.make("restore-test"),
+              displayName: "Restore test",
+              environment: [],
+              enabled: false,
+              config: { gatewayBinaryPath: "unused-mocked-gateway", projectPath: root },
+            });
+            for (const method of [
+              "mobs.v1.consoleSend",
+              "mobs.v1.consoleResume",
+              "mobs.v1.createThreadMob",
+              "mobs.v1.turnStart",
+              "mobs.v1.createDomainMob",
+              "mobs.v1.peerLocal",
+              "mobs.v1.recoverThread",
+              "questions.v1.answer",
+              "approvals.v1.respond",
+              "text.v1.generate",
+              "sharedTools.v1.configure",
+              "future.v1.work",
+            ]) {
+              yield* Effect.promise(() =>
+                expect(instance.meerkatControls!.request(method, {})).rejects.toMatchObject({
+                  kind: "restore_review_required",
+                  outcomeUnknown: false,
+                }),
+              );
+            }
+            const setup = withSharedHost ? ["sharedTools.v1.configure"] : [];
+            expect(calls).toEqual(setup);
+            expect(configured).toEqual(withSharedHost ? [sharedConfiguration] : []);
+            const passive = [
+              "models.v1.catalog",
+              "mobs.v1.teamSnapshot",
+              "mobs.v1.consoleHistory",
+              "mobs.v1.consoleReceipt",
+              "mobs.v1.consoleStop",
+              "mobs.v1.coordinatorStop",
+            ];
+            for (const method of passive)
+              yield* Effect.promise(() => instance.meerkatControls!.request(method, {}));
+            expect(calls).toEqual([...setup, ...passive]);
+          }).pipe(
+            Effect.provideService(ProfileRestoreReview, restoreHold),
+            Effect.provideService(
+              SharedToolHost,
+              withSharedHost
+                ? {
+                    configuration: sharedConfiguration,
+                    install: () => () => {},
+                  }
+                : undefined,
             ),
-          ),
-        );
-      }).pipe(Effect.scoped),
-  );
+            Effect.provide(
+              Layer.mergeAll(
+                Layer.mock(MeerkatCheckpointStoreService)({}),
+                ServerConfig.layerTest(root, root).pipe(Layer.provideMerge(NodeServices.layer)),
+              ),
+            ),
+          );
+        }).pipe(Effect.scoped),
+    );
 });
 
 describe("MeerkatDriver shutdown", () => {

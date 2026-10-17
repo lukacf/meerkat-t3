@@ -157,6 +157,8 @@ checksum = "{self.checksum}"
         artifacts = product["artifacts"][:-1] + [
             {"reason": "compiler-artifact", "package_id": package_id, "target": {"kind": ["custom-build"]},
              "filenames": [str(compiled)], "executable": None},
+            {"reason": "build-script-executed", "package_id": package_id,
+             "out_dir": str(target_dir / "build/demo-4444444444444444/out")},
             {"reason": "compiler-artifact", "package_id": package_id, "target": {"kind": ["proc-macro"]},
              "filenames": [str(macro)], "executable": None}, product["artifacts"][-1]]
         write(product["messages_path"], "\n".join(json.dumps(a) for a in artifacts))
@@ -169,6 +171,126 @@ checksum = "{self.checksum}"
         compiled_unit = next(unit for unit in units if unit["id"] == run["identityFromUnit"])
         self.assertEqual(compiled_unit["kind"], "build-script")
         self.assertEqual(compiled_unit["packageId"], run["packageId"])
+
+    def add_colliding_build_script_runs(self):
+        product = self.products["gateway"]
+        target_dir = product["binary"].parent
+        host = product["binary"].parents[2] / "release"
+        compile_fp = host / ".fingerprint/demo-3333333333333333/build-script-build-script-build.json"
+        json_write(compile_fp, {"deps": [], "compile_kind": 0})
+        write(compile_fp.with_suffix(""), (21).to_bytes(8, "little").hex())
+        compiled = host / "build/demo-3333333333333333/build-script-build"
+        write(compiled, "compiled build script")
+        runs = []
+        for directory, suffix in ((target_dir, "4444444444444444"), (host, "6666666666666666")):
+            fp = directory / f".fingerprint/demo-{suffix}/run-build-script-build-script-build.json"
+            # Cargo may emit byte-identical run fingerprints for host and target.
+            json_write(fp, {"deps": [[1, "build_script_build", False, 21]], "compile_kind": 0})
+            write(fp.with_suffix(""), (22).to_bytes(8, "little").hex())
+            runs.append(fp)
+        lib = json.loads(product["fp"].read_text())
+        lib["deps"] = [[1, "build_script_build", False, 22]]
+        json_write(product["fp"], lib)
+        package_id = product["metadata"]["packages"][1]["id"]
+        product["artifacts"][-1:-1] = [
+            {"reason": "compiler-artifact", "package_id": package_id, "target": {"kind": ["custom-build"]},
+             "filenames": [str(compiled)], "executable": None},
+            {"reason": "build-script-executed", "package_id": package_id,
+             "out_dir": str(target_dir / "build/demo-4444444444444444/out")}]
+        return product, runs
+
+    def save_messages(self, product):
+        write(product["messages_path"], "\n".join(json.dumps(a) for a in product["artifacts"]))
+
+    def test_identical_cached_host_run_resolved_by_current_execution(self):
+        product, runs = self.add_colliding_build_script_runs()
+        self.save_messages(product)
+        result = MODULE.prepare(self.options)
+        graph = json.loads(Path(result["selection"]["path"]).read_text())["products"]["gateway"]
+        units = json.loads(Path(graph["unitGraph"]["path"]).read_text())
+        self.assertEqual(graph["selectedUnitCount"], 4)
+        target = product["binary"].parents[2]
+        run = next(unit for unit in units if unit["kind"] == "build-script-run")
+        self.assertEqual(run["id"], str(runs[0].relative_to(target)))
+        self.assertNotIn(str(runs[1].relative_to(target)), [unit["id"] for unit in units])
+        library = next(unit for unit in units if unit["kind"] == "library")
+        self.assertEqual(library["dependencyEdges"][0]["unit"], run["id"])
+        self.assertIn(run["identityFromUnit"], [unit["id"] for unit in units])
+
+    def test_current_host_and_target_runs_resolve_in_consumers_build_tree(self):
+        product, runs = self.add_colliding_build_script_runs()
+        host_execution = dict(product["artifacts"][-2])
+        host_execution["out_dir"] = str(runs[1].parents[2] / "build" / runs[1].parent.name / "out")
+        product["artifacts"].insert(-1, host_execution)
+        self.save_messages(product)
+        result = MODULE.prepare(self.options)
+        graph = json.loads(Path(result["selection"]["path"]).read_text())["products"]["gateway"]
+        units = json.loads(Path(graph["unitGraph"]["path"]).read_text())
+        run = next(unit for unit in units if unit["kind"] == "build-script-run")
+        self.assertEqual(run["id"], str(runs[0].relative_to(product["binary"].parents[2])))
+
+    def test_host_execution_cannot_replace_missing_target_execution(self):
+        product, runs = self.add_colliding_build_script_runs()
+        product["artifacts"][-2]["out_dir"] = str(runs[1].parents[2] / "build" / runs[1].parent.name / "out")
+        self.save_messages(product)
+        with self.assertRaisesRegex(ValueError, "fingerprint edge"):
+            MODULE.prepare(self.options)
+
+    def test_build_script_run_keeps_another_packages_build_script_dependency(self):
+        product, runs = self.add_colliding_build_script_runs()
+        package = product["metadata"]["packages"][0]
+        host = product["binary"].parents[2] / "release"
+        compile_fp = host / ".fingerprint" / f"{package['name']}-8888888888888888" / "build-script-build-script-build.json"
+        json_write(compile_fp, {"deps": [], "compile_kind": 0})
+        write(compile_fp.with_suffix(""), (31).to_bytes(8, "little").hex())
+        compiled = host / "build" / compile_fp.parent.name / "build-script-build"
+        write(compiled, "dependency build script")
+        dependency = runs[0].parents[1] / f"{package['name']}-9999999999999999" / runs[0].name
+        json_write(dependency, {"deps": [[1, "build_script_build", False, 31]], "compile_kind": 0})
+        write(dependency.with_suffix(""), (32).to_bytes(8, "little").hex())
+        run = json.loads(runs[0].read_text())
+        run["deps"].append([2, "build_script_build", False, 32])
+        json_write(runs[0], run)
+        product["artifacts"][-1:-1] = [
+            {"reason": "compiler-artifact", "package_id": package["id"], "target": {"kind": ["custom-build"]},
+             "filenames": [str(compiled)], "executable": None},
+            {"reason": "build-script-executed", "package_id": package["id"],
+             "out_dir": str(product["binary"].parent / "build" / dependency.parent.name / "out")}]
+        self.save_messages(product)
+        result = MODULE.prepare(self.options)
+        graph = json.loads(Path(result["selection"]["path"]).read_text())["products"]["gateway"]
+        units = json.loads(Path(graph["unitGraph"]["path"]).read_text())
+        self.assertEqual(graph["selectedUnitCount"], 6)
+        dependency_unit = next(unit for unit in units if unit["id"] == str(dependency.relative_to(host.parent)))
+        self.assertEqual(dependency_unit["packageId"], package["id"])
+        self.assertEqual(dependency_unit["roles"], ["build"])
+        self.assertIn(dependency_unit["identityFromUnit"], [unit["id"] for unit in units])
+
+    def test_multiple_current_runs_in_same_build_tree_remain_ambiguous(self):
+        product, runs = self.add_colliding_build_script_runs()
+        duplicate = runs[0].parents[1] / "demo-7777777777777777" / runs[0].name
+        write(duplicate, runs[0].read_bytes())
+        write(duplicate.with_suffix(""), runs[0].with_suffix("").read_bytes())
+        execution = dict(product["artifacts"][-2])
+        execution["out_dir"] = str(product["binary"].parent / "build" / duplicate.parent.name / "out")
+        product["artifacts"].insert(-1, execution)
+        self.save_messages(product)
+        with self.assertRaisesRegex(ValueError, "ambiguous fingerprint edge"):
+            MODULE.prepare(self.options)
+
+    def test_build_script_execution_package_must_match_compiled_artifact(self):
+        product, _ = self.add_colliding_build_script_runs()
+        product["artifacts"][-2]["package_id"] = product["metadata"]["packages"][0]["id"]
+        self.save_messages(product)
+        with self.assertRaisesRegex(ValueError, "execution differs from compiler artifact"):
+            MODULE.prepare(self.options)
+
+    def test_duplicate_execution_records_are_rejected(self):
+        product, _ = self.add_colliding_build_script_runs()
+        product["artifacts"].insert(-1, dict(product["artifacts"][-2]))
+        self.save_messages(product)
+        with self.assertRaisesRegex(ValueError, "fingerprint edge"):
+            MODULE.prepare(self.options)
 
     def test_changed_binary_rejected(self):
         with self.options.gateway_binary.open("ab") as stream:

@@ -39,10 +39,13 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 pub mod host_tools;
+pub use meerkat_providers::auth_store::CredentialSettlement;
+mod shared_specialist;
 mod mobkit_registry;
 mod media;
 mod browser_bridge;
 mod provider_auth;
+mod desktop_auth_scope;
 mod user_questions;
 mod native_model;
 mod native_work;
@@ -94,6 +97,7 @@ struct GatewayInner {
     events_tx: broadcast::Sender<EventEmit>,
     host_tools: Arc<HostToolTransport>,
     provider_auth: provider_auth::DesktopProviderAuth,
+    shared_tools: Arc<shared_specialist::SharedWorkspaceHost>,
 }
 
 struct ProjectRuntimeHandle {
@@ -320,6 +324,21 @@ impl Default for MeerkatGateway {
     }
 }
 
+async fn settle_credentials_with_deadline<F>(
+    deadline: tokio::time::Instant,
+    settle: impl FnOnce(Duration) -> F,
+) -> CredentialSettlement
+where
+    F: std::future::Future<Output = CredentialSettlement>,
+{
+    // Admitted host writes already retain the runtime's request-join horizon.
+    // This final observation must not give an unanswered OS prompt that entire
+    // horizon again. Core keeps custody until physical completion or exit, and
+    // its currentness rules reconcile any unsettled write on the next start.
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    settle(remaining.min(Duration::from_secs(10))).await
+}
+
 impl MeerkatGateway {
     pub fn new() -> Self {
         let (events_tx, _) = broadcast::channel(4096);
@@ -335,6 +354,7 @@ impl MeerkatGateway {
                 events_tx,
                 host_tools,
                 provider_auth: provider_auth::DesktopProviderAuth::new(),
+                shared_tools: Arc::new(shared_specialist::SharedWorkspaceHost::default()),
             }),
         }
     }
@@ -425,20 +445,12 @@ impl MeerkatGateway {
 
     /// Observe physical credential work only after this gateway has closed
     /// admission and its producers and admitted requests have settled.
-    pub async fn settle_credential_mutations(&self, deadline: tokio::time::Instant) -> Vec<String> {
+    pub async fn settle_credential_mutations(&self, deadline: tokio::time::Instant) -> Result<CredentialSettlement, String> {
         if !self.inner.shutting_down.load(Ordering::SeqCst) {
-            return vec!["Cannot settle credential work before gateway shutdown".into()];
+            return Err("Cannot settle credential work before gateway shutdown".into());
         }
-        use meerkat_providers::auth_store::{
-            CredentialSettlement, settle_in_flight_credential_mutations,
-        };
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        match settle_in_flight_credential_mutations(remaining).await {
-            CredentialSettlement::Settled => Vec::new(),
-            CredentialSettlement::Unsettled { pending } => vec![format!(
-                "Credential cleanup did not complete before the shutdown deadline: {pending} operations remain"
-            )],
-        }
+        Ok(settle_credentials_with_deadline(deadline,
+            meerkat_providers::auth_store::settle_in_flight_credential_mutations).await)
     }
 
     pub async fn handle(&self, request: RpcRequest, ctx: RequestContext) -> RpcResponse {
@@ -509,6 +521,13 @@ impl MeerkatGateway {
                         required_string(params, "sessionId")?, required_string(params, "requestId")?, answers,
                         params.get("dismissed").and_then(Value::as_bool).unwrap_or(false))
                 }
+            }
+            "sharedTools.v1.configure" => {
+                ensure_request_id(request)?;
+                let params = parse_closed_params::<shared_specialist::SharedToolsConfigure>(request.params.as_ref())?;
+                self.inner.shared_tools.configure(params)
+                    .map_err(|message| GatewayError::invalid(message, None))?;
+                Ok(json!({"configured": true}))
             }
             "desktop.hostTools.configure.v1" => {
                 ensure_request_id(request)?;
@@ -914,6 +933,7 @@ impl MeerkatGateway {
             "methods": [
                 "configs.v1.get",
                 "desktop.hostTools.configure.v1",
+                "sharedTools.v1.configure",
                 "desktop.hostTools.complete.v1",
                 "configs.v1.patch",
                 "models.v1.catalog",
@@ -3132,9 +3152,10 @@ When a decision genuinely needs the user's input, use the `ui_multiple_choice` t
                 registries
                     .entry(locator.state_root.clone())
                     .or_insert_with(|| {
-                        Arc::new(ProjectMobkitRegistry::new(Arc::clone(
-                            &self.inner.host_tools,
-                        )))
+                        Arc::new(ProjectMobkitRegistry::with_shared_tools(
+                            Arc::clone(&self.inner.host_tools),
+                            Arc::clone(&self.inner.shared_tools),
+                        ))
                     }),
             )
         };
@@ -5795,6 +5816,28 @@ fn err_to_response(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn credential_settlement_is_bounded_separately_from_runtime_shutdown() {
+        use std::time::Duration;
+        let deadline = tokio::time::Instant::now() + super::MeerkatGateway::shutdown_horizon();
+        let observed = super::settle_credentials_with_deadline(deadline, |bound| async move {
+            assert_eq!(bound, Duration::from_secs(10));
+            super::CredentialSettlement::Unsettled { pending: 1 }
+        }).await;
+        assert_eq!(observed, super::CredentialSettlement::Unsettled { pending: 1 });
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(25);
+        let observed = super::settle_credentials_with_deadline(deadline, |bound| async move {
+            assert!(bound <= Duration::from_millis(25));
+            super::CredentialSettlement::Settled
+        }).await;
+        assert_eq!(observed, super::CredentialSettlement::Settled);
+        let observed = super::settle_credentials_with_deadline(tokio::time::Instant::now(), |bound| async move {
+            assert_eq!(bound, Duration::ZERO);
+            super::CredentialSettlement::Unsettled { pending: 2 }
+        }).await;
+        assert_eq!(observed, super::CredentialSettlement::Unsettled { pending: 2 });
+    }
+
     fn fixture_assistant_message_id() -> meerkat_core::AssistantMessageId {
         // Fixture-only occurrence metadata; production IDs are minted by core.
         serde_json::from_value(serde_json::json!("00000000-0000-4000-8000-000000000001"))

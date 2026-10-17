@@ -7,12 +7,11 @@ use std::{
 
 use meerkat_core::{
     AuthBindingRef, BindingId, BindingOrigin, Config, ConfigDelta, ConfigRuntime, ConfigStore,
-    ProfileId, RealmId,
+    FileConfigStore, ProfileId, RealmId,
 };
 use serde_json::Map;
 
 use super::*;
-use crate::mobkit_registry::PresencePreservingFileConfigStore;
 
 pub(super) fn default_global_config_path() -> PathBuf {
     #[cfg(not(test))]
@@ -403,6 +402,26 @@ fn native_error(_error: impl std::fmt::Display) -> GatewayError {
     GatewayError::policy("The account operation could not be completed", None)
 }
 
+fn config_write_error(error: meerkat_core::ConfigRuntimeError) -> GatewayError {
+    if let meerkat_core::ConfigRuntimeError::Config(
+        meerkat_core::ConfigError::CompositionAdministration { administered, change, .. },
+    ) = &error
+    {
+        // Only the typed native refusal chooses a fixed remedy. Its free-form
+        // change/composer fields and arbitrary native errors remain private.
+        let remedy = if change.contains("adding [realm.global]") {
+            "The host must add [realm.global] to the user configuration by hand, then retry."
+        } else {
+            "The host must make this policy change in the configuration document, then retry."
+        };
+        return GatewayError::policy(
+            format!("Account settings would change inherited {administered}. {remedy} No configuration was written."),
+            Some(json!({"reason":"configuration_administration_required", "section":administered.to_string(), "configWritten":false})),
+        );
+    }
+    native_error(error)
+}
+
 fn auth_http_client_builder(timeout: std::time::Duration) -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -581,15 +600,24 @@ fn account_removal(
 }
 
 impl DesktopProviderAuth {
-    fn global_runtime(&self) -> ConfigRuntime {
-        ConfigRuntime::new(
-            Arc::new(PresencePreservingFileConfigStore::new(
-                self.global_config_path.clone(),
-                meerkat_models::canonical(),
-            )),
+    fn global_runtime(&self) -> Result<ConfigRuntime, GatewayError> {
+        let scope = self.auth_scope.as_ref().map_err(|error| GatewayError::policy(error.clone(), None))?;
+        let documents = Arc::new(meerkat_store::FilesystemRealmConfigSource::new(
+            scope.as_ref().map_or_else(meerkat_core::runtime_bootstrap::default_state_root, |scope| scope.state_root()),
+            self.global_config_path.clone(),
+            meerkat_models::canonical(),
+        ));
+        Ok(ConfigRuntime::new(
+            Arc::new(
+                FileConfigStore::new(
+                    self.global_config_path.clone(),
+                    meerkat_models::canonical(),
+                )
+                .with_realm_chain(RealmId::global(), documents),
+            ),
             self.global_config_path
                 .with_file_name("desktop-auth-config-state.json"),
-        )
+        ))
     }
 
     fn host_service(&self) -> Result<meerkat::HostAuthService, GatewayError> {
@@ -601,19 +629,24 @@ impl DesktopProviderAuth {
         &self,
         params: &Map<String, Value>,
     ) -> Result<AuthConfig, GatewayError> {
+        self.auth_scope.as_ref().map_err(|error| GatewayError::policy(error.clone(), None))?;
         if let Some(project) = optional_string(params, "projectPath") {
             let root = optional_string(params, "stateRoot")
                 .or_else(|| optional_string(params, "configStateRoot"));
             let locator = derive_project_locator(&project, root.as_deref())?;
-            let realm = load_effective_realm_config(&locator.project_path, &locator.state_root)
-                .await
-                .map_err(auth_policy_error)?;
+            let realm = if self.auth_scope.as_ref().map_err(|error| GatewayError::policy(error.clone(), None))?.is_some() {
+                crate::mobkit_registry::load_effective_realm_config_with_global(
+                    &locator.project_path, &locator.state_root, &self.global_config_path,
+                ).await
+            } else {
+                load_effective_realm_config(&locator.project_path, &locator.state_root).await
+            }.map_err(auth_policy_error)?;
             return Ok(AuthConfig {
                 config: realm.effective,
                 realm: realm.realm_id,
             });
         }
-        let store = PresencePreservingFileConfigStore::new(
+        let store = FileConfigStore::new(
             self.global_config_path.clone(),
             meerkat_models::canonical(),
         );
@@ -809,11 +842,24 @@ impl DesktopProviderAuth {
         let persistence = self.persistence()?;
         let lease = self.authority.generated_auth_lease_handle();
         let lease_key = meerkat_core::handles::LeaseKey::from_credential_identity(&target.credential_identity);
+        let token_key = TokenKey::from_credential_identity(&target.credential_identity);
+        // A prior interactive OS call retains its native lifecycle guard after
+        // our caller times out. Observe that work instead of joining the guard
+        // or starting another read while its system prompt remains unanswered.
+        let observation = tokio::time::timeout_at(deadline, persistence.token_store().observe_status(&token_key)).await
+            .map_err(|_| pending())?
+            .map_err(|error| GatewayError::policy(
+                "The saved credentials could not be checked. Check the account's system access and try again.",
+                error.credential_access().map(|(reason, _)| json!({"credentialObservation":reason.as_str()})),
+            ))?;
+        if matches!(observation, meerkat_providers::auth_store::TokenStoreObservation::Pending) {
+            return Err(pending());
+        }
         let checked = tokio::time::timeout_at(deadline, async {
             let guard = meerkat_core::acquire_auth_login_lifecycle_guard(&lease_key).await;
             let tokens = persistence.token_store()
                 .load_for(
-                    &TokenKey::from_credential_identity(&target.credential_identity),
+                    &token_key,
                     meerkat_providers::auth_store::TokenStoreAccess::Interactive,
                 )
                 .await
@@ -1203,7 +1249,7 @@ impl DesktopProviderAuth {
         } else {
             method.endpoint.map(str::to_string)
         };
-        let runtime = self.global_runtime();
+        let runtime = self.global_runtime()?;
         let snapshot = runtime.get().await.map_err(native_error)?;
         let mut config = snapshot.config.clone();
         let existing = params
@@ -1393,7 +1439,7 @@ impl DesktopProviderAuth {
             runtime
                 .patch(ConfigDelta(delta), Some(snapshot.generation))
                 .await
-                .map_err(native_error)?;
+                .map_err(config_write_error)?;
         }
         let activation = if let Some(secret) = secret {
             self.save_direct_secret(&target, secret).await?;
@@ -1577,7 +1623,7 @@ impl DesktopProviderAuth {
         if binding.realm != RealmId::global() {
             return Ok(vec![]);
         }
-        let runtime = self.global_runtime();
+        let runtime = self.global_runtime()?;
         let snapshot = runtime.get().await.map_err(native_error)?;
         let target = meerkat_core::resolve_explicit_auth_binding_target(&snapshot.config, binding)
             .map_err(native_error)?;
@@ -1625,7 +1671,7 @@ impl DesktopProviderAuth {
         }
         if !selections.is_empty() {
             runtime.patch(default_selection_delta(section, &selections), Some(snapshot.generation))
-                .await.map_err(native_error)?;
+                .await.map_err(config_write_error)?;
         }
         Ok(selections.into_iter().map(|(provider, _)| provider.as_str().to_string()).collect())
     }
@@ -1670,7 +1716,7 @@ impl DesktopProviderAuth {
                 None,
             ));
         }
-        let runtime = self.global_runtime();
+        let runtime = self.global_runtime()?;
         let snapshot = runtime.get().await.map_err(native_error)?;
         let target = resolve_target(&snapshot.config, params)?;
         let removal = account_removal(&snapshot.config, &target)?;
@@ -1697,7 +1743,7 @@ impl DesktopProviderAuth {
     pub async fn set_default(&self, params: Option<&Value>) -> Result<Value, GatewayError> {
         let _mutation = self.account_mutations.lock().await;
         let params = object_params(params)?;
-        let runtime = self.global_runtime();
+        let runtime = self.global_runtime()?;
         let snapshot = runtime.get().await.map_err(native_error)?;
         let target = resolve_target(&snapshot.config, params)?;
         if target.auth_binding.realm != RealmId::global() {
@@ -1717,7 +1763,7 @@ impl DesktopProviderAuth {
                 Some(snapshot.generation),
             )
             .await
-            .map_err(native_error)?;
+            .map_err(config_write_error)?;
         Ok(json!({"updated":true}))
     }
 }
@@ -1730,3 +1776,9 @@ mod removal_tests;
 
 #[cfg(test)]
 mod activation_tests;
+
+#[cfg(test)]
+mod administration_tests;
+
+#[cfg(test)]
+mod scope_tests;

@@ -56,6 +56,7 @@ export interface MeerkatMacReleasePlan {
   readonly version: string;
   readonly enableUpdates: boolean;
   readonly artifactPurpose: "release" | "internal-validation";
+  readonly outputDirectory: string;
   readonly args: readonly string[];
 }
 
@@ -123,6 +124,19 @@ export function resolveMeerkatMacReleasePlan(
     throw new Error("Updates require a stable version or the supported nightly version format.");
   }
   const artifactPurpose = mode === "internal-unsigned" ? "internal-validation" : "release";
+  const outputDirectory =
+    env.MEERKAT_MAC_RELEASE_OUTPUT_DIR ??
+    (mode === "internal-unsigned" ? "release-internal" : "release-mac");
+  if (
+    !outputDirectory ||
+    outputDirectory.trim() !== outputDirectory ||
+    outputDirectory.startsWith("-") ||
+    [...outputDirectory].some(
+      (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+    )
+  ) {
+    throw new Error("MEERKAT_MAC_RELEASE_OUTPUT_DIR must be a nonempty directory path.");
+  }
   return {
     mode,
     repository: repositoryName,
@@ -130,6 +144,7 @@ export function resolveMeerkatMacReleasePlan(
     version,
     enableUpdates,
     artifactPurpose,
+    outputDirectory,
     args: [
       "scripts/build-desktop-artifact.ts",
       "--platform",
@@ -143,7 +158,7 @@ export function resolveMeerkatMacReleasePlan(
       "--artifact-purpose",
       artifactPurpose,
       "--output-dir",
-      mode === "internal-unsigned" ? "release-internal" : "release-mac",
+      outputDirectory,
       ...(mode === "signed" ? ["--signed"] : []),
     ],
   };

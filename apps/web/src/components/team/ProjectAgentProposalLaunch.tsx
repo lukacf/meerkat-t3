@@ -22,6 +22,7 @@ import { useEnvironments } from "../../state/environments";
 import { meerkatTeamEnvironment } from "../../state/meerkatTeam";
 import { formatEnvironmentQueryError, useEnvironmentQuery } from "../../state/query";
 import { threadEnvironment } from "../../state/threads";
+import { sharedWorkspaceEnvironment } from "../../state/sharedWorkspace";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { Button } from "../ui/button";
 import { SidebarInset } from "../ui/sidebar";
@@ -105,6 +106,13 @@ export function ProjectAgentProposalLaunch({
       input: { projectId, ...(provider ? { instanceId: provider.instanceId } : {}) },
     }),
   );
+  const sharedSession = useEnvironmentQuery(
+    sharedWorkspaceEnvironment.session({ environmentId, input: {} }),
+  );
+  const sharedProject = sharedSession.data?.snapshot.projects.find(
+    (entry) => entry.hostProjectId === projectId,
+  );
+  const sharedContextPending = sharedSession.data === null || sharedSession.error !== null;
   const create = useAtomCommand(threadEnvironment.create, { reportFailure: false });
   const bind = useAtomCommand(meerkatTeamEnvironment.projectProposalSetup, {
     reportFailure: false,
@@ -150,6 +158,8 @@ export function ProjectAgentProposalLaunch({
       !model ||
       !project ||
       !query.data?.available ||
+      sharedContextPending ||
+      (sharedProject && !sharedSession.data?.permissions.admin) ||
       destinationThreadId !== null ||
       inFlight.current ||
       failedStage === "start"
@@ -278,12 +288,19 @@ export function ProjectAgentProposalLaunch({
       </WorkspacePageHeader>
       <main className="min-h-0 flex-1 overflow-auto p-6">
         <div className="mx-auto max-w-xl space-y-6 py-4">
-          <ProjectAgentsGuide environmentId={environmentId} projectId={projectId} />
+          {!sharedProject && (
+            <ProjectAgentsGuide environmentId={environmentId} projectId={projectId} />
+          )}
           <div>
-            <h2 className="text-xl font-semibold">Find the right agents for this repository</h2>
+            <h2 className="text-xl font-semibold">
+              {sharedProject
+                ? "Generate shared project specialists"
+                : "Find the right agents for this repository"}
+            </h2>
             <p className="mt-2 text-sm text-muted-foreground">
-              Study the repository's architecture and ownership boundaries, then review a proposed
-              roster before creating and preparing your project agents.
+              {sharedProject
+                ? "Study the host repository's architecture and ownership boundaries. Review its proposed specialists, let them prepare, then share them with this workspace."
+                : "Study the repository's architecture and ownership boundaries, then review a proposed roster before creating and preparing your project agents."}
             </p>
           </div>
           {failedStage === "model" ? (
@@ -332,12 +349,14 @@ export function ProjectAgentProposalLaunch({
           )}
           <p className="text-sm text-muted-foreground">
             The study runs Read-only in its own conversation. It can inspect project files and
-            propose agents; file changes and shell commands are blocked. You choose the agents and
-            their permissions before creating them.
+            propose agents; file changes and shell commands are blocked.{" "}
+            {sharedProject
+              ? "New shared specialists use repository-only permissions. Existing local agents keep their permissions and are not converted."
+              : "You choose the agents and their permissions before creating them."}
           </p>
-          {error || query.error ? (
+          {error || query.error || sharedSession.error ? (
             <p role="alert" className="text-sm text-warning-foreground">
-              {error ?? query.error}
+              {error ?? query.error ?? sharedSession.error}
             </p>
           ) : null}
           {restoreBlock ? (
@@ -356,13 +375,17 @@ export function ProjectAgentProposalLaunch({
               variant="ghost"
               disabled={pending}
               onClick={() =>
-                void navigate({
-                  to: "/$environmentId/projects/$projectId/agents/new",
-                  params: { environmentId, projectId },
-                })
+                void navigate(
+                  sharedProject
+                    ? { to: "/settings/connections" }
+                    : {
+                        to: "/$environmentId/projects/$projectId/agents/new",
+                        params: { environmentId, projectId },
+                      },
+                )
               }
             >
-              Add an agent manually
+              {sharedProject ? "Back to shared host" : "Add an agent manually"}
             </Button>
             {createdThreadId && failedStage !== "bind" ? (
               <Button
@@ -379,6 +402,8 @@ export function ProjectAgentProposalLaunch({
                   destinationThreadId !== null ||
                   query.isPending ||
                   !query.data?.available ||
+                  sharedContextPending ||
+                  Boolean(sharedProject && !sharedSession.data?.permissions.admin) ||
                   !provider ||
                   !model ||
                   reasoning.unavailable ||

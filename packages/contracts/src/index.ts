@@ -64,3 +64,10 @@ export * from "./meerkatThreadRecovery.ts";
 
 export * from "./meerkatCheckpoints.ts";
 export * from "./meerkatUsage.ts";
+export * from "./sharedWorkspace.ts";
+export * from "./sharedSpecialist.ts";
+export * from "./sharedDiscovery.ts";
+export * from "./sharedDelegation.ts";
+export * from "./sharedCheckout.ts";
+export * from "./sharedDirectory.ts";
+export * from "./sharedComposition.ts";

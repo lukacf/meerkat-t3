@@ -4,8 +4,54 @@ import {
   applyWslEnableSelection,
   isQrShareableEndpoint,
   isWslSettingsRowVisible,
+  pairingEndpointsForExposure,
+  parsePairingUrlFields,
+  parseRemotePairingFields,
+  selectPairingEndpoint,
   selectQrEndpointOption,
 } from "./ConnectionsSettings.logic";
+
+describe("pairing fields", () => {
+  const origin = "http://localhost:3000";
+  it.each(["host", "pairingCode"] as const)(
+    "accepts a full direct link in the %s field",
+    (field) => {
+      const input = { host: "", pairingCode: "" };
+      input[field] = "https://workspace.example:4000/pair#token=example-pairing";
+      expect(parseRemotePairingFields(input, origin)).toEqual({
+        host: "https://workspace.example:4000",
+        pairingCode: "example-pairing",
+      });
+    },
+  );
+  it.each(["host", "pairingCode"] as const)("accepts a hosted link in the %s field", (field) => {
+    const input = { host: "", pairingCode: "" };
+    input[field] =
+      "https://app.example/pair?host=http%3A%2F%2Fworkspace.example%3A4000#token=example-pairing";
+    expect(parseRemotePairingFields(input, origin)).toEqual({
+      host: "http://workspace.example:4000",
+      pairingCode: "example-pairing",
+    });
+  });
+  it("preserves a separately entered code and requires a host for it", () => {
+    expect(parsePairingUrlFields("EXAMPLE-CODE", origin)).toBeNull();
+    expect(
+      parseRemotePairingFields(
+        { host: " workspace.example:4000 ", pairingCode: " EXAMPLE-CODE " },
+        origin,
+      ),
+    ).toEqual({
+      host: "workspace.example:4000",
+      pairingCode: "EXAMPLE-CODE",
+    });
+    expect(() =>
+      parseRemotePairingFields({ host: "", pairingCode: "EXAMPLE-CODE" }, origin),
+    ).toThrow("Enter a backend host.");
+    expect(() =>
+      parseRemotePairingFields({ host: "workspace.example", pairingCode: "" }, origin),
+    ).toThrow("Enter a pairing code.");
+  });
+});
 
 const baseWslState: DesktopWslState = {
   enabled: false,
@@ -112,6 +158,58 @@ function makeEndpoint(overrides: Partial<AdvertisedEndpoint>): AdvertisedEndpoin
     ...overrides,
   };
 }
+
+describe("local host pairing", () => {
+  const local = makeEndpoint({
+    id: "desktop-loopback:4780",
+    label: "This machine",
+    reachability: "loopback",
+    httpBaseUrl: "http://127.0.0.1:4780",
+    wsBaseUrl: "ws://127.0.0.1:4780",
+    compatibility: { hostedHttpsApp: "mixed-content-blocked", desktopApp: "compatible" },
+  });
+  const lan = makeEndpoint({ isDefault: true });
+
+  it("keeps the local pairing link available with network access off and never offers its QR", () => {
+    const endpoints = pairingEndpointsForExposure([local, lan], false);
+    expect(endpoints).toEqual([local]);
+    expect(selectPairingEndpoint(endpoints)).toBe(local);
+    expect(isQrShareableEndpoint(selectPairingEndpoint(endpoints)!)).toBe(false);
+    expect(
+      parsePairingUrlFields(
+        `${local.httpBaseUrl}/pair#token=example-local-pairing`,
+        local.httpBaseUrl,
+      ),
+    ).toEqual({ host: local.httpBaseUrl, pairingCode: "example-local-pairing" });
+  });
+
+  it("retains the reachable default when network access is enabled", () => {
+    const endpoints = pairingEndpointsForExposure([local, lan], true);
+    expect(endpoints).toEqual([local, lan]);
+    expect(selectPairingEndpoint(endpoints)).toBe(lan);
+    expect(selectPairingEndpoint(endpoints, "desktop-core:loopback:http")).toBe(local);
+  });
+
+  it("keeps an independent HTTPS tunnel when LAN exposure is off", () => {
+    const tunnel = makeEndpoint({
+      id: "tailscale-magicdns:host.example.test",
+      reachability: "private-network",
+      httpBaseUrl: "https://host.example.test",
+      wsBaseUrl: "wss://host.example.test",
+    });
+    const endpoints = pairingEndpointsForExposure([local, lan, tunnel], false);
+    expect(endpoints).toEqual([local, tunnel]);
+    expect(selectPairingEndpoint(endpoints)).toBe(tunnel);
+  });
+
+  it("falls back from a vanished remote choice but never selects an unavailable endpoint", () => {
+    expect(selectPairingEndpoint([local], "desktop-core:lan:http")).toBe(local);
+    expect(
+      selectPairingEndpoint([{ ...local, status: "unavailable" }], "desktop-core:loopback:http"),
+    ).toBeNull();
+    expect(selectPairingEndpoint([])).toBeNull();
+  });
+});
 
 describe("isQrShareableEndpoint", () => {
   it("excludes loopback endpoints so a scanned phone never dials itself", () => {

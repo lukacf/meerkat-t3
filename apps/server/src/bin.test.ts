@@ -663,6 +663,9 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         "access:read",
         "access:write",
         "relay:write",
+        "shared:read",
+        "shared:contribute",
+        "shared:admin",
       ]);
       assert.equal(listed.length, 1);
       assert.equal(listed[0]?.sessionId, issued.sessionId);
@@ -675,6 +678,9 @@ it.layer(NodeServices.layer)("bin cli parsing", (it) => {
         "access:read",
         "access:write",
         "relay:write",
+        "shared:read",
+        "shared:contribute",
+        "shared:admin",
       ]);
       assert.equal("token" in (listed[0] ?? {}), false);
     }).pipe(Effect.provide(DisconnectedLauncherChildLayer)),

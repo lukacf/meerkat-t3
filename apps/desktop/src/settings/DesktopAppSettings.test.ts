@@ -91,6 +91,21 @@ function writeSettingsPatch(patch: typeof DesktopSettingsPatch.Type) {
 }
 
 describe("DesktopSettings", () => {
+  it.effect("retains the shared host's address when stopped and restores opt-in on reload", () =>
+    withSettings(
+      Effect.gen(function* () {
+        const settings = yield* DesktopAppSettings.DesktopAppSettings;
+        assert.equal((yield* settings.load).sharedHostEnabled, false);
+        yield* settings.setSharedHost({ enabled: true, port: 51401 });
+        assert.equal((yield* settings.load).sharedHostPort, 51401);
+        assert.equal((yield* settings.get).sharedHostEnabled, true);
+        yield* settings.setSharedHost({ enabled: false, port: 51401 });
+        const restored = yield* settings.load;
+        assert.equal(restored.sharedHostEnabled, false);
+        assert.equal(restored.sharedHostPort, 51401);
+      }),
+    ),
+  );
   it.effect(
     "persists disabling and re-enabling local execution without clearing backend settings",
     () =>
@@ -125,6 +140,8 @@ describe("DesktopSettings", () => {
       {
         linuxPasswordStore: "auto",
         localEnvironmentEnabled: true,
+        sharedHostEnabled: false,
+        sharedHostPort: null,
         mainWindowBounds: null,
         mainWindowMaximized: false,
         serverExposureMode: "local-only",
@@ -155,6 +172,8 @@ describe("DesktopSettings", () => {
         assert.deepEqual(yield* settings.load, {
           linuxPasswordStore: "gnome-libsecret",
           localEnvironmentEnabled: true,
+          sharedHostEnabled: false,
+          sharedHostPort: null,
           mainWindowBounds: null,
           mainWindowMaximized: false,
           serverExposureMode: "network-accessible",
@@ -263,6 +282,8 @@ describe("DesktopSettings", () => {
         assert.deepEqual(yield* settings.load, {
           linuxPasswordStore: "auto",
           localEnvironmentEnabled: true,
+          sharedHostEnabled: false,
+          sharedHostPort: null,
           mainWindowBounds: { x: 120, y: 80, width: 1280, height: 900 },
           mainWindowMaximized: false,
           serverExposureMode: "network-accessible",
@@ -320,6 +341,8 @@ describe("DesktopSettings", () => {
           assert.deepEqual(yield* settings.load, {
             linuxPasswordStore: "auto",
             localEnvironmentEnabled: true,
+            sharedHostEnabled: false,
+            sharedHostPort: null,
             mainWindowBounds: null,
             mainWindowMaximized: false,
             serverExposureMode: "network-accessible",
@@ -369,6 +392,8 @@ describe("DesktopSettings", () => {
         assert.deepEqual(yield* settings.load, {
           linuxPasswordStore: "auto",
           localEnvironmentEnabled: true,
+          sharedHostEnabled: false,
+          sharedHostPort: null,
           mainWindowBounds: null,
           mainWindowMaximized: false,
           serverExposureMode: "local-only",
@@ -398,6 +423,8 @@ describe("DesktopSettings", () => {
         assert.deepEqual(yield* settings.load, {
           linuxPasswordStore: "auto",
           localEnvironmentEnabled: true,
+          sharedHostEnabled: false,
+          sharedHostPort: null,
           mainWindowBounds: null,
           mainWindowMaximized: false,
           serverExposureMode: "local-only",
@@ -426,6 +453,8 @@ describe("DesktopSettings", () => {
         assert.deepEqual(yield* settings.load, {
           linuxPasswordStore: "auto",
           localEnvironmentEnabled: true,
+          sharedHostEnabled: false,
+          sharedHostPort: null,
           mainWindowBounds: null,
           mainWindowMaximized: false,
           serverExposureMode: "local-only",

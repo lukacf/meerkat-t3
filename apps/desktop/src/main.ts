@@ -66,6 +66,7 @@ import * as PreviewManager from "./preview/Manager.ts";
 import * as DesktopWindow from "./window/DesktopWindow.ts";
 import * as DesktopDiagnostics from "./diagnostics/DesktopDiagnostics.ts";
 import * as DesktopWslBackend from "./wsl/DesktopWslBackend.ts";
+import * as DesktopSharedHost from "./backend/DesktopSharedHost.ts";
 import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
 import * as DesktopWslServerTree from "./wsl/DesktopWslServerTree.ts";
 
@@ -203,6 +204,7 @@ const desktopApplicationLayer = Layer.mergeAll(
   Layer.provideMerge(desktopSnapShotLayer),
   Layer.provideMerge(DesktopUpdates.layer),
   Layer.provideMerge(desktopWslBackendLayer),
+  Layer.provideMerge(DesktopSharedHost.layer.pipe(Layer.provideMerge(desktopBackendLayer))),
   Layer.provideMerge(desktopLocalEnvironmentAuthLayer),
 );
 

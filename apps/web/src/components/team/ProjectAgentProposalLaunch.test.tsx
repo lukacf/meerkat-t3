@@ -11,6 +11,7 @@ import {
   type ProviderOptionSelections,
   type ServerConfig,
   type ServerProvider,
+  type SharedWorkspaceSession,
 } from "@t3tools/contracts";
 
 type Config = Pick<ServerConfig, "providers" | "settings">;
@@ -23,6 +24,8 @@ const state = vi.hoisted(() => ({
   navigate: vi.fn(),
   threadShellReady: false,
   search: {} as Record<string, unknown>,
+  shared: null as SharedWorkspaceSession | null,
+  sharedError: null as string | null,
 }));
 vi.mock("../onboarding/ProjectAgentsGuide", () => ({ ProjectAgentsGuide: () => null }));
 vi.mock("../../state/server", () => ({ environmentServerConfigsAtom: "configs" }));
@@ -57,11 +60,18 @@ vi.mock("../../state/meerkatTeam", () => ({
 vi.mock("../../state/threads", () => ({
   threadEnvironment: { create: "create", startTurn: "start" },
 }));
+vi.mock("../../state/sharedWorkspace", () => ({
+  sharedWorkspaceEnvironment: { session: () => "shared" },
+}));
 vi.mock("../../state/use-atom-command", () => ({
   useAtomCommand: (command: "create" | "bind" | "start") => state[command],
 }));
 vi.mock("../../state/query", () => ({
-  useEnvironmentQuery: () => ({ data: { available: true }, isPending: false, error: null }),
+  useEnvironmentQuery: (query: string) => ({
+    data: query === "shared" ? state.shared : { available: true },
+    isPending: false,
+    error: query === "shared" ? state.sharedError : null,
+  }),
   formatEnvironmentQueryError: () => "Request failed",
 }));
 vi.mock("./useRestoreReview", () => ({
@@ -171,6 +181,11 @@ beforeEach(() => {
   state.navigate.mockReset();
   state.threadShellReady = false;
   state.search = {};
+  state.shared = {
+    snapshot: { projects: [] },
+    permissions: { admin: true },
+  } as unknown as SharedWorkspaceSession;
+  state.sharedError = null;
 });
 afterEach(async () => {
   await act(async () => renderer?.unmount());
@@ -201,6 +216,25 @@ function proposal(selectedModel?: ModelSelection) {
     />
   );
 }
+
+it("explains repository-only generation for a registered shared host and waits for authoritative context", async () => {
+  state.shared = {
+    snapshot: { projects: [{ hostProjectId: projectId }] },
+    permissions: { admin: true },
+  } as unknown as SharedWorkspaceSession;
+  await act(async () => {
+    renderer = create(proposal());
+  });
+  expect(JSON.stringify(renderer!.toJSON())).toContain("Generate shared project specialists");
+  expect(JSON.stringify(renderer!.toJSON())).toContain("repository-only permissions");
+  expect(JSON.stringify(renderer!.toJSON())).toContain("Back to shared host");
+  state.sharedError = "Host scope check failed";
+  await act(async () => renderer!.update(proposal()));
+  expect(launch().props.disabled).toBe(true);
+  await act(async () => launch().props.onClick());
+  expect(state.create).not.toHaveBeenCalled();
+  expect(state.start).not.toHaveBeenCalled();
+});
 async function renderRoute() {
   const Component = ProposalRoute.options.component!;
   await Component.preload?.();
@@ -394,9 +428,7 @@ it("leaves model choice editable when scoped auth invalidates before the first c
   expect(renderer!.root.findAllByType("select").every((select) => !select.props.disabled)).toBe(
     true,
   );
-  await act(async () =>
-    renderer!.root.findAllByType("select")[1]!.props.onChange({ target: { value: "openai:two" } }),
-  );
+  await changeSelect("Agent model", "openai:two");
   state.latest = ready;
   await act(async () => launch().props.onClick());
   expect(state.create).toHaveBeenCalledOnce();

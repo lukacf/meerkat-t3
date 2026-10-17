@@ -177,7 +177,9 @@ Keep a copy of the previous resource pair when replacing
 `apps/server/resources/native-notices/`. Copy the complete verified `bundle/` to the
 latter directory. The desktop packager rechecks both binary and lock hashes, every
 listed notice file, the selected graph, and repository license before accepting
-these resources. Changed binaries require new collection; do not edit manifest
+these resources. It also compares the gateway's provisioned lock identity with
+the current `core/Cargo.lock`, so an old runtime and matching old notices cannot
+silently accompany a source upgrade. Changed binaries require new collection; do not edit manifest
 hashes or status to make an old bundle pass. No publication occurs in this workflow.
 
 ## Test the preparation tools

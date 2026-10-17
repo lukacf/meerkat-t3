@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
+import * as NodeNet from "node:net";
 
 import * as NodeStream from "@effect/platform-node/NodeStream";
 import {
@@ -466,9 +467,12 @@ export const make = Effect.fn("resourceTelemetry.desktopTelemetryReceiver.make")
     const readable = yield* Effect.acquireRelease(
       Effect.try({
         try: () =>
-          NodeFS.createReadStream("", {
+          // A filesystem read holds a libuv worker until the parent closes its
+          // writer. Socket reads can be cancelled when this receiver exits first.
+          new NodeNet.Socket({
             fd,
-            autoClose: true,
+            readable: true,
+            writable: false,
           }),
         catch: (cause) => new DesktopTelemetryStreamFailed({ fd, cause }),
       }),

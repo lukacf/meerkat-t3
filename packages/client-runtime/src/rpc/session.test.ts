@@ -29,6 +29,7 @@ import {
   AVAILABLE_CONNECTION_STATE,
   ConnectionBlockedError,
   ConnectionTransientError,
+  BearerConnectionTarget,
   PrimaryConnectionTarget,
   RelayConnectionTarget,
   type PreparedConnection,
@@ -288,6 +289,53 @@ const publishConfigEvents = Effect.fn("TestRpcSessionFactory.publishConfigEvents
 });
 
 describe("RpcSessionFactory", () => {
+  it.effect("bootstraps a shared connection without subscribing to host configuration", () =>
+    Effect.gen(function* () {
+      const { factory, sockets } = yield* makeFactory();
+      const target = new BearerConnectionTarget({
+        environmentId: TARGET.environmentId,
+        label: TARGET.label,
+        connectionId: "shared-test",
+        sharedWorkspace: true,
+      });
+      const session = yield* factory.connect({ ...PREPARED, target });
+      const ready = yield* Effect.forkChild(session.ready);
+      const socket = yield* awaitSocket(sockets);
+      socket.open();
+      const request = yield* awaitRequest(socket);
+      expect(request.tag).toBe(WS_METHODS.sharedWorkspaceSession);
+      socket.serverMessage(
+        encodeJson({
+          _tag: "Exit",
+          requestId: request.id,
+          exit: {
+            _tag: "Success",
+            value: {
+              environment: SERVER_CONFIG.environment,
+              auth: SERVER_CONFIG.auth,
+              snapshot: {
+                workspace: null,
+                participant: null,
+                projects: [],
+                specialists: [],
+                checkouts: [],
+              },
+              permissions: { read: true, contribute: true, admin: false },
+            },
+          },
+        }),
+      );
+      yield* Fiber.join(ready);
+      expect(yield* session.initialConfig).toBeNull();
+      expect(yield* session.subscribeServerConfig({}).pipe(Stream.runCollect)).toEqual([]);
+      expect(
+        socket.sent
+          .map((message) => decodeJson(message))
+          .filter(isRpcRequest)
+          .map((entry) => entry.tag),
+      ).toEqual([WS_METHODS.sharedWorkspaceSession]);
+    }),
+  );
   it.effect("owns one scoped websocket attempt and exposes readiness and closure", () =>
     Effect.gen(function* () {
       const { factory, sockets } = yield* makeFactory();
@@ -1144,6 +1192,8 @@ describe("RpcSessionFactory", () => {
       yield* Fiber.join(readyFiber);
 
       const config = yield* session.initialConfig;
+      if (!config)
+        throw new Error("The normal workbench connection must include server configuration.");
       expect(config.keybindings).toEqual([{ command: "terminal.toggle", shortcut }]);
       expect(config.issues).toEqual([]);
       expect(config.availableEditors).toEqual(["zed"]);

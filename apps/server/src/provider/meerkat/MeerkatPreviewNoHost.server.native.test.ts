@@ -30,6 +30,7 @@ import {
   bounded,
   configureWorkspace,
   exchangeToken,
+  fixtureTimeoutMs,
   ownedServer,
   prepareFixture,
   watch,
@@ -78,6 +79,16 @@ const decodeOutput = Schema.decodeUnknownOption(
 );
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
+function sanitizedProviderFailure(error: unknown) {
+  return {
+    name: error instanceof Error ? error.name : "UnknownFailure",
+    message: (error instanceof Error ? error.message : "Non-Error fixture failure")
+      .replaceAll(workflowKey, "[fixture credential]")
+      .replace(/Bearer\s+[^\s"']+/gi, "Bearer [redacted]")
+      .slice(0, 4_000),
+  };
+}
+
 function controlledProvider() {
   const failed = Promise.withResolvers<never>();
   void failed.promise.catch(() => undefined);
@@ -86,7 +97,11 @@ function controlledProvider() {
   let workspace = "";
   let forbiddenNavigations = 0;
   let shellVerified = false;
+  let refusalVerified = false;
+  const providerFailures: Array<ReturnType<typeof sanitizedProviderFailure> & { stage: string }> =
+    [];
   const provider = NodeHttp.createServer(async (request, response) => {
+    let stage = "request envelope";
     try {
       if (request.url === "/forbidden-open") {
         forbiddenNavigations += 1;
@@ -115,6 +130,7 @@ function controlledProvider() {
       expect(matches).toHaveLength(1);
       const phase = matches[0]!;
       const step = steps.get(phase) ?? 0;
+      stage = `${phase} step ${step}`;
       const tools = payload.tools.flatMap((value) => {
         if (decodeToolTag(value).type !== "function") return [];
         const tool = decodeTool(value);
@@ -159,11 +175,18 @@ function controlledProvider() {
           ),
         };
       } else {
-        // The native visibility precheck terminalizes unadvertised tools before
-        // dispatch. A refused call must never trigger another provider request.
-        expect(phase).not.toBe("REFUSAL");
+        // Native 0.9.2 retains missing-tool refusals as canonical tool results
+        // and continues the model turn. The refused operation must not dispatch.
         expect(step).toBe(phase === "READY" ? 0 : 1);
         if (phase !== "READY") expect(outputs).toHaveLength(1);
+        if (phase === "REFUSAL") {
+          expect(JSON.parse(outputs[0]!)).toEqual({
+            error: "tool_not_found",
+            message: expectedRefusal,
+          });
+          expect(forbiddenNavigations).toBe(0);
+          refusalVerified = true;
+        }
         if (phase === "CONTINUE") {
           expect(workspace).not.toBe("");
           expect(outputs[0]).toContain(`NOHOST_SHELL:${workspace}:NOHOST_WORKTREE`);
@@ -200,8 +223,14 @@ function controlledProvider() {
           .map((event) => `data: ${JSON.stringify(event)}\n\n`)
           .join(""),
       );
-    } catch {
-      failed.reject(new Error("Controlled no-host provider assertion failed"));
+    } catch (error) {
+      const diagnostic = { stage, ...sanitizedProviderFailure(error) };
+      providerFailures.push(diagnostic);
+      failed.reject(
+        new Error(`Controlled no-host provider assertion failed during ${stage}`, {
+          cause: new Error(diagnostic.message),
+        }),
+      );
       if (!response.headersSent) response.writeHead(500, { "content-type": "application/json" });
       response.end(JSON.stringify({ error: { message: "No-host fixture failed" } }));
     }
@@ -212,7 +241,13 @@ function controlledProvider() {
     setWorkspace: (path: string) => {
       workspace = path;
     },
-    evidence: () => ({ calls, forbiddenNavigations, shellVerified }),
+    evidence: () => ({
+      calls,
+      forbiddenNavigations,
+      shellVerified,
+      refusalVerified,
+      providerFailures,
+    }),
   };
 }
 
@@ -224,10 +259,8 @@ function threadSession(item: OrchestrationThreadStreamItem) {
       : undefined;
 }
 const expectedRefusal = "Tool not found: preview_open";
-function threadFailure(item: OrchestrationThreadStreamItem, allowRefusal: boolean) {
+function threadFailure(item: OrchestrationThreadStreamItem) {
   const session = threadSession(item);
-  if (allowRefusal && session?.status === "error" && session.lastError?.includes(expectedRefusal))
-    return undefined;
   if (
     session?.status === "error" ||
     (item.kind === "event" &&
@@ -275,11 +308,13 @@ describe.skipIf(!packageApp)("Meerkat packaged server without a desktop preview 
               await server?.close();
               cleanupComplete = true;
             } finally {
-              fixture.provider.closeAllConnections();
-              if (fixture.provider.listening)
-                await new Promise<void>((resolve, reject) =>
-                  fixture.provider.close((error) => (error ? reject(error) : resolve())),
-                );
+              if (cleanupComplete) {
+                fixture.provider.closeAllConnections();
+                if (fixture.provider.listening)
+                  await new Promise<void>((resolve, reject) =>
+                    fixture.provider.close((error) => (error ? reject(error) : resolve())),
+                  );
+              }
               await NodeFSP.mkdir(NodePath.join(root, "evidence"), {
                 recursive: true,
                 mode: 0o700,
@@ -315,7 +350,7 @@ describe.skipIf(!packageApp)("Meerkat packaged server without a desktop preview 
         if (!address || typeof address === "string") throw new Error("Fixture port unavailable");
         const prepared = yield* Effect.promise(() =>
           prepareFixture(root, pkg.runtime, address.port),
-        );
+        ).pipe(Effect.uninterruptible);
         yield* Effect.promise(() =>
           initializeUpgradeRepository(prepared.projectPath, prepared.env),
         );
@@ -328,6 +363,7 @@ describe.skipIf(!packageApp)("Meerkat packaged server without a desktop preview 
           prepared.baseDir,
           port,
           prepared.env,
+          prepared.shutdownHorizonMs,
           NodePath.join(prepared.evidenceRoot, "server-diagnostics.json"),
           pkg.executable,
         );
@@ -380,7 +416,7 @@ describe.skipIf(!packageApp)("Meerkat packaged server without a desktop preview 
                 address.port,
                 prepared.env,
               ),
-            );
+            ).pipe(Effect.uninterruptible);
             yield* client[WS_METHODS.projectsWriteFile]({
               cwd: workspace,
               relativePath: "scope.txt",
@@ -402,10 +438,9 @@ describe.skipIf(!packageApp)("Meerkat packaged server without a desktop preview 
             const shell = yield* watch(
               client[ORCHESTRATION_WS_METHODS.subscribeShell]({ requestCompletionMarker: true }),
             );
-            let allowRefusal = false;
             const thread = yield* watch(
               client[ORCHESTRATION_WS_METHODS.subscribeThread]({ threadId }),
-              (item) => threadFailure(item, allowRefusal),
+              threadFailure,
             );
             yield* shell.waitFor(
               (item) => item.kind === "synchronized",
@@ -418,7 +453,6 @@ describe.skipIf(!packageApp)("Meerkat packaged server without a desktop preview 
             const run = Effect.fnUntraced(function* (phase: Phase) {
               const afterShell = shell.index(),
                 afterThread = thread.index();
-              allowRefusal = phase === "REFUSAL";
               yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand]({
                 type: "thread.turn.start",
                 commandId: CommandId.make(`nohost-${phase}`),
@@ -434,31 +468,7 @@ describe.skipIf(!packageApp)("Meerkat packaged server without a desktop preview 
                 interactionMode: "default",
                 createdAt: DateTime.formatIso(DateTime.nowUnsafe()),
               });
-              if (phase === "REFUSAL") {
-                yield* thread.waitFor(
-                  (item) => {
-                    const session = threadSession(item);
-                    return (
-                      session?.status === "error" &&
-                      session.lastError?.includes(expectedRefusal) === true
-                    );
-                  },
-                  "no-host native mutation refusal",
-                  afterThread,
-                );
-                yield* shell.waitFor(
-                  (item) =>
-                    item.kind === "thread-upserted" &&
-                    item.thread.id === threadId &&
-                    item.thread.latestTurn?.state === "error" &&
-                    item.thread.session?.status === "error" &&
-                    item.thread.session.lastError?.includes(expectedRefusal) === true,
-                  "no-host refused turn terminal receipt",
-                  afterShell,
-                );
-                mutationRefused = true;
-                return;
-              }
+
               yield* thread.waitFor(
                 (item) =>
                   item.kind === "snapshot"
@@ -485,6 +495,11 @@ describe.skipIf(!packageApp)("Meerkat packaged server without a desktop preview 
                 `no-host ${phase} terminal receipt`,
                 afterShell,
               );
+              if (phase === "REFUSAL") {
+                expect(fixture.evidence().refusalVerified).toBe(true);
+                expect(fixture.evidence().forbiddenNavigations).toBe(0);
+                mutationRefused = true;
+              }
             });
             yield* run("READY");
             const before = coordinator(
@@ -522,7 +537,7 @@ describe.skipIf(!packageApp)("Meerkat packaged server without a desktop preview 
               Stream.runHead,
               Effect.map(Option.getOrThrow),
             );
-            for (const phase of ["READY", "CONTINUE"])
+            for (const phase of phases)
               expect(
                 snapshot.snapshot.thread.messages.filter(
                   (message) =>
@@ -532,17 +547,20 @@ describe.skipIf(!packageApp)("Meerkat packaged server without a desktop preview 
             expect(fixture.evidence()).toMatchObject({
               forbiddenNavigations: 0,
               shellVerified: true,
+              refusalVerified: true,
+              providerFailures: [],
             });
             expect(mutationRefused).toBe(true);
             expect(fixture.evidence().calls.map(({ phase, step }) => ({ phase, step }))).toEqual([
               { phase: "READY", step: 0 },
               { phase: "REFUSAL", step: 0 },
+              { phase: "REFUSAL", step: 1 },
               { phase: "CONTINUE", step: 0 },
               { phase: "CONTINUE", step: 1 },
             ]);
           }),
         ).pipe(Effect.raceFirst(Effect.promise(() => fixture.failed)));
-      }).pipe(Effect.scoped, Effect.timeout("240 seconds")),
-    250_000,
+      }).pipe(Effect.timeout(240_000), Effect.scoped),
+    fixtureTimeoutMs(240_000) + 10_000,
   );
 });

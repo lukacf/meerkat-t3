@@ -16,6 +16,7 @@ import { SidebarMenu, SidebarMenuButton, SidebarMenuItem, useSidebar } from "../
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useMeerkatPeerConnections, useMeerkatPeerDrag } from "../team/MeerkatPeerConnections";
 import { sidebarCheckoutLabel } from "./sidebarProjectCheckouts";
+import { SharedProjectAgentRows } from "./SharedProjectAgentRows";
 
 function AgentRow({
   agent,
@@ -311,9 +312,9 @@ export function MeerkatProjectAgents({
         (ref) => ref.environmentId === project.environmentId && ref.projectId === project.id,
       ),
   );
-  if (visibleProjects.length === 0) return null;
   return (
     <div className="pl-4" role="group" aria-label="Agents">
+      <SharedProjectAgentRows projectRefs={projectRefs} visible={visible} />
       {visibleProjects.map((project) => (
         <ProjectAgentRows
           key={`${project.environmentId}:${project.id}`}

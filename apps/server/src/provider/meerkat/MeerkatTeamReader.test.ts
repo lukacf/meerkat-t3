@@ -184,6 +184,45 @@ describe("Meerkat native Team reader", () => {
         completion,
       }));
       expect(yield* cold.reader.receipt!(target)).toEqual({ ...receipt, completion });
+      const completionBinding = {
+        source: "native-console-exact-interaction",
+        identity: original.identity,
+        runtimeKey: original.runtime_key,
+        sessionId: "original",
+        interactionId: "interaction",
+        frameId: "done",
+      };
+      const sessionless = { ...completion, session_id: undefined };
+      const anchored = yield* make(() => ({
+        mobId: "domain",
+        identity: original.identity,
+        found: true,
+        receipt,
+        completion: sessionless,
+        completionBinding,
+      }));
+      expect(yield* anchored.reader.receipt!(target)).toEqual({
+        ...receipt,
+        completion: sessionless,
+        completionBinding,
+      });
+      for (const wrong of [
+        { ...completionBinding, sessionId: "replacement" },
+        { ...completionBinding, interactionId: "other-request" },
+        { ...completionBinding, frameId: "other-frame" },
+      ]) {
+        const mismatched = yield* make(() => ({
+          mobId: "domain",
+          identity: original.identity,
+          found: true,
+          receipt,
+          completion: sessionless,
+          completionBinding: wrong,
+        }));
+        expect((yield* Effect.flip(mismatched.reader.receipt!(target))).detail).toContain(
+          "different native interaction",
+        );
+      }
       for (const wrong of [
         { ...completion, session_id: "replacement" },
         { ...completion, interaction_id: "unrelated" },

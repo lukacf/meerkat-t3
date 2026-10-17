@@ -8,7 +8,7 @@ Study a repository, prepare specialists for its domains, and keep working with t
 
 _Actual MeerkaT3 interface with sample projects and [demonstration content](docs/images/README.md). The screenshots below use the same sample data._
 
-**Source preview:** Apple Silicon Macs, macOS 13 or later. The current source uses Meerkat Core and Meta 0.9.1. A public desktop installer has not yet been published.
+**Source preview:** Apple Silicon Macs, macOS 13 or later. The current source uses Meerkat Core and Meta 0.9.2. A public desktop installer has not yet been published.
 
 [Build from source](docs/operations/development.md) · [First project](docs/user/getting-started.md) · [User guide](docs/README.md) · [Report an issue](https://github.com/lukacf/meerkat-t3/issues)
 

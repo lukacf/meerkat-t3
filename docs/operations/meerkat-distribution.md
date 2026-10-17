@@ -1,6 +1,6 @@
 # MeerkaT3 distribution
 
-This repository contains preview source using Meerkat and Meta 0.9.1. There is no
+This repository contains preview source using Meerkat and Meta 0.9.2. There is no
 current public 0.9-based Mac binary yet. The supported distribution target is Apple
 Silicon macOS, using ad-hoc signing and manual updates without an Apple Developer
 account. Optional Developer ID signing and notarization require explicitly
@@ -22,7 +22,7 @@ For each binary handoff, supply the following with the delivered archive. The na
 | Field                | Value                                                                                                                                                      |
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Product              | MeerkaT3                                                                                                                                                   |
-| Audience             | Invited Apple Silicon Mac pilot users; macOS 13 or later                                                                                                   |
+| Audience             | Apple Silicon Mac preview users; macOS 13 or later                                                                                                         |
 | Version              | Exact app version contained in the archive                                                                                                                 |
 | Archive              | `Meerkat-T3-<version>-arm64.zip`                                                                                                                           |
 | SHA-256              | Checksum computed from the exact archive being delivered                                                                                                   |
@@ -123,11 +123,20 @@ With the source dependencies and prepared native resources available, local pack
 
 ```sh
 MEERKAT_MAC_RELEASE_MODE=unsigned \
-MEERKAT_MAC_RELEASE_VERSION=0.1.0 \
+MEERKAT_MAC_RELEASE_VERSION=0.1.0-preview.1 \
 node scripts/build-meerkat-mac.ts
 ```
 
 This produces DMG and ZIP files under `release-mac/` on an Apple Silicon Mac, with no updater feed or publication. Add `--plan` to inspect public parameters, or `--check` to validate configuration without packaging. No repository or CI environment is required when local updates are disabled. Native resources and their purpose-specific notice checks remain the same for signed and unsigned releases.
+
+Set `MEERKAT_MAC_RELEASE_OUTPUT_DIR` to a fresh directory outside the checkout to
+keep a candidate separate from prior artifacts. Absolute paths and paths with
+spaces are supported; relative paths resolve from the repository root. This
+changes only the output location. It does not enable updates, change artifact
+purpose, or bypass native-notice checks. Preserve the
+[candidate source and input record](release.md#candidate-provenance) with that
+directory. Choose a version not already published; the example is not a reserved
+release number.
 
 The reusable `.github/workflows/meerkat-mac.yml` prepares the same packages without invoking the inherited all-platform release workflow. Its CI inputs retain an explicit canonical owned repository matching the calling repository and a named GitHub environment for the job. These identify the CI/native-artifact context, not a publication step. No destination or account is preselected by this source configuration.
 

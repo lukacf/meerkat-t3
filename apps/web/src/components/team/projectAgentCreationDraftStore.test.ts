@@ -48,6 +48,29 @@ const draft = {
 };
 
 describe("project agent creation recovery", () => {
+  it("defaults only new drafts to collaboration and preserves saved read-only requests", () => {
+    const storage = memoryStorage();
+    const first = createProjectAgentCreationDraftStore(scope, storage, () => "saved-read-only");
+    expect(first.getState().draft.value.accessMode).toBe("read-and-collaborate");
+    first.getState().updateDraft(draft);
+    const original = first.getState().beginCustom(input)!;
+    const reopened = createProjectAgentCreationDraftStore(scope, storage);
+    expect(reopened.getState().draft.value.accessMode).toBe("read-only");
+    expect(reopened.getState().retry(original.input.requestId)?.input.accessMode).toBe("read-only");
+  });
+
+  it("retains the explicit collaboration mode through interrupted creation", () => {
+    const storage = memoryStorage();
+    const first = createProjectAgentCreationDraftStore(scope, storage, () => "collaborator");
+    first.getState().updateDraft({ ...draft, accessMode: "read-and-collaborate" });
+    const original = first
+      .getState()
+      .beginCustom({ ...input, accessMode: "read-and-collaborate" })!;
+    expect(
+      createProjectAgentCreationDraftStore(scope, storage).getState().retry("collaborator"),
+    ).toEqual(original);
+  });
+
   it("snapshots reasoning through interrupted creation and retries despite changed caller selections", () => {
     const storage = memoryStorage();
     const options = [{ id: "reasoning_effort", value: "high" }];

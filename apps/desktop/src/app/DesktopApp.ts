@@ -32,6 +32,7 @@ import * as DesktopRemoteUpdates from "../updates/DesktopRemoteUpdates.ts";
 import * as DesktopUpdates from "../updates/DesktopUpdates.ts";
 import * as DesktopSnapShot from "../snapShot/DesktopSnapShot.ts";
 import * as DesktopWslBackend from "../wsl/DesktopWslBackend.ts";
+import * as DesktopSharedHost from "../backend/DesktopSharedHost.ts";
 
 const DEFAULT_DESKTOP_BACKEND_PORT = 3773;
 const MAX_TCP_PORT = 65_535;
@@ -195,6 +196,7 @@ const bootstrap = Effect.gen(function* () {
   const primaryBackend = yield* pool.primary;
   const serverExposure = yield* DesktopServerExposure.DesktopServerExposure;
   const wslBackend = yield* DesktopWslBackend.DesktopWslBackend;
+  const sharedHost = yield* DesktopSharedHost.DesktopSharedHost;
 
   if (environment.isDevelopment && Option.isNone(environment.configuredBackendPort)) {
     return yield* new DesktopDevelopmentBackendPortRequiredError();
@@ -255,6 +257,7 @@ const bootstrap = Effect.gen(function* () {
     // in parallel rather than blocking primary readiness on a possibly
     // slow first wsl.exe spawn.
     yield* Effect.forkScoped(wslBackend.reconcile);
+    yield* Effect.forkScoped(sharedHost.reconcile);
   }
 }).pipe(Effect.withSpan("desktop.bootstrap"));
 

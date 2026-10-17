@@ -65,6 +65,7 @@ vi.mock("../../state/environments", () => ({
     environments: [
       {
         environmentId: "environment",
+        entry: { target: { _tag: "PrimaryConnectionTarget" } },
         label: "Local fixture",
         serverConfig: { providers: [{ driver: "meerkat" }] },
       },

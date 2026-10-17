@@ -203,6 +203,27 @@ const harness = Effect.fnUntraced(function* (
 const testLayer = Layer.mergeAll(SqlitePersistenceMemory, Path.layer);
 
 describe("Meerkat project Team", () => {
+  it.effect("exposes current native policy only while its owner is observed live", () =>
+    Effect.gen(function* () {
+      const h = yield* harness();
+      const native = loaded();
+      h.setNative({
+        ...native,
+        mobs: native.mobs.map((mob) => ({ ...mob, accessMode: "repository-read-only" as const })),
+      });
+      const observed = (yield* h.projectTeam({ projectId })).providers[0]!.agents[0]!;
+      expect(observed.observedAccessMode).toBe("repository-read-only");
+      h.setNative({ observation: "loaded_runtimes", loaded: false, mobs: [] });
+      const unloaded = (yield* h.projectTeam({ projectId })).providers[0]!.agents[0]!;
+      expect(unloaded.availability).toBe("unloaded");
+      expect(unloaded.observedAccessMode).toBeUndefined();
+      h.setNative(loaded());
+      const missing = (yield* h.projectTeam({ projectId })).providers[0]!.agents[0]!;
+      expect(missing.availability).toBe("live");
+      expect(missing.observedAccessMode).toBeUndefined();
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.effect(
     "reads bound project and archived worktrees once and excludes foreign, deleted and unbound scopes",
     () =>

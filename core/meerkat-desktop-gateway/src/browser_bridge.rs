@@ -148,9 +148,10 @@ async fn browser_adapter(
     if let Some(connection) = host_connection {
         headers.insert("X-T3-Preview-Host".into(), connection.to_owned());
     }
-    let mut router = McpRouter::new_with_surface_handle(Arc::new(
-        meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
-    ));
+    let mut router = McpRouter::new_with_surface_handle_and_stdio_profile(
+        Arc::new(meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral()),
+        meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
+    );
     router
         .stage_add(McpServerConfig::streamable_http(
             "t3_preview",
@@ -821,9 +822,10 @@ mod tests {
                 });
             }
         });
-        let mut router = McpRouter::new_with_surface_handle(Arc::new(
-            meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral(),
-        ));
+        let mut router = McpRouter::new_with_surface_handle_and_stdio_profile(
+            Arc::new(meerkat_runtime::RuntimeExternalToolSurfaceHandle::ephemeral()),
+            meerkat_mcp::McpStdioLaunchProfile::trusted_host(),
+        );
         router
             .stage_add(McpServerConfig::streamable_http(
                 "t3_preview",

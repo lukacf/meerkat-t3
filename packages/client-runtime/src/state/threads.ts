@@ -765,12 +765,12 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
               },
           ),
         );
-        const supportsCompletionMarker = config.threadResumeCompletionMarker === true;
+        const supportsCompletionMarker = config?.threadResumeCompletionMarker === true;
         // Windowed loads are gated on the server capability: pre-pagination
         // servers reject unknown query params, and a windowed WS fallback to
         // such a server would silently hide history.
-        const supportsPagination = config.threadSnapshotPagination === true;
-        const supportsReasoningMessages = config.reasoningMessages === true;
+        const supportsPagination = config?.threadSnapshotPagination === true;
+        const supportsReasoningMessages = config?.reasoningMessages === true;
         yield* Ref.set(reasoningMessagesSupported, supportsReasoningMessages);
         yield* Ref.set(paginationSupported, supportsPagination);
         yield* Ref.set(awaitingCompletion, supportsCompletionMarker);

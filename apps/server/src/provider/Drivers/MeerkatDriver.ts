@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - native runtime paths are resolved at the provider boundary.
 import * as NodeURL from "node:url";
+import { SharedToolHost } from "../../shared/SharedToolHost.ts";
 import { meerkatSkillHref } from "@t3tools/shared/meerkatSkills";
 import {
   assertMeerkatBundleBuild,
@@ -227,6 +228,7 @@ export const MeerkatDriver: ProviderDriver<MeerkatDriverConfig, MeerkatDriverEnv
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
       const serverConfig = yield* ServerConfig;
+      const sharedTools = yield* SharedToolHost;
       const path = yield* Path.Path;
       const projectPath = config.projectPath ?? serverConfig.cwd;
       const stateRoot = config.stateRoot ?? path.join(serverConfig.stateDir, "meerkat", instanceId);
@@ -249,6 +251,10 @@ export const MeerkatDriver: ProviderDriver<MeerkatDriverConfig, MeerkatDriverEnv
             configuredBinary: config.gatewayBinaryPath,
             env: {
               ...mergeProviderInstanceEnvironment(environment),
+              // Legacy callback variables must never reach shell/MCP subprocesses.
+              MEERKAT_SHARED_TOOLS_URL: undefined,
+              MEERKAT_SHARED_TOOLS_TOKEN: undefined,
+              MEERKAT_SHARED_TOOLS_ACTIONS: undefined,
               MEERKAT_APP_QUESTIONS: "1",
             },
             // Bundling flattens this module into dist/. Desktop supplies its unpacked resources path.
@@ -300,8 +306,21 @@ export const MeerkatDriver: ProviderDriver<MeerkatDriverConfig, MeerkatDriverEnv
               ),
             }),
           ),
+          Effect.withSpan("MeerkatDriver.close"),
         ),
       );
+      if (sharedTools) {
+        // Private owner setup admits no work. Keep every exposed request behind restore review.
+        yield* Effect.tryPromise({
+          try: () => nativeClient.request("sharedTools.v1.configure", sharedTools.configuration),
+          catch: () =>
+            new ProviderDriverError({
+              driver: MEERKAT_DRIVER_KIND,
+              instanceId,
+              detail: "The native gateway could not configure private shared workspace tools.",
+            }),
+        });
+      }
       const prepareWorkspace = createMeerkatWorkspacePreparer(client, config.workspacePolicy);
       const adapter = yield* makeMeerkatAdapter({
         client,

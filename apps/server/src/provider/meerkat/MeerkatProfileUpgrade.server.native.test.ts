@@ -24,8 +24,10 @@ import {
   availablePort,
   bounded,
   exchangeToken,
+  fixtureTimeoutMs,
   ownedServer,
   prepareFixture,
+  readFixtureShutdownHorizon,
   watch,
   withClient,
   workflowModel,
@@ -142,6 +144,12 @@ describe.skipIf(!previousApp || !currentApp)("Meerkat packaged app profile upgra
               current,
               stages,
               exits,
+              shutdown: servers.map((server) => ({
+                pid: server.child.pid,
+                code: server.child.exitCode,
+                signal: server.child.signalCode,
+                ...server.shutdownObservation(),
+              })),
               identities,
               failures,
               calls: fixture.calls,
@@ -175,19 +183,21 @@ describe.skipIf(!previousApp || !currentApp)("Meerkat packaged app profile upgra
                 failures.push(String(error));
               }
             }
-            fixture.provider.closeAllConnections();
-            try {
-              if (fixture.provider.listening)
-                await bounded(
-                  new Promise<void>((resolve, reject) =>
-                    fixture.provider.close((error) => (error ? reject(error) : resolve())),
-                  ),
-                  "upgrade provider shutdown",
-                  5_000,
-                );
-            } catch (error) {
-              cleanupErrors.push(error);
-              failures.push(String(error));
+            if (cleanupErrors.length === 0) {
+              fixture.provider.closeAllConnections();
+              try {
+                if (fixture.provider.listening)
+                  await bounded(
+                    new Promise<void>((resolve, reject) =>
+                      fixture.provider.close((error) => (error ? reject(error) : resolve())),
+                    ),
+                    "upgrade provider shutdown",
+                    5_000,
+                  );
+              } catch (error) {
+                cleanupErrors.push(error);
+                failures.push(String(error));
+              }
             }
             await persist(Exit.isSuccess(exit) && cleanupErrors.length === 0);
             // Retain this owned profile on success too: the exact upgrade inputs and outputs are reviewable.
@@ -206,18 +216,27 @@ describe.skipIf(!previousApp || !currentApp)("Meerkat packaged app profile upgra
         const address = fixture.provider.address();
         if (!address || typeof address === "string") throw new Error("No isolated provider port");
         const prepared = yield* Effect.promise(() =>
-          prepareFixture(root, previous.runtime, address.port, {
-            PATH: [
-              NodePath.dirname(previous.executable),
-              "/usr/bin",
-              "/bin",
-              "/usr/sbin",
-              "/sbin",
-            ].join(NodePath.delimiter),
-            MEERKAT_NODE_PATH: previous.executable,
-            ELECTRON_RUN_AS_NODE: "1",
-          }),
-        );
+          prepareFixture(
+            root,
+            previous.runtime,
+            address.port,
+            {
+              PATH: [
+                NodePath.dirname(previous.executable),
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+              ].join(NodePath.delimiter),
+              MEERKAT_NODE_PATH: previous.executable,
+              ELECTRON_RUN_AS_NODE: "1",
+            },
+            previous.manifest.build.meerkatVersion === "0.8.51" &&
+              previous.manifest.build.mobkitVersion === "0.8.46"
+              ? "pre-account-auth-0.8.51-0.8.46"
+              : "current",
+          ),
+        ).pipe(Effect.uninterruptible);
         yield* Effect.promise(() =>
           initializeUpgradeRepository(prepared.projectPath, prepared.env),
         );
@@ -239,6 +258,12 @@ describe.skipIf(!previousApp || !currentApp)("Meerkat packaged app profile upgra
               MEERKAT_NODE_PATH: artifact.executable,
               T3CODE_TRACE_FILE: NodePath.join(prepared.evidenceRoot, `${label}.trace.ndjson`),
             };
+            const shutdownHorizonMs =
+              label === "previous"
+                ? prepared.shutdownHorizonMs
+                : yield* Effect.promise(() =>
+                    readFixtureShutdownHorizon(artifact.runtime, prepared.projectPath, env),
+                  ).pipe(Effect.uninterruptible);
             expect(env.MEERKAT_NODE_PATH.startsWith(artifact.app + NodePath.sep)).toBe(true);
             yield* Effect.promise(() =>
               NodeFSP.writeFile(env.T3CODE_TRACE_FILE, "", { mode: 0o600 }),
@@ -249,6 +274,7 @@ describe.skipIf(!previousApp || !currentApp)("Meerkat packaged app profile upgra
               prepared.baseDir,
               port,
               env,
+              shutdownHorizonMs,
               NodePath.join(prepared.evidenceRoot, `${label}-server.json`),
               artifact.executable,
             );
@@ -366,6 +392,9 @@ describe.skipIf(!previousApp || !currentApp)("Meerkat packaged app profile upgra
               createdAt: now(),
             });
             yield* stage("previous:awaiting-coordinator-committed-output");
+            // The retained predecessor took 30.7 seconds to create its cold
+            // coordinator before producing the committed response. Give this
+            // cold-start stage its own bounded budget, retaining exact receipts.
             yield* thread.waitFor(
               (item) =>
                 item.kind === "event" &&
@@ -374,6 +403,8 @@ describe.skipIf(!previousApp || !currentApp)("Meerkat packaged app profile upgra
                 item.event.payload.text === "UPGRADE_FIRST_COORD_COMPLETE" &&
                 !item.event.payload.streaming,
               "old coordinator committed output",
+              0,
+              90_000,
             );
             yield* shell.waitFor(
               (item) =>
@@ -383,6 +414,7 @@ describe.skipIf(!previousApp || !currentApp)("Meerkat packaged app profile upgra
                 item.thread.session?.status === "ready",
               "old coordinator terminal receipt",
               shellIndex,
+              90_000,
             );
             yield* stage("previous:coordinator-completed-uploading-reviewer-image");
             const image = yield* client[WS_METHODS.meerkatImageUpload]({
@@ -659,7 +691,7 @@ describe.skipIf(!previousApp || !currentApp)("Meerkat packaged app profile upgra
         expect([0, 130]).toContain(newExit.code);
         exits.push(newExit);
         yield* stage("current:ordinary-shutdown");
-      }).pipe(Effect.scoped, Effect.timeout("300 seconds")),
-    310_000,
+      }).pipe(Effect.timeout(fixtureTimeoutMs(300_000, 2, false)), Effect.scoped),
+    fixtureTimeoutMs(300_000, 3) + 10_000,
   );
 });

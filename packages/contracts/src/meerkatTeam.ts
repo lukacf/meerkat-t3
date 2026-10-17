@@ -157,6 +157,16 @@ export const MeerkatTeamAgent = Schema.Struct({
   canResume: Schema.optional(Schema.Boolean),
   durableId: Schema.optional(Schema.String),
   availability: Schema.optional(Schema.Literals(["live", "unloaded", "retired", "unknown"])),
+  /** Current native owner observation, never copied from the saved project-agent configuration. */
+  observedAccessMode: Schema.optional(
+    Schema.Literals([
+      "read-only",
+      "read-and-collaborate",
+      "repository-read-only",
+      "full-access",
+      "approval-required",
+    ]),
+  ),
   lastSeenAt: Schema.optional(IsoDateTime),
   work: Schema.optional(MeerkatAgentWork),
   agentRef: TrimmedNonEmptyString,
@@ -227,7 +237,12 @@ export const MeerkatProjectAgentRevision = Schema.Struct({
 export type MeerkatProjectAgentRevision = typeof MeerkatProjectAgentRevision.Type;
 
 /** Project specialists currently support fixed native policies, without per-tool approvals. */
-export const MeerkatProjectAgentAccessMode = Schema.Literals(["read-only", "full-access"]);
+export const MeerkatProjectAgentAccessMode = Schema.Literals([
+  "read-only",
+  "read-and-collaborate",
+  "repository-read-only",
+  "full-access",
+]);
 export type MeerkatProjectAgentAccessMode = typeof MeerkatProjectAgentAccessMode.Type;
 
 export const MeerkatProjectAgent = Schema.Struct({
@@ -268,7 +283,7 @@ export const MeerkatProjectAgentCreateInput = Schema.Struct({
   instructions: AgentInstructions,
   model: TrimmedNonEmptyString,
   options: Schema.optional(ProviderOptionSelections),
-  /** Omitted by older clients; new specialists default to read-only. */
+  /** Older clients omit this and retain read-only. New clients explicitly choose their mode. */
   accessMode: Schema.optional(MeerkatProjectAgentAccessMode),
 });
 export type MeerkatProjectAgentCreateInput = typeof MeerkatProjectAgentCreateInput.Type;

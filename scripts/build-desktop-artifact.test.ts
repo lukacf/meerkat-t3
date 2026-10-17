@@ -1,5 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off - Tests use Node's glob matcher to verify electron-builder exclusions.
 import * as NodeCrypto from "node:crypto";
+import * as NodeFSP from "node:fs/promises";
 import * as NodeModule from "node:module";
 import * as NodePath from "node:path";
 
@@ -25,6 +26,7 @@ import {
   createStageWorkspaceConfig,
   createStagePatchedDependencies,
   createBuildConfig,
+  createDesktopStageRoot,
   DESKTOP_ELECTRON_LANGUAGES,
   DESKTOP_FILE_EXCLUSIONS,
   DESKTOP_EXTRA_RESOURCES,
@@ -1989,6 +1991,66 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
       );
     });
   });
+
+  for (const keepStage of [false, true]) {
+    it.effect(
+      `canonicalizes aliased stage paths for DMG containment and ${keepStage ? "retains" : "cleans"} the stage`,
+      () =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem.FileSystem;
+          const path = yield* Path.Path;
+          const fixture = yield* fs.makeTempDirectoryScoped({ prefix: "t3-stage-alias-" });
+          const physical = path.join(yield* fs.realPath(fixture), "physical");
+          const alias = path.join(fixture, "alias");
+          yield* fs.makeDirectory(physical);
+          // A junction also exercises real path resolution on Windows without symlink privilege.
+          yield* Effect.tryPromise(() => NodeFSP.symlink(physical, alias, "junction"));
+          const aliasedFs = {
+            ...fs,
+            makeTempDirectory: (options?: Parameters<typeof fs.makeTempDirectory>[0]) =>
+              fs.makeTempDirectory({ ...options, directory: alias }),
+            makeTempDirectoryScoped: (options?: Parameters<typeof fs.makeTempDirectoryScoped>[0]) =>
+              fs.makeTempDirectoryScoped({ ...options, directory: alias }),
+          };
+          const stageRoot = yield* Effect.scoped(
+            Effect.gen(function* () {
+              const root = yield* createDesktopStageRoot({ platform: "mac", keepStage }).pipe(
+                Effect.provideService(FileSystem.FileSystem, aliasedFs),
+              );
+              assert.strictEqual(root, yield* fs.realPath(root));
+              assert.strictEqual(path.dirname(root), physical);
+              const stageAppDir = path.join(root, "app");
+              const guidePath = yield* stageMacInstallGuide({
+                repoRoot: path.resolve(import.meta.dirname, ".."),
+                stageAppDir,
+              });
+              const config = yield* createBuildConfig(
+                "mac",
+                "dmg",
+                "0.1.0-preview.1",
+                false,
+                false,
+                undefined,
+                undefined,
+                false,
+                "arm64",
+                "release",
+                guidePath,
+              );
+              const contents = (config.dmg as { contents: ReadonlyArray<{ path?: string }> })
+                .contents;
+              const configuredGuide = contents[1]!.path!;
+              const workspaceRoot = yield* fs.realPath(stageAppDir);
+              assert.strictEqual(configuredGuide, yield* fs.realPath(configuredGuide));
+              assert.isTrue(configuredGuide.startsWith(`${workspaceRoot}${path.sep}`));
+              assert.isNotEmpty(yield* fs.readFileString(configuredGuide));
+              return root;
+            }),
+          );
+          assert.strictEqual(yield* fs.exists(stageRoot), keepStage);
+        }),
+    );
+  }
 
   it.effect(
     "stages the maintained Mac install guide beside the app through the archive matcher",

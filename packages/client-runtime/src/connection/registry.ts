@@ -14,6 +14,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import {
+  type BearerConnectionRegistration,
   type ConnectionCatalogEntry,
   type ConnectionRegistration,
   type PlatformConnectionRegistration,
@@ -94,7 +95,9 @@ export class EnvironmentRegistry extends Context.Service<
       | ConnectionAttemptError
       | PlatformEnvironmentRemovalError
     >;
-    readonly retryNow: (environmentId: EnvironmentId) => Effect.Effect<void>;
+    readonly retryNow: (
+      environmentId: EnvironmentId,
+    ) => Effect.Effect<void, ConnectionAttemptError>;
     /**
      * Switches a saved environment on or off. Off drops the socket, stops the
      * retry ladder, and persists so the next launch stays off. Registration,
@@ -191,6 +194,12 @@ export const make = Effect.gen(function* () {
     ReadonlyMap<EnvironmentId, EnvironmentServiceScope>
   >(new Map());
   const platformEnvironmentIds = yield* Ref.make<ReadonlySet<EnvironmentId>>(new Set());
+  const platformCredentialEnrollments = yield* Ref.make<
+    ReadonlyMap<
+      EnvironmentId,
+      { readonly registration: BearerConnectionRegistration; readonly failed: boolean }
+    >
+  >(new Map());
   const persistedTargetsByEnvironment = yield* Ref.make<
     ReadonlyMap<EnvironmentId, ConnectionTarget>
   >(new Map(persistedTargets.map((target) => [target.environmentId, target])));
@@ -483,6 +492,19 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  const enrollPlatformCredential = Effect.fn("EnvironmentRegistry.enrollPlatformCredential")(
+    function* (registration: BearerConnectionRegistration) {
+      const remember = (failed: boolean) =>
+        Ref.update(platformCredentialEnrollments, (current) =>
+          new Map(current).set(registration.target.environmentId, { registration, failed }),
+        );
+      yield* credentials.put(registration.target.connectionId, registration.credential).pipe(
+        Effect.tap(() => remember(false)),
+        Effect.tapError(() => remember(true)),
+      );
+    },
+  );
+
   const installPlatformRegistration = Effect.fn("EnvironmentRegistry.installPlatformRegistration")(
     function* (registration: PlatformConnectionRegistration) {
       const registered = connectionRegistrationCatalogEntry(registration);
@@ -529,14 +551,28 @@ export const make = Effect.gen(function* () {
           // token instead of the primary's same-origin cookie. Stash it where
           // the resolver's bearer broker looks it up.
           if (registration._tag === "BearerConnectionRegistration") {
-            yield* credentials.put(registration.target.connectionId, registration.credential).pipe(
-              Effect.catch((error) =>
-                Effect.logWarning("Could not store the platform bearer credential.", {
-                  environmentId: target.environmentId,
-                  error,
-                }),
-              ),
+            const enrollment = (yield* Ref.get(platformCredentialEnrollments)).get(
+              target.environmentId,
             );
+            // Polling an unchanged host must not repeatedly open Keychain, including
+            // after access was denied. An explicit connection retry can enroll again.
+            if (!enrollment || !Equal.equals(enrollment.registration, registration)) {
+              yield* enrollPlatformCredential(registration).pipe(
+                Effect.catch((error) =>
+                  Effect.logWarning("Could not store the platform bearer credential.", {
+                    environmentId: target.environmentId,
+                    error,
+                  }),
+                ),
+              );
+            }
+          } else {
+            yield* Ref.update(platformCredentialEnrollments, (current) => {
+              if (!current.has(target.environmentId)) return current;
+              const next = new Map(current);
+              next.delete(target.environmentId);
+              return next;
+            });
           }
 
           if (persistedTarget !== undefined) {
@@ -591,6 +627,11 @@ export const make = Effect.gen(function* () {
           if (Exit.isFailure(revoked)) return;
           yield* Ref.update(platformEnvironmentIds, (current) => {
             const next = new Set(current);
+            next.delete(environmentId);
+            return next;
+          });
+          yield* Ref.update(platformCredentialEnrollments, (current) => {
+            const next = new Map(current);
             next.delete(environmentId);
             return next;
           });
@@ -736,12 +777,21 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const retryNow = (environmentId: EnvironmentId) =>
-    acquireSupervisor(environmentId).pipe(
+  const retryNow = Effect.fn("EnvironmentRegistry.retryNow")(function* (
+    environmentId: EnvironmentId,
+  ) {
+    yield* withLeaseLock(
+      environmentId,
+      Effect.gen(function* () {
+        const enrollment = (yield* Ref.get(platformCredentialEnrollments)).get(environmentId);
+        if (enrollment?.failed) yield* enrollPlatformCredential(enrollment.registration);
+      }),
+    );
+    yield* acquireSupervisor(environmentId).pipe(
       Effect.flatMap((supervisor) => supervisor.retryNow),
       Effect.catchTag("EnvironmentNotRegisteredError", () => Effect.void),
-      Effect.withSpan("EnvironmentRegistry.retryNow"),
     );
+  });
   const setEnabled = Effect.fn("EnvironmentRegistry.setEnabled")(function* (
     environmentId: EnvironmentId,
     enabled: boolean,

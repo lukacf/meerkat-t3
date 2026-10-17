@@ -114,6 +114,7 @@ def read_product(product, metadata_path, messages_path, binary_path, source_root
     binary_hash = digest(binary)
     messages_bytes = regular(messages_path)
     artifacts = []
+    build_scripts = defaultdict(list)
     finished = []
     for line in messages_bytes.splitlines():
         message = json.loads(line)
@@ -122,6 +123,9 @@ def read_product(product, metadata_path, messages_path, binary_path, source_root
         if message.get("reason") == "compiler-artifact":
             require(message["package_id"] in by_id, "Compiler artifact is outside supplied metadata")
             artifacts.append(message)
+        if message.get("reason") == "build-script-executed":
+            require(message["package_id"] in by_id, "Build script is outside supplied metadata")
+            build_scripts[Path(message["out_dir"]).resolve()].append(message)
     require(finished == [True], "Build messages must contain exactly one successful build-finished event")
     root_artifacts = [a for a in artifacts if a.get("executable") and Path(a["executable"]).resolve() == binary
                       and by_id[a["package_id"]]["name"] == ROOT_PACKAGES[product]
@@ -133,7 +137,8 @@ def read_product(product, metadata_path, messages_path, binary_path, source_root
     }
     lock = {**output.write(f"locks/{product}.Cargo.lock", regular(lock_path)), "currentSource": str(lock_path)}
     return dict(product=product, workspace=workspace, locked=locked, packages=metadata_packages,
-                by_id=by_id, artifacts=artifacts, target=target, binary=binary, binary_hash=binary_hash,
+                by_id=by_id, artifacts=artifacts, build_scripts=build_scripts,
+                target=target, binary=binary, binary_hash=binary_hash,
                 profile=binary.parent.name, snapshots=snapshots, lock=lock)
 
 
@@ -176,6 +181,10 @@ def derive_graph(context, output):
     require(len(roots) == 1, "Expected exactly one byte-matched Cargo root fingerprint; rebuild in a clean target directory")
     root = roots[0]
 
+    def executions(unit):
+        out_dir = unit["directory"] / "build" / f"{unit['name']}-{unit['artifact_hash']}" / "out"
+        return context["build_scripts"].get(out_dir.resolve(), [])
+
     def identify(unit):
         if "package" in unit:
             return
@@ -184,6 +193,13 @@ def derive_graph(context, output):
             require(len(edge) >= 4 and isinstance(edge[3], int), "Unsupported fingerprint dependency edge")
             # Cargo records dependency aliases in edges but declared crate names in units.
             candidates = index[(edge[3], edge[1])] or values[edge[3]]
+            # Host and target build-script runs can have identical fingerprints.
+            # Join the consumer's build tree to the captured execution output path;
+            # a cached run from another invocation is not current build evidence.
+            candidates = [candidate for candidate in candidates
+                          if units[candidate]["kind"] != "build-script-run" or
+                          (units[candidate]["directory"] == unit["directory"]
+                           and len(executions(units[candidate])) == 1)]
             require(len(candidates) == 1, f"Missing or ambiguous fingerprint edge: {unit['id']} -> {edge[1]}")
             edges.append({"unit": candidates[0], "crateName": edge[1], "fingerprintValue": str(edge[3])})
         unit["edges"] = edges
@@ -191,6 +207,9 @@ def derive_graph(context, output):
             compiled = [units[e["unit"]] for e in edges if units[e["unit"]]["kind"] == "build-script"]
             require(len(compiled) == 1 and compiled[0]["name"] == unit["name"], "Unproven build-script-run identity")
             identify(compiled[0])
+            require(len(executions(unit)) == 1 and
+                    executions(unit)[0]["package_id"] == compiled[0]["package"]["id"],
+                    f"Build-script execution differs from compiler artifact: {unit['id']}")
             unit.update(package=compiled[0]["package"], proc_macro=False, identity_from=compiled[0]["id"])
             return
         matching = []

@@ -1,4 +1,5 @@
 import { meerkatCheckpointStoreLayer } from "./provider/meerkat/MeerkatCheckpointStore.ts";
+import { acquireSharedToolHost, SharedToolHost } from "./shared/SharedToolHost.ts";
 import { openRestoreReview, ProfileRestoreReview } from "./restoreReview.ts";
 import serverPackage from "../package.json" with { type: "json" };
 // @effect-diagnostics nodeBuiltinImport:off
@@ -629,6 +630,7 @@ export const makeRoutesLayer = Layer.mergeAll(
 const makeServerLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
+    const sharedTools = yield* acquireSharedToolHost;
     const restoreReview = yield* Effect.tryPromise({
       try: () =>
         openRestoreReview(config.baseDir, config.desktopAppVersion ?? serverPackage.version),
@@ -982,6 +984,7 @@ const makeServerLayer = Layer.unwrap(
 
     return serverApplicationLayer.pipe(
       Layer.provideMerge(runtimeServicesLive),
+      Layer.provide(Layer.succeed(SharedToolHost, sharedTools)),
       Layer.provide(Layer.succeed(ProfileRestoreReview, restoreReview)),
       Layer.provide(activationLayer),
       Layer.provideMerge(serverRelayBrokerTracingLayer),

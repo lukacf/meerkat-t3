@@ -56,7 +56,10 @@ function stageInput(options, manifest, destinationDir, selection) {
     bundleDir: options.output,
     destinationDir,
     target: manifest.target,
-    gateway: manifest.bindings.gateway,
+    gateway: {
+      ...manifest.bindings.gateway,
+      cargoLockPath: selection.products.gateway.lock.path,
+    },
     resourceMonitor: {
       cargoLockPath: selection.products.resourceMonitor.lock.path,
       binaryPath: selection.products.resourceMonitor.root.binary,

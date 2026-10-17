@@ -27,7 +27,15 @@ pub async fn read(params: Option<&Value>) -> Result<Value, GatewayError> {
         Ok(match receipt {
             Some(receipt) => {
                 let completion = read_completion(path, &expected, &receipt.interaction_id)?;
-                json!({"mobId":mob_id,"identity":expected.identity,"found":true,"receipt":receipt,"completion":completion})
+                // The stored frame remains unmodified. This witness describes
+                // the exact query's original session anchor, including native
+                // events whose frame omits its session field.
+                let binding = completion.as_ref().map(|frame| json!({
+                    "source":"native-console-exact-interaction", "identity":expected.identity,
+                    "runtimeKey":expected.runtime_key, "sessionId":expected.session_id,
+                    "interactionId":receipt.interaction_id, "frameId":frame.id,
+                }));
+                json!({"mobId":mob_id,"identity":expected.identity,"found":true,"receipt":receipt,"completion":completion,"completionBinding":binding})
             },
             None => json!({"mobId":mob_id,"identity":expected.identity,"found":false}),
         })
@@ -127,4 +135,64 @@ mod tests {
         assert!(read_completion(&path,&replacement,"interaction").unwrap().is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    #[tokio::test]
+    async fn two_clients_keep_exact_outcomes_across_peer_scheduler_and_cold_reads() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("console.sqlite");
+        let expected = ConsoleExpectedTarget {
+            identity: "shared-specialist".into(), runtime_key: "default".into(),
+            runtime_member_id: "same-member".into(), session_id: Some("same-session".into()),
+            source_mob_id: None,
+        };
+        let store = SqliteConsoleLogStore::open(&path).unwrap();
+        let append = |id: &str, kind: &str, interaction: Option<&str>, payload: Value| {
+            let is_input = kind == "user_input";
+            NewConsoleFrame {
+                id: Some(id.into()), dedupe_key: if is_input {
+                    format!("send:default:shared-specialist:meerkat-app:{id}")
+                } else { id.into() }, timestamp_ms: 1,
+                runtime_key: "default".into(), identity: "shared-specialist".into(),
+                conversation_id: Some("shared-specialist".into()), session_id: Some("same-session".into()),
+                kind: kind.into(), status: if is_input { ConsoleFrameStatus::Delivered } else { ConsoleFrameStatus::Completed },
+                payload, source: ConsoleFrameSource { member_provenance: None,
+                    kind: if is_input { ConsoleFrameSourceKind::Send } else { ConsoleFrameSourceKind::ConsoleEvent }, source_cursor: None },
+                source_event_id: None, interaction_id: interaction.map(str::to_owned),
+                turn_id: None, run_id: None, parent_frame_id: None, caused_by_frame_id: None,
+            }
+        };
+        // Requests are admitted to the same specialist/session before either
+        // terminal appears. The keys carry no model-controlled author claim.
+        for (request, interaction) in [("client-a", "interaction-a"), ("client-b", "interaction-b"), ("unresolved", "interaction-unresolved")] {
+            store.append_if_absent(append(request, "user_input", Some(interaction),
+                json!({"origin":"meerkat-app","idempotency_key":request,"content":request}))).await.unwrap();
+        }
+        for (id, interaction, payload) in [
+            ("answer-b", Some("interaction-b"), json!({"result":"client B result"})),
+            ("peer-answer", Some("peer-interaction"), json!({"result":"peer result"})),
+            ("scheduler-answer", Some("schedule-interaction"), json!({"result":"scheduled result"})),
+            ("unattributed-answer", None, json!({"result":"latest result"})),
+            ("history-is-not-terminal", Some("interaction-a"), json!({"result":"history","source_event_type":"session_history"})),
+        ] {
+            store.append_if_absent(append(id, "interaction_complete", interaction, payload)).await.unwrap();
+        }
+        assert!(read_completion(&path, &expected, "interaction-a").unwrap().is_none());
+        assert!(read_completion(&path, &expected, "interaction-unresolved").unwrap().is_none());
+        assert_eq!(read_completion(&path, &expected, "interaction-b").unwrap().unwrap().id, "answer-b");
+        store.append_if_absent(append("answer-a", "interaction_complete", Some("interaction-a"), json!({"result":"client A result"}))).await.unwrap();
+        // Recovery reads reopen durable storage and do not load or run the
+        // specialist. Later unrelated output still cannot take either result.
+        store.append_if_absent(append("later-peer-answer", "interaction_complete", Some("peer-later"), json!({"result":"later peer result"}))).await.unwrap();
+        drop(store);
+        for (request, interaction, answer) in [("client-a", "interaction-a", "answer-a"), ("client-b", "interaction-b", "answer-b")] {
+            let receipt = read_receipt(&path, &expected, request).unwrap().unwrap();
+            assert_eq!(receipt.interaction_id, interaction);
+            let completion = read_completion(&path, &expected, &receipt.interaction_id).unwrap().unwrap();
+            assert_eq!(completion.id, answer);
+            assert_eq!(completion.session_id, expected.session_id);
+        }
+        let unresolved = read_receipt(&path, &expected, "unresolved").unwrap().unwrap();
+        assert!(read_completion(&path, &expected, &unresolved.interaction_id).unwrap().is_none());
+    }
+
 }

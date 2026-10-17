@@ -3,7 +3,7 @@
 The supported contributor path is an Apple Silicon Mac with the local Electron,
 web, and server stack. This repository includes the Rust gateway source; a separate
 Meerkat App checkout is not required. The native dependency set is locked to Meerkat
-and Meta 0.9.1 in `core/Cargo.lock`.
+and Meta 0.9.2 in `core/Cargo.lock`.
 
 ## First checkout
 
@@ -126,6 +126,172 @@ Tests named `*.server.native.test.ts` and packaged-app acceptance tests require
 additional explicit built-server or app paths. Read each test's entry conditions;
 a skipped native suite is not evidence that its scenario passed. Tests must not
 inherit paid provider credentials or modify an installed user's profile.
+
+### Shared collaboration checks
+
+The repeatable qualification command uses already-built inputs and runs these
+contract suites in sequence:
+
+- Local multi-worktree development, including peer reviews, steering, stopping,
+  active tool and child deletion, and sibling isolation.
+- Steering through threads, project specialists and owned children, with a
+  separate successful cleanup receipt required for each surface.
+- Queued work across client disconnects and server restart, plus specialist
+  responsibility revisions and repository study refreshes.
+- Shared specialists, two-person expansion, loopback TLS, composition restart,
+  and offline recovery.
+
+```sh
+pnpm native:build
+pnpm build:desktop
+pnpm release:qualify \
+  --server-entry "$PWD/apps/server/dist/bin.mjs" \
+  --runtime-dir "$PWD/apps/server/resources/meerkat-runtime" \
+  --evidence-dir "/tmp/meerkat-qualification-results"
+```
+
+Choose a new absolute evidence directory for each run. The command refuses local
+`.env` files, uses fresh HOME and temporary paths, and starts test runners directly
+from the frozen installation without inheriting provider keys or profile overrides.
+It does not build, launch a GUI, or modify installed app profiles. Each fixture
+owns its processes and native shutdown budget. The wrapper adds no forced timeout
+and stops after the first failed suite or cleanup receipt.
+
+The results directory retains a summary, exact server/runtime input hashes, test
+reports, logs and native acceptance receipts. Skipped or missing tests, disabled
+workflow peer controls, and failed cleanup cannot pass. Synthetic fixture directories remain at the recorded paths
+for investigation; the result bundle does not copy profiles, databases or keys.
+CI runs this same command after building the desktop stack, reusing its staged
+native executable and server. The quality gate requires this lane to pass and
+retains its evidence for 14 days.
+
+To include packaged upgrade, snapshot and unavailable-preview-host checks, add
+both `--current-app "/absolute/current/MeerkaT3.app"` and
+`--previous-app "/absolute/previous/MeerkaT3.app"`. These must be the actual
+candidate and previous executable, not two aliases for the same build. Packaged
+executables, native manifests and every declared runtime file are bound before
+and after the run. The current packaged runtime must match the staged runtime;
+the previous runtime may differ. The local and shared workflow suites use the
+explicit built server/runtime inputs; the three packaged suites run their server
+from the supplied app archive using its Electron executable. With
+neither supplied, the report explicitly records that packaged acceptance did not
+run. Add `--plan` to validate and print inputs and the selected suites without
+starting tests. UI, OAuth, live-model behavior, and general crash recovery remain
+separate acceptance work.
+
+For a focused change, the individual suites below remain available.
+
+The focused shared services use disposable application SQLite and controlled
+native or transport boundaries. For composition, delegation, interests and
+correction behavior:
+
+```sh
+pnpm --dir apps/server exec vp test run \
+  src/shared/SharedCompositionService.test.ts \
+  src/shared/SharedDelegationService.test.ts \
+  src/shared/SharedDelegationInterest.test.ts \
+  src/shared/SharedWorkspaceStore.test.ts
+```
+
+Composition tests include a saved self-revision that continues only after native
+idle, bounded continuation across service reconstruction, and split/consolidation
+routing with existing request bindings preserved. These are application-contract
+tests; controlled adapter responses do not prove native activation or a process
+restart.
+
+For the shared-specialist two-client acceptance test, build the locked runtime and
+server bundle first, then opt in with their exact absolute paths:
+
+```sh
+pnpm native:build
+pnpm --filter t3 build:bundle
+T3CODE_TEST_MEERKAT_SERVER_ENTRY="$PWD/apps/server/dist/bin.mjs" \
+T3CODE_TEST_MEERKAT_RUNTIME_DIR="$PWD/apps/server/resources/meerkat-runtime" \
+  pnpm --dir apps/server exec vp test run \
+  src/shared/SharedSpecialist.server.native.test.ts
+```
+
+This test owns its temporary host, model fixture and client connections. It does
+not connect to an installed app or require model credentials. It checks exact
+request outcomes, retained inbox batches and an orderly host restart against the
+same disposable state.
+
+The separate expansion fixture adds two personal servers, native local task
+agents and distinct repositories/branches. Run it against the same freshly built
+artifacts:
+
+```sh
+T3CODE_TEST_MEERKAT_SERVER_ENTRY="$PWD/apps/server/dist/bin.mjs" \
+T3CODE_TEST_MEERKAT_RUNTIME_DIR="$PWD/apps/server/resources/meerkat-runtime" \
+  pnpm --dir apps/server exec vp test run \
+  src/shared/SharedExpansion.server.native.test.ts
+```
+
+To qualify the delegated transport over TLS, run the same fixture with its
+explicit HTTPS mode:
+
+```sh
+T3CODE_TEST_SHARED_TLS=1 \
+T3CODE_TEST_MEERKAT_SERVER_ENTRY="$PWD/apps/server/dist/bin.mjs" \
+T3CODE_TEST_MEERKAT_RUNTIME_DIR="$PWD/apps/server/resources/meerkat-runtime" \
+  pnpm --dir apps/server exec vp test run \
+  src/shared/SharedExpansion.server.native.test.ts
+```
+
+This mode creates a disposable certificate authority and trusts it only in the
+owned personal-server processes through `NODE_EXTRA_CA_CERTS`. It exercises WSS
+delegation and revocation, plus rejected untrusted certificates, hostname
+mismatches, credentials, scopes and participant identities. It qualifies the
+loopback TLS transport, not a physical remote deployment or production reverse
+proxy. It does not disable certificate verification globally.
+
+The dated results below used Meerkat and Meta 0.9.1. They retain the identity of
+those historical artifacts; rerun the fixtures for a 0.9.2 candidate.
+
+The strengthened expansion fixture passed on 2026-10-17 in 94.79 seconds with
+three real servers, no provider errors, and owned cleanup complete. It qualified
+the artifacts in acceptance JSON SHA-256
+`651c9be22bf681d14820f38c981aac706d5efc69e270cf24a83d3ba21a3152d1`,
+including server entry SHA-256
+`34d3456bb07ed06e48ad24ad8365186d1fd89921c6a30eea804f7e590f4ba75a`.
+Its checks cover personal opt-in and captured objective publication, delegated
+tool attribution, interest-matched briefings, correction notifications and search
+lineage, independent specialist creation/peering, revocation, and self-revision
+completed by host continuation after the native turn ends. The loopback model is
+scripted, so success establishes the integration path rather than a live model's
+ability to recognize overlap or decide how to organize specialists.
+
+The separate composition restart fixture passed on 2026-10-17 in 67.92 seconds
+with no provider errors and owned cleanup complete:
+
+```sh
+T3CODE_TEST_MEERKAT_SERVER_ENTRY="$PWD/apps/server/dist/bin.mjs" \
+T3CODE_TEST_MEERKAT_RUNTIME_DIR="$PWD/apps/server/resources/meerkat-runtime" \
+  pnpm --dir apps/server exec vp test run \
+  src/shared/SharedComposition.server.native.test.ts
+```
+
+It requires a pending split with a native successor already created to survive an
+actual host stop/reopen and finish through the saved background operation. It
+also consolidates into a new native specialist while preserving an admitted
+predecessor request and rejecting new work through superseded routing. The
+original product request is completed before restart; only an unrelated native
+control turn is interrupted. This distinguishes composition recovery from active
+inference migration. Retain `shared-composition-acceptance.json` with its exact
+server/runtime identity and cleanup result. The retained passing JSON has SHA-256
+`c6f36987262934717910249c78280ad0ea800e49de71c8b494931482b59761f4`,
+server entry SHA-256
+`34d3456bb07ed06e48ad24ad8365186d1fd89921c6a30eea804f7e590f4ba75a`,
+and runtime SHA-256
+`638ef4a0b6659c897cffae06e57563530367e24b897831e69efe98d826a942ff`.
+Later source changes require their own qualification.
+
+Keep the generated `shared-expansion-acceptance.json` with the exact server hash,
+runtime manifest and owned-cleanup result from the disposable test directory.
+Missing opt-in paths skip these tests; a prior run against older source or a
+success before cleanup does not qualify the final artifacts. The
+[shared-workspace architecture](../internals/shared-workspace.md) describes the
+authority boundaries and the remaining acceptance gates.
 
 ## Build and distribution
 

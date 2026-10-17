@@ -1,4 +1,11 @@
-import type { AuthSessionState, EnvironmentId, ServerConfig } from "@t3tools/contracts";
+import type {
+  AuthCreatePairingCredentialInput,
+  AuthRevokeClientSessionInput,
+  AuthRevokePairingLinkInput,
+  AuthSessionState,
+  EnvironmentId,
+  ServerConfig,
+} from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
@@ -13,14 +20,15 @@ import { EnvironmentSupervisor } from "../connection/supervisor.ts";
 import { environmentEndpointUrl } from "../environment/endpoint.ts";
 import { ManagedRelayDpopSigner } from "../relay/managedRelay.ts";
 import { safeErrorLogAttributes } from "../errors/safeLog.ts";
+import { EnvironmentRpcUnavailableError } from "../rpc/client.ts";
 import { executeAuthenticatedEnvironmentHttpRequest } from "./environmentHttpAuth.ts";
-import { followStreamInEnvironment } from "./runtime.ts";
+import { createEnvironmentCommand, followStreamInEnvironment } from "./runtime.ts";
 
 function initialConfigOption<E>(
-  initialConfig: Effect.Effect<ServerConfig, E>,
+  initialConfig: Effect.Effect<ServerConfig | null, E>,
 ): Effect.Effect<Option.Option<ServerConfig>> {
   return initialConfig.pipe(
-    Effect.asSome,
+    Effect.map(Option.fromNullishOr),
     Effect.catch((error) =>
       Effect.logWarning("Could not load the initial environment configuration.").pipe(
         Effect.annotateLogs({ ...safeErrorLogAttributes(error) }),
@@ -33,6 +41,24 @@ function initialConfigOption<E>(
 // Bounded like the snapshot fetches: a wedged environment must not pin the
 // permissions check (and with it the settings UI) in a loading state for long.
 const DEFAULT_SESSION_STATE_TIMEOUT_MS = 6_000;
+
+const currentEnvironmentHttpContext = Effect.gen(function* () {
+  const supervisor = yield* EnvironmentSupervisor;
+  const prepared = yield* SubscriptionRef.get(supervisor.prepared);
+  if (Option.isNone(prepared)) {
+    return yield* new EnvironmentRpcUnavailableError({
+      environmentId: supervisor.target.environmentId,
+      message: "Reconnect this environment to manage shared access.",
+    });
+  }
+  return {
+    prepared: prepared.value,
+    signer: yield* Effect.serviceOption(ManagedRelayDpopSigner),
+    remoteAuthorization: yield* Effect.serviceOption(RemoteEnvironmentAuthorization),
+    group: "auth" as const,
+    timeoutMs: DEFAULT_SESSION_STATE_TIMEOUT_MS,
+  };
+});
 
 /**
  * Read the granted scopes of this client's session on one environment via its
@@ -151,6 +177,88 @@ export function createEnvironmentSessionAtoms<R, E>(
   );
 
   return {
+    createPairingCredential: createEnvironmentCommand(runtime, {
+      label: "environment-session:create-pairing-credential",
+      execute: (input: AuthCreatePairingCredentialInput) =>
+        Effect.gen(function* () {
+          const context = yield* currentEnvironmentHttpContext;
+          let httpBaseUrl = context.prepared.httpBaseUrl;
+          const created = yield* executeAuthenticatedEnvironmentHttpRequest({
+            ...context,
+            method: "POST",
+            url: (base) => {
+              // Relay authorization can renew the endpoint. Return the origin
+              // that issued this credential, never the renderer's primary host.
+              httpBaseUrl = base;
+              return environmentEndpointUrl(base, "/api/auth/pairing-token");
+            },
+            request: ({ client, headers }) => client.pairingCredential({ headers, payload: input }),
+          });
+          return { ...created, httpBaseUrl };
+        }),
+    }),
+    listPairingLinks: createEnvironmentCommand(runtime, {
+      label: "environment-session:list-pairing-links",
+      execute: (_input: Record<string, never>) =>
+        Effect.gen(function* () {
+          const context = yield* currentEnvironmentHttpContext;
+          return yield* executeAuthenticatedEnvironmentHttpRequest({
+            ...context,
+            method: "GET",
+            url: (base) => environmentEndpointUrl(base, "/api/auth/pairing-links"),
+            request: ({ client, headers }) => client.pairingLinks({ headers }),
+          });
+        }),
+    }),
+    revokePairingLink: createEnvironmentCommand(runtime, {
+      label: "environment-session:revoke-pairing-link",
+      execute: (input: AuthRevokePairingLinkInput) =>
+        Effect.gen(function* () {
+          const context = yield* currentEnvironmentHttpContext;
+          return yield* executeAuthenticatedEnvironmentHttpRequest({
+            ...context,
+            method: "POST",
+            url: (base) => environmentEndpointUrl(base, "/api/auth/pairing-links/revoke"),
+            request: ({ client, headers }) => client.revokePairingLink({ headers, payload: input }),
+          });
+        }),
+    }),
+    listClientSessions: createEnvironmentCommand(runtime, {
+      label: "environment-session:list-client-sessions",
+      execute: (_input: Record<string, never>) =>
+        Effect.gen(function* () {
+          const context = yield* currentEnvironmentHttpContext;
+          return yield* executeAuthenticatedEnvironmentHttpRequest({
+            ...context,
+            method: "GET",
+            url: (base) => environmentEndpointUrl(base, "/api/auth/clients"),
+            request: ({ client, headers }) => client.clients({ headers }),
+          });
+        }),
+    }),
+    revokeClientSession: createEnvironmentCommand(runtime, {
+      label: "environment-session:revoke-client-session",
+      execute: (input: AuthRevokeClientSessionInput) =>
+        Effect.gen(function* () {
+          const context = yield* currentEnvironmentHttpContext;
+          return yield* executeAuthenticatedEnvironmentHttpRequest({
+            ...context,
+            method: "POST",
+            url: (base) => environmentEndpointUrl(base, "/api/auth/clients/revoke"),
+            request: ({ client, headers }) => client.revokeClient({ headers, payload: input }),
+          });
+        }),
+    }),
+    // Commands must read current supervisor state, not a possibly unmounted stream
+    // projection whose initial value is None even when the transport is connected.
+    observePreparedConnection: createEnvironmentCommand(runtime, {
+      label: "environment-session:observe-prepared-connection",
+      execute: (_input: Record<string, never>) =>
+        EnvironmentSupervisor.pipe(
+          Effect.flatMap((supervisor) => SubscriptionRef.get(supervisor.prepared)),
+          Effect.map(Option.getOrNull),
+        ),
+    }),
     initialConfigAtom,
     initialConfigValueAtom,
     preparedConnectionAtom,

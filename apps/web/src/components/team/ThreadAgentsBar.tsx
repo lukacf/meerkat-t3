@@ -1,4 +1,5 @@
 import { MeerkatWorkspaceCheckpoints } from "./MeerkatWorkspaceCheckpoints";
+import { SharedTaskCollaboration } from "./SharedTaskCollaboration";
 import type {
   EnvironmentId,
   MeerkatThreadConnections,
@@ -177,7 +178,7 @@ export function ThreadAgentsBar({
       className="@container/thread-agents min-w-0 shrink-0 border-b border-border/60"
       aria-label="Thread agents"
     >
-      <div className="flex h-9 min-w-0 items-center gap-2 px-3">
+      <div className="flex min-h-9 min-w-0 flex-wrap items-center gap-2 px-3 py-0.5">
         {!isDraft ? (
           <Popover open={membersOpen} onOpenChange={setMembersOpen}>
             <PopoverTrigger render={<Button variant="ghost-muted" size="xs" />}>
@@ -411,6 +412,14 @@ export function ThreadAgentsBar({
           <MeerkatWorkspaceCheckpoints
             environmentId={environmentId}
             target={{ projectId, instanceId, threadId }}
+          />
+        ) : null}
+        {!activeMember ? (
+          <SharedTaskCollaboration
+            environmentId={environmentId}
+            projectId={projectId}
+            threadId={threadId}
+            isDraft={isDraft}
           />
         ) : null}
         {query.error || connections.error ? (

@@ -2,6 +2,7 @@ import start from "../../../../../docs/user/getting-started.md?raw";
 import install from "../../../../../docs/user/install.md?raw";
 import accounts from "../../../../../docs/user/accounts.md?raw";
 import agents from "../../../../../docs/user/agents.md?raw";
+import shared from "../../../../../docs/user/shared-specialists.md?raw";
 import permissions from "../../../../../docs/user/permission-modes.md?raw";
 import recovery from "../../../../../docs/user/troubleshooting.md?raw";
 import updates from "../../../../../docs/user/updating.md?raw";
@@ -13,6 +14,7 @@ export const GUIDE_TOPICS = [
   { id: "install", label: "Install the prototype", file: "install.md", text: install },
   { id: "accounts", label: "Providers and accounts", file: "accounts.md", text: accounts },
   { id: "agents", label: "Project specialists", file: "agents.md", text: agents },
+  { id: "shared", label: "Shared specialists", file: "shared-specialists.md", text: shared },
   { id: "permissions", label: "Permissions", file: "permission-modes.md", text: permissions },
   { id: "recovery", label: "Recovery and help", file: "troubleshooting.md", text: recovery },
   { id: "updates", label: "Updates", file: "updating.md", text: updates },

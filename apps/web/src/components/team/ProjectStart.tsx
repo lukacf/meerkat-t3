@@ -18,6 +18,7 @@ import {
 } from "./ProjectAgentCreationRecovery";
 import { modelCredentialRequirement } from "../../modelCredentials";
 import type { ProjectHomeAccountSetup } from "../chat/composerModelReadiness";
+import { SharedProjectConnection } from "./SharedProjectConnection";
 
 // Project specialists have their own model. Carry a compatible draft selection,
 // otherwise use an available Meerkat model without changing the draft.
@@ -122,6 +123,7 @@ export function ProjectStart({
   };
   return (
     <section className="space-y-3 border-t border-border/60 pt-5 pb-6" aria-label="Project agents">
+      {project ? <SharedProjectConnection project={project} /> : null}
       <div className="flex items-center gap-2 text-sm font-medium">
         <BotIcon className="size-4 text-muted-foreground" />
         Project agents

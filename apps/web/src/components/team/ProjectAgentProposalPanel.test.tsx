@@ -7,6 +7,9 @@ import {
   type MeerkatProjectAgentProposal,
   type MeerkatProjectProposal,
   type MeerkatProjectTeam,
+  type SharedWorkspaceSession,
+  type SharedSpecialistRegisterInput,
+  type SharedProject,
 } from "@t3tools/contracts";
 import { DEFAULT_CLIENT_SETTINGS, type ClientSettings } from "@t3tools/contracts/settings";
 import { act, type PropsWithChildren } from "react";
@@ -19,11 +22,14 @@ const state = vi.hoisted(() => ({
   proposal: null as MeerkatProjectProposal | null,
   team: null as MeerkatProjectTeam | null,
   teamError: null as string | null,
+  sharedError: null as string | null,
   create: vi.fn(),
   prepare: vi.fn(),
   startTurn: vi.fn(),
   refresh: vi.fn(),
   navigate: vi.fn(),
+  shared: null as SharedWorkspaceSession | null,
+  share: vi.fn(),
 }));
 vi.mock("../../hooks/useSettings", () => ({
   useClientSettings: (select: (settings: ClientSettings) => unknown) => select(state.settings!),
@@ -58,17 +64,20 @@ vi.mock("./useRestoreReview", () => ({
 }));
 vi.mock("../../state/shell", () => ({ environmentShell: { stateValueAtom: () => "shell" } }));
 vi.mock("../../state/threads", () => ({ threadEnvironment: { startTurn: "startTurn" } }));
+vi.mock("../../state/sharedWorkspace", () => ({
+  sharedWorkspaceEnvironment: { session: () => "shared", registerSpecialist: "share" },
+}));
 vi.mock("../../state/query", () => ({
   useEnvironmentQuery: (query: string) => ({
-    data: query === "proposal" ? state.proposal : state.team,
-    error: query === "team" ? state.teamError : null,
+    data: query === "proposal" ? state.proposal : query === "shared" ? state.shared : state.team,
+    error: query === "team" ? state.teamError : query === "shared" ? state.sharedError : null,
     isPending: false,
     refresh: state.refresh,
   }),
   formatEnvironmentQueryError: (cause: unknown) => String(cause),
 }));
 vi.mock("../../state/use-atom-command", () => ({
-  useAtomCommand: (command: "create" | "prepare" | "startTurn") => state[command],
+  useAtomCommand: (command: "create" | "prepare" | "startTurn" | "share") => state[command],
 }));
 vi.mock("../ui/button", () => ({ Button: "button" }));
 vi.mock("../ui/badge", () => ({ Badge: "span" }));
@@ -165,6 +174,29 @@ const prepared: MeerkatProjectAgent = {
     updatedAt: "2026-09-29T07:01:00.000Z",
   },
 };
+const sharedProject: SharedProject = {
+  sharedProjectId: "shared-project",
+  hostProjectId: projectId,
+  name: "Project",
+  repository: "github.com/example/project",
+  aliases: [],
+  forkOf: null,
+  createdAt: "2026-10-17T07:00:00.000Z",
+};
+const sharedDefinition = (input: SharedSpecialistRegisterInput) => ({
+  ...input,
+  specialistId: "shared-specialist",
+  assignmentVersion: 0,
+  supersededAt: null,
+  successorId: null,
+  createdAt: sharedProject.createdAt,
+});
+function useSharedHost() {
+  state.shared = {
+    ...state.shared!,
+    snapshot: { ...state.shared!.snapshot, projects: [sharedProject] },
+  };
+}
 const props = {
   environmentId: EnvironmentId.make("local"),
   projectId,
@@ -176,9 +208,13 @@ const props = {
 };
 let renderer: ReactTestRenderer | undefined;
 const button = (label: string) =>
-  renderer!.root
-    .findAllByType("button")
-    .find((node) => node.children.filter((child) => typeof child !== "object").join("") === label)!;
+  renderer!.root.findAllByType("button").find(
+    (node) =>
+      node.children
+        .filter((child) => typeof child !== "object")
+        .join("")
+        .trim() === label,
+  )!;
 const content = () => JSON.stringify(renderer!.toJSON());
 const render = () =>
   act(() => {
@@ -208,6 +244,17 @@ beforeEach(() => {
     projectAgents: [],
   };
   state.settings = { ...DEFAULT_CLIENT_SETTINGS, onboardingCompletedAt: null };
+  state.shared = {
+    snapshot: { projects: [], specialists: [] },
+    permissions: { admin: true },
+  } as unknown as SharedWorkspaceSession;
+  state.share
+    .mockReset()
+    .mockImplementation(async ({ input }: { input: SharedSpecialistRegisterInput }) => ({
+      _tag: "Success",
+      value: sharedDefinition(input),
+    }));
+  state.sharedError = null;
   state.persist.mockReset().mockResolvedValue(undefined);
   state.teamError = null;
   state.create.mockReset();
@@ -216,6 +263,170 @@ beforeEach(() => {
   state.refresh.mockReset();
   state.navigate.mockReset();
 });
+
+describe("shared specialist proposal onboarding", () => {
+  it("prepares repository-only specialists and publishes the same identity and reviewed assignment", async () => {
+    useSharedHost();
+    const studying = {
+      ...prepared,
+      accessMode: "repository-read-only" as const,
+      preparation: { ...prepared.preparation!, status: "studying" as const },
+    };
+    state.create.mockResolvedValueOnce({
+      _tag: "Success",
+      value: {
+        results: [{ candidateId: "architect", agent: studying, error: null }],
+      },
+    });
+    render();
+    act(() => button("Review proposal").props.onClick());
+    expect(renderer!.root.findAllByProps({ "aria-label": "New agent permissions" })).toHaveLength(
+      0,
+    );
+    expect(content()).toContain("These specialists belong to a shared host");
+    await act(async () => button("Apply 1 assignment").props.onClick());
+    expect(state.create).toHaveBeenCalledWith({
+      environmentId: props.environmentId,
+      input: {
+        projectId,
+        sourceThreadId,
+        proposalId: proposal.proposalId,
+        candidateIds: ["architect"],
+        accessMode: "repository-read-only",
+      },
+    });
+    expect(button("Share specialist")).toBeUndefined();
+    state.team = {
+      ...state.team!,
+      projectAgents: [{ ...prepared, accessMode: "repository-read-only" }],
+    };
+    render();
+    await act(async () => button("Share specialist").props.onClick());
+    const request = state.share.mock.calls[0]![0];
+    expect(request).toMatchObject({
+      environmentId: props.environmentId,
+      input: {
+        nativeTarget: { projectId, instanceId, agentId: prepared.agentId },
+        label: prepared.label,
+        assignments: [
+          {
+            sharedProjectId: sharedProject.sharedProjectId,
+            charter: proposal.agents[0]!.charter,
+            paths: ["src/runtime"],
+            tags: [],
+          },
+        ],
+      },
+    });
+    expect(request.input.requestId).toMatch(/^shared-proposal:[a-f0-9]{64}$/);
+    expect(content()).toContain('"Shared"');
+    expect(button("Share specialist")).toBeUndefined();
+    expect(state.persist).not.toHaveBeenCalled();
+    await act(async () => button("Manage shared host").props.onClick());
+    expect(state.navigate).toHaveBeenLastCalledWith({ to: "/settings/connections" });
+  });
+
+  it.each(["read-only", "read-and-collaborate", "full-access"] as const)(
+    "does not convert or prepare a local role with %s permissions",
+    (accessMode) => {
+      useSharedHost();
+      state.team = { ...state.team!, projectAgents: [{ ...prepared, accessMode }] };
+      render();
+      act(() => button("Review proposal").props.onClick());
+      expect(content()).toContain("Local agent has different permissions");
+      expect(button("Apply 1 assignment")).toBeUndefined();
+      expect(button("Share specialist")).toBeUndefined();
+      expect(button("Retry study")).toBeUndefined();
+      expect(state.create).not.toHaveBeenCalled();
+      expect(state.prepare).not.toHaveBeenCalled();
+      expect(state.share).not.toHaveBeenCalled();
+    },
+  );
+
+  it("retries an uncertain publication with the same request and recognizes registration after remount", async () => {
+    useSharedHost();
+    state.team = {
+      ...state.team!,
+      projectAgents: [{ ...prepared, accessMode: "repository-read-only" }],
+    };
+    state.share.mockResolvedValueOnce({ _tag: "Failure", cause: "disconnected" });
+    render();
+    act(() => button("View agents").props.onClick());
+    await act(async () => button("Share specialist").props.onClick());
+    expect(content()).toContain("Could not confirm sharing");
+    await act(async () => button("Share specialist").props.onClick());
+    expect(state.share.mock.calls[1]![0]).toEqual(state.share.mock.calls[0]![0]);
+    const definition = sharedDefinition(state.share.mock.calls[0]![0].input);
+    state.shared = {
+      ...state.shared!,
+      snapshot: { ...state.shared!.snapshot, specialists: [definition] },
+    };
+    act(() => renderer!.unmount());
+    renderer = undefined;
+    render();
+    act(() => button("View agents").props.onClick());
+    expect(button("Share specialist")).toBeUndefined();
+    expect(content()).toContain('"Shared"');
+    expect(state.share).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps published assignment revisions in the shared workspace", () => {
+    useSharedHost();
+    const agent = {
+      ...prepared,
+      accessMode: "repository-read-only" as const,
+      charter: "Existing shared charter",
+    };
+    state.team = { ...state.team!, projectAgents: [agent] };
+    state.shared = {
+      ...state.shared!,
+      snapshot: {
+        ...state.shared!.snapshot,
+        specialists: [
+          sharedDefinition({
+            requestId: "already-shared",
+            nativeTarget: { projectId, instanceId, agentId: agent.agentId },
+            label: agent.label,
+            assignments: [
+              {
+                sharedProjectId: sharedProject.sharedProjectId,
+                charter: agent.charter,
+                paths: agent.ownershipPaths!,
+                tags: [],
+              },
+            ],
+          }),
+        ],
+      },
+    };
+    render();
+    act(() => button("Review proposal").props.onClick());
+    expect(content()).toContain("manage assignments in the shared workspace");
+    expect(button("Apply 1 assignment")).toBeUndefined();
+    expect(button("Share specialist")).toBeUndefined();
+    expect(button("Manage shared host")).toBeDefined();
+  });
+
+  it.each(["loading", "error", "participant"])(
+    "refuses creation when host context is %s",
+    async (status) => {
+      useSharedHost();
+      if (status === "loading") state.shared = null;
+      if (status === "error") state.sharedError = "Host access unavailable";
+      if (status === "participant")
+        state.shared = {
+          ...state.shared!,
+          permissions: { ...state.shared!.permissions, admin: false },
+        };
+      render();
+      act(() => button("Review proposal").props.onClick());
+      const apply = button("Apply 1 assignment");
+      expect(apply.props.disabled).toBe(true);
+      await act(async () => apply.props.onClick());
+      expect(state.create).not.toHaveBeenCalled();
+    },
+  );
+});
 afterEach(() => {
   act(() => renderer?.unmount());
   renderer = undefined;
@@ -223,7 +434,7 @@ afterEach(() => {
 });
 
 describe("proposal command recovery", () => {
-  it.each(["read-only", "full-access"])(
+  it.each(["read-and-collaborate", "read-only", "full-access"])(
     "uses the chosen permissions for new agents: %s",
     async (mode) => {
       state.create.mockResolvedValueOnce({
@@ -237,7 +448,7 @@ describe("proposal command recovery", () => {
       render();
       act(() => button("Review proposal").props.onClick());
       const permissions = renderer!.root.findByProps({ "aria-label": "New agent permissions" });
-      expect(permissions.props.value).toBe("read-only");
+      expect(permissions.props.value).toBe("read-and-collaborate");
       act(() => permissions.props.onChange({ target: { value: mode } }));
       await act(async () => button("Apply 1 assignment").props.onClick());
       expect(state.create).toHaveBeenCalledWith(

@@ -231,11 +231,11 @@ const harness = Effect.fnUntraced(function* () {
         timeout: 30_000,
       },
     );
-  const readRows = () => {
+  const readRows = (tables: readonly string[] = selectedTables) => {
     const db = new NodeSqlite.DatabaseSync(filename, { readOnly: true });
     try {
       return Object.fromEntries(
-        selectedTables.map((name) => [name, db.prepare(`SELECT * FROM ${name}`).all()]),
+        tables.map((name) => [name, db.prepare(`SELECT * FROM ${name}`).all()]),
       );
     } finally {
       db.close();
@@ -294,7 +294,23 @@ it.effect(
       for (const [name, digest] of Object.entries(before.files))
         if (name !== "userdata/settings.json") expect(configured[name], name).toBe(digest);
       const migrated = yield* runMigrations().pipe(Effect.provide(h.database));
-      expect(migrated.map(([id]) => id)).toEqual([60, 61, 62, 63, 64, 65, 66, 67, 68, 69]);
+      expect(migrated.map(([id]) => id)).toEqual([
+        60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79,
+      ]);
+      // Upgrading creates shared-workspace storage without publishing local agents or history.
+      expect(
+        h.readRows([
+          "shared_projects",
+          "shared_specialists",
+          "shared_activity",
+          "shared_knowledge",
+        ]),
+      ).toEqual({
+        shared_projects: [],
+        shared_specialists: [],
+        shared_activity: [],
+        shared_knowledge: [],
+      });
       const afterRows = h.readRows();
       for (const name of selectedTables) {
         expect(afterRows[name]?.length).toBe(before.rows[name]?.length);
@@ -304,6 +320,10 @@ it.effect(
       expect(afterRows.meerkat_project_agents?.[0]).toMatchObject({
         revision_version: 1,
         pending_revision_json: null,
+        access_mode: "full-access",
+      });
+      expect(h.readRows(["shared_evidence_usage"])).toEqual({
+        shared_evidence_usage: [{ singleton: 1, bytes: 0, records: 0, pending_inbox: 0 }],
       });
       expect(afterRows.meerkat_agent_delivery_receipts?.[0]).toMatchObject({
         native_target_json: null,

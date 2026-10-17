@@ -1,4 +1,7 @@
-import { connectionStatusTitle } from "@t3tools/client-runtime/connection";
+import {
+  connectionStatusTitle,
+  isSharedWorkspaceConnection,
+} from "@t3tools/client-runtime/connection";
 import {
   type EnvironmentId,
   type ProviderInstanceId,
@@ -164,7 +167,13 @@ function ProviderSettingsPanelContent(target: ProviderSettingsTarget) {
   const { environments, isReady } = useEnvironments();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const options = useMemo(
-    () => buildProviderEnvironmentOptions(environments, primaryEnvironmentId),
+    () =>
+      buildProviderEnvironmentOptions(
+        environments.filter(
+          (environment) => !isSharedWorkspaceConnection(environment.entry.target),
+        ),
+        primaryEnvironmentId,
+      ),
     [environments, primaryEnvironmentId],
   );
   // Raw user intent; the effective selection is re-derived every render so a

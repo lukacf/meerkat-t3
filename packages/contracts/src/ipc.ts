@@ -368,6 +368,14 @@ export const DesktopUpdateCheckResultSchema = Schema.Struct({
 // a plain string so the env-runtime can compare against it without
 // importing brand machinery from the desktop package.
 export const PRIMARY_LOCAL_ENVIRONMENT_ID = "primary";
+export const SHARED_LOCAL_ENVIRONMENT_ID = "shared-host";
+
+export const DesktopSharedHostStateSchema = Schema.Struct({
+  enabled: Schema.Boolean,
+  status: Schema.Literals(["stopped", "starting", "running", "stopping", "unavailable"]),
+  error: Schema.NullOr(Schema.String),
+});
+export type DesktopSharedHostState = typeof DesktopSharedHostStateSchema.Type;
 
 export interface DesktopEnvironmentBootstrap {
   // Stable backend instance id (e.g. "primary" or "wsl:ubuntu"). The
@@ -1167,6 +1175,8 @@ export interface DesktopBridge {
   getLocalEnvironmentBootstraps: () => readonly DesktopEnvironmentBootstrap[];
   getLocalEnvironmentEnabled?: () => boolean;
   setLocalEnvironmentEnabled?: (enabled: boolean) => Promise<void>;
+  getSharedHostState?: () => Promise<DesktopSharedHostState>;
+  setSharedHostEnabled?: (enabled: boolean) => Promise<DesktopSharedHostState>;
   getLocalEnvironmentBearerToken: () => Promise<string>;
   getClientSettings: () => Promise<ClientSettings | null>;
   setClientSettings: (settings: ClientSettings) => Promise<void>;

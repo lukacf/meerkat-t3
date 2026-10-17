@@ -86,6 +86,9 @@ export const AuthAccessReadScope = "access:read" as const;
 export const AuthAccessWriteScope = "access:write" as const;
 export const AuthRelayReadScope = "relay:read" as const;
 export const AuthRelayWriteScope = "relay:write" as const;
+export const AuthSharedReadScope = "shared:read" as const;
+export const AuthSharedContributeScope = "shared:contribute" as const;
+export const AuthSharedAdminScope = "shared:admin" as const;
 export const AuthEnvironmentScope = Schema.Literals([
   AuthOrchestrationReadScope,
   AuthOrchestrationOperateScope,
@@ -95,6 +98,9 @@ export const AuthEnvironmentScope = Schema.Literals([
   AuthAccessWriteScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
+  AuthSharedReadScope,
+  AuthSharedContributeScope,
+  AuthSharedAdminScope,
 ]);
 export type AuthEnvironmentScope = typeof AuthEnvironmentScope.Type;
 export const AuthEnvironmentScopes = Schema.Array(AuthEnvironmentScope);
@@ -112,6 +118,15 @@ export const AuthAdministrativeScopes = [
   AuthAccessReadScope,
   AuthAccessWriteScope,
   AuthRelayWriteScope,
+  AuthSharedReadScope,
+  AuthSharedContributeScope,
+  AuthSharedAdminScope,
+] as const;
+
+/** A shared participant can collaborate without access to the host workbench. */
+export const AuthSharedParticipantScopes = [
+  AuthSharedReadScope,
+  AuthSharedContributeScope,
 ] as const;
 
 export const AuthTokenExchangeGrantType =

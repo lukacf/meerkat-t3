@@ -54,14 +54,15 @@ const emptyDraft = (): ProjectAgentCreationDraft => ({
   instructions: "",
   instanceId: null,
   chosenModel: null,
-  accessMode: "read-only",
+  accessMode: "read-and-collaborate",
 });
 const emptyRow = (): DraftRow => ({ intentId: null, value: emptyDraft() });
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const nonempty = (value: unknown): value is string => typeof value === "string" && value.length > 0;
 const nullableString = (value: unknown) => value === null || nonempty(value);
-const accessMode = (value: unknown) => value === "read-only" || value === "full-access";
+const accessMode = (value: unknown) =>
+  value === "read-only" || value === "read-and-collaborate" || value === "full-access";
 function isDraft(value: unknown): value is ProjectAgentCreationDraft {
   return (
     record(value) &&

@@ -214,9 +214,13 @@ export function ProjectAgentPanel({
         <TooltipPopup>
           {definition.accessMode === "full-access"
             ? "Can edit files and run commands without approval."
-            : definition.accessMode === "read-only"
-              ? "File changes and shell commands are blocked."
-              : "This server does not report this agent's permissions."}
+            : definition.accessMode === "read-and-collaborate"
+              ? "Can inspect project files and exchange peer messages. Commands and file changes are blocked."
+              : definition.accessMode === "read-only"
+                ? "File changes and shell commands are blocked."
+                : definition.accessMode === "repository-read-only"
+                  ? "Repository files are read-only. Peer collaboration and permitted tools remain available."
+                  : "This server does not report this agent's permissions."}
         </TooltipPopup>
       </Tooltip>
       {definition.archived ? (
@@ -370,9 +374,13 @@ export function ProjectAgentPanel({
               <p className="text-xs leading-relaxed text-muted-foreground">
                 {definition.accessMode === "full-access"
                   ? "This agent can edit files and run commands without asking for approval."
-                  : definition.accessMode === "read-only"
-                    ? "This agent can inspect files. File changes, commands, and sending messages to peers are blocked."
-                    : "Connect to an updated server to view this agent's permissions."}{" "}
+                  : definition.accessMode === "read-and-collaborate"
+                    ? "This agent can inspect project files and exchange messages with connected peers. File changes, commands, browser control, and external tools are blocked."
+                    : definition.accessMode === "read-only"
+                      ? "This agent can inspect files. File changes, commands, and sending messages to peers are blocked."
+                      : definition.accessMode === "repository-read-only"
+                        ? "This agent can inspect repository files and collaborate with peers. Its native policy blocks repository changes while allowing permitted tools."
+                        : "Connect to an updated server to view this agent's permissions."}{" "}
                 Permissions stay with this conversation across reconnects and responsibility
                 changes. Create a new agent to choose a different mode.
               </p>

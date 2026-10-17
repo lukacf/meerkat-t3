@@ -1,4 +1,5 @@
 import * as Effect from "effect/Effect";
+import { getSharedHostState, setSharedHostEnabled } from "./methods/sharedHost.ts";
 
 import * as DesktopIpc from "./DesktopIpc.ts";
 import { installNotificationBadge } from "./methods/notificationBadge.ts";
@@ -86,6 +87,8 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handleSync(getLocalEnvironmentBootstraps);
   yield* ipc.handleSync(getLocalEnvironmentEnabled);
   yield* ipc.handle(setLocalEnvironmentEnabled);
+  yield* ipc.handle(getSharedHostState);
+  yield* ipc.handle(setSharedHostEnabled);
   yield* ipc.handle(getLocalEnvironmentBearerToken);
 
   yield* ipc.handle(getClientSettings);

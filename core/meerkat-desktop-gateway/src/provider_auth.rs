@@ -29,6 +29,7 @@ mod accounts;
 #[derive(Clone)]
 pub struct DesktopProviderAuth {
     persistence: Result<ProviderAuthPersistence, String>,
+    auth_scope: Result<Option<crate::desktop_auth_scope::DesktopAuthScope>, String>,
     authority: meerkat_runtime::ProviderAuthRuntimeAuthority,
     global_config_path: std::path::PathBuf,
     copilot_accounts: std::sync::Arc<accounts::CopilotAccounts>,
@@ -41,14 +42,18 @@ pub struct DesktopProviderAuth {
 
 impl DesktopProviderAuth {
     pub fn new() -> Self {
+        let auth_scope = crate::desktop_auth_scope::DesktopAuthScope::from_env();
+        let global_config_path = auth_scope.as_ref().ok().and_then(Option::as_ref)
+            .map_or_else(accounts::default_global_config_path, |scope| scope.global_config_path());
         let persistence = desktop_token_backend()
             .and_then(TokenStoreBackend::open_with_refresh_authority)
             .map_err(|error| error.to_string());
         Self {
             persistence,
+            auth_scope,
             authority: meerkat_runtime::MeerkatMachine::ephemeral()
                 .provider_auth_runtime_authority(),
-            global_config_path: accounts::default_global_config_path(),
+            global_config_path,
             copilot_accounts: Default::default(),
             account_mutations: Default::default(),
             auth_http: accounts::auth_http_client(),
@@ -453,7 +458,12 @@ pub(crate) fn desktop_token_backend()
             "test credential override requires a debug build".into(),
         ));
     }
-    TokenStoreBackend::default_keyring_auto()
+    match crate::desktop_auth_scope::DesktopAuthScope::from_env()
+        .map_err(meerkat_providers::auth_store::TokenStoreError::Unavailable)?
+    {
+        Some(scope) => Ok(scope.token_backend()),
+        None => TokenStoreBackend::default_keyring_auto(),
+    }
 }
 
 fn select_effective_connection_status(statuses: Vec<Value>) -> Option<Value> {
@@ -603,6 +613,7 @@ auth_profile = "desktop_openai"
 
             let store = Arc::new(EphemeralTokenStore::new());
             let auth = DesktopProviderAuth {
+                auth_scope: Ok(None),
                 global_config_path: accounts::default_global_config_path(),
                 copilot_accounts: Default::default(),
                 account_mutations: Default::default(),

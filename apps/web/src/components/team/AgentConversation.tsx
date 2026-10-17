@@ -629,7 +629,7 @@ type AgentConversationProps = {
   refreshTeam: () => void;
   displayName?: string;
   cwd: string | undefined;
-  accessMode?: RuntimeMode | undefined;
+  accessMode?: RuntimeMode | "repository-read-only" | "read-and-collaborate" | undefined;
 };
 
 export function AgentConversation(props: AgentConversationProps) {
@@ -1974,21 +1974,24 @@ function AgentConversationContent({
                     </div>
                     {addressable ? (
                       <>
-                        <AgentBrowserControls
-                          scope={mediaScope}
-                          workspaceCwd={cwd}
-                          ownerThreadId={agent.threadId}
-                          primaryProjectAgentId={primaryProjectAgentId}
-                          returnAttention={
-                            browserReturnAttention?.sessionId === agent.record.session_id
-                              ? browserReturnAttention
-                              : undefined
-                          }
-                          label={agentLabel}
-                          currentModel={agent.work?.model}
-                          accessMode={accessMode}
-                          disabled={pending}
-                        />
+                        {accessMode !== "repository-read-only" &&
+                        accessMode !== "read-and-collaborate" ? (
+                          <AgentBrowserControls
+                            scope={mediaScope}
+                            workspaceCwd={cwd}
+                            ownerThreadId={agent.threadId}
+                            primaryProjectAgentId={primaryProjectAgentId}
+                            returnAttention={
+                              browserReturnAttention?.sessionId === agent.record.session_id
+                                ? browserReturnAttention
+                                : undefined
+                            }
+                            label={agentLabel}
+                            currentModel={agent.work?.model}
+                            accessMode={accessMode}
+                            disabled={pending}
+                          />
+                        ) : null}
                         <NativeImageAttachmentButton attachments={attachments} disabled={pending} />
                       </>
                     ) : null}

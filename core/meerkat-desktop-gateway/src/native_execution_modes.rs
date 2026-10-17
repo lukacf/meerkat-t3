@@ -18,6 +18,12 @@ use serde_json::{json, Map, Value};
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum ExecutionMode {
     ReadOnly,
+    /// Local workspace readers and native peer communication only.
+    ReadAndCollaborate,
+    /// Repository access is supplied by the shared host's revision-bound
+    /// reader. Native peer communication and the host workspace tool remain
+    /// writable; this is deliberately distinct from native read-only intent.
+    RepositoryReadOnly,
     #[serde(rename = "approval-required")]
     Approvals,
     #[default]
@@ -28,6 +34,8 @@ impl ExecutionMode {
     pub(crate) fn tool_policy(self) -> Option<ToolAccessPolicy> {
         match self {
             Self::ReadOnly => Some(ToolAccessPolicy::ReadOnly),
+            Self::ReadAndCollaborate => Some(local_specialist_policy()),
+            Self::RepositoryReadOnly => Some(shared_specialist_policy()),
             Self::FullAccess | Self::Approvals => None,
         }
     }
@@ -35,6 +43,8 @@ impl ExecutionMode {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::ReadOnly => "read-only",
+            Self::ReadAndCollaborate => "read-and-collaborate",
+            Self::RepositoryReadOnly => "repository-read-only",
             Self::Approvals => "approval-required",
             Self::FullAccess => "full-access",
         }
@@ -46,12 +56,18 @@ pub(crate) fn requested_mode(
 ) -> Result<Option<ExecutionMode>, crate::GatewayError> {
     params.get("accessMode").map(|value| {
         serde_json::from_value(value.clone()).map_err(|_| crate::GatewayError::invalid(
-            "Meerkat supports read-only, approvals, and full-access execution.", None,
+            "Meerkat supports read-only, read-and-collaborate, repository-read-only, approvals, and full-access execution.", None,
         ))
     }).transpose()
 }
 
 pub(crate) fn persisted_mode(policy: Option<&ToolAccessPolicy>) -> Result<ExecutionMode, String> {
+    if policy == Some(&local_specialist_policy()) {
+        return Ok(ExecutionMode::ReadAndCollaborate);
+    }
+    if policy == Some(&shared_specialist_policy()) {
+        return Ok(ExecutionMode::RepositoryReadOnly);
+    }
     match policy {
         None => Ok(ExecutionMode::FullAccess),
         Some(policy) => {
@@ -66,6 +82,25 @@ pub(crate) fn persisted_mode(policy: Option<&ToolAccessPolicy>) -> Result<Execut
             }
         }
     }
+}
+
+pub(crate) fn local_specialist_policy() -> ToolAccessPolicy {
+    // The host mounts only its own repository readers and native comms owners.
+    // MCP, hooks and provider-native tools are disabled separately at composition.
+    ToolAccessPolicy::AllowList([
+        "workspace_read_file", "workspace_list_files", "workspace_search",
+        "peers", "send_message", "reply_to_peer", "send_request", "send_response",
+    ].into_iter().collect())
+}
+
+pub(crate) fn shared_specialist_policy() -> ToolAccessPolicy {
+    // Only these app-composed or native comms owners are mounted by the shared
+    // specialist profile. No shell command names or mutable repository tools
+    // are treated as a substitute for filesystem confinement.
+    ToolAccessPolicy::AllowList([
+        "shared_workspace", "peers", "send_message", "reply_to_peer",
+        "send_request", "send_response",
+    ].into_iter().collect())
 }
 
 pub(crate) fn validate_requested_mode(
@@ -750,6 +785,10 @@ mod tests {
                 .is_err()
         );
         assert!(
+            validate_requested_mode(Some(ExecutionMode::ReadAndCollaborate), ExecutionMode::ReadOnly)
+                .is_err()
+        );
+        assert!(
             validate_requested_mode(Some(ExecutionMode::ReadOnly), ExecutionMode::FullAccess)
                 .is_err()
         );
@@ -823,4 +862,110 @@ mod tests {
         );
         std::fs::remove_dir_all(root).unwrap();
     }
+
+    struct SharedPolicyProbe(std::sync::Mutex<Vec<String>>);
+    #[async_trait::async_trait]
+    impl AgentToolDispatcher for SharedPolicyProbe {
+        fn tools(&self) -> Arc<[Arc<ToolDef>]> {
+            ["shared_workspace", "peers", "send_message", "reply_to_peer", "send_request", "send_response", "shell", "write_file", "browser", "mcp_arbitrary", "schedule_create", "spawn_member"]
+                .into_iter().map(|name| Arc::new(ToolDef::new(name, "Policy proof", json!({"type":"object"}))))
+                .collect::<Vec<_>>().into()
+        }
+        fn tool_mutation_class(&self, _: &str) -> ToolMutationClass { ToolMutationClass::Mutating }
+        async fn dispatch(&self, call: ToolCallView<'_>) -> Result<ToolDispatchOutcome, ToolError> {
+            self.0.lock().unwrap().push(call.name.to_owned());
+            Ok(ToolResult::new(call.id.to_owned(), "dispatched".into(), false).into())
+        }
+    }
+
+    #[tokio::test]
+    async fn local_collaboration_reads_and_peers_without_mutation_after_resume() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("source.txt"), "local repository evidence").unwrap();
+        let probe = Arc::new(SharedPolicyProbe(Default::default()));
+        let tools: Arc<dyn AgentToolDispatcher> = Arc::new(
+            meerkat_core::ToolGatewayBuilder::new()
+                .add_dispatcher(workspace_reader(root.path().to_owned()))
+                .add_dispatcher(probe.clone())
+                .build().unwrap(),
+        );
+        let factory = meerkat::AgentFactory::new(root.path().join("state"))
+            .without_provider_auth_persistence();
+        let mut agent = factory.build_agent(meerkat::AgentBuildConfig {
+            llm_client_override: Some(Arc::new(NeverCalledClient)),
+            tool_dispatcher_override: Some(tools.clone()),
+            tool_access_policy: ExecutionMode::ReadAndCollaborate.tool_policy(),
+            ..meerkat::AgentBuildConfig::new("claude-sonnet-4-5")
+        }, &meerkat::Config::default()).await.unwrap();
+        let original = agent.session().id().clone();
+        for pass in 0..2 {
+            let result = agent.dispatch_external_tool_call(meerkat_core::ToolCall::new(
+                "read".into(), "workspace_read_file".into(), json!({"path":"source.txt"}),
+            )).await.unwrap();
+            assert!(!result.result.is_error);
+            assert!(result.result.text_content().contains("local repository evidence"));
+            for name in ["peers", "send_message", "reply_to_peer", "send_request", "send_response"] {
+                let result = agent.dispatch_external_tool_call(meerkat_core::ToolCall::new(name.into(), name.into(), json!({}))).await.unwrap();
+                assert!(!result.result.is_error, "{name} was denied");
+            }
+            for name in ["shared_workspace", "shell", "write_file", "browser", "mcp_arbitrary", "schedule_create", "spawn_member"] {
+                let result = agent.dispatch_external_tool_call(meerkat_core::ToolCall::new(name.into(), name.into(), json!({}))).await.unwrap();
+                assert!(result.result.is_error);
+                assert!(result.result.text_content().contains("access_denied"));
+            }
+            assert_eq!(agent.session().id(), &original);
+            assert_eq!(persisted_mode(agent.session().session_metadata().unwrap().tooling.tool_access_policy.as_ref()).unwrap(), ExecutionMode::ReadAndCollaborate);
+            if pass == 0 {
+                let saved = serde_json::to_vec(agent.session()).unwrap();
+                drop(agent);
+                agent = factory.build_agent(meerkat::AgentBuildConfig {
+                    llm_client_override: Some(Arc::new(NeverCalledClient)),
+                    tool_dispatcher_override: Some(tools.clone()),
+                    resume_session: Some(serde_json::from_slice(&saved).unwrap()),
+                    ..meerkat::AgentBuildConfig::new("claude-sonnet-4-5")
+                }, &meerkat::Config::default()).await.unwrap();
+            }
+        }
+        assert_eq!(probe.0.lock().unwrap().len(), 10);
+        assert_eq!(std::fs::read_to_string(root.path().join("source.txt")).unwrap(), "local repository evidence");
+    }
+
+    #[tokio::test]
+    async fn shared_policy_permits_communication_and_host_actions_but_no_repository_executor() {
+        let root = tempfile::tempdir().unwrap();
+        let probe = Arc::new(SharedPolicyProbe(Default::default()));
+        let factory = meerkat::AgentFactory::new(root.path().join("state")).without_provider_auth_persistence();
+        let mut agent = factory.build_agent(meerkat::AgentBuildConfig {
+            llm_client_override: Some(Arc::new(NeverCalledClient)),
+            tool_dispatcher_override: Some(probe.clone()),
+            tool_access_policy: ExecutionMode::RepositoryReadOnly.tool_policy(),
+            ..meerkat::AgentBuildConfig::new("claude-sonnet-4-5")
+        }, &meerkat::Config::default()).await.unwrap();
+        for name in ["shared_workspace", "send_message", "reply_to_peer"] {
+            let result = agent.dispatch_external_tool_call(meerkat_core::ToolCall::new(name.into(), name.into(), json!({}))).await.unwrap();
+            assert!(!result.result.is_error, "{name} was wrongly gated by blanket read-only intent");
+        }
+        for name in ["shell", "write_file", "browser", "mcp_arbitrary"] {
+            let result = agent.dispatch_external_tool_call(meerkat_core::ToolCall::new(name.into(), name.into(), json!({}))).await.unwrap();
+            assert!(result.result.is_error);
+            assert!(result.result.text_content().contains("access_denied"));
+        }
+        assert_eq!(*probe.0.lock().unwrap(), ["shared_workspace", "send_message", "reply_to_peer"]);
+        let saved = serde_json::to_vec(agent.session()).unwrap();
+        let original = agent.session().id().clone();
+        drop(agent);
+        let mut resumed = factory.build_agent(meerkat::AgentBuildConfig {
+            llm_client_override: Some(Arc::new(NeverCalledClient)), tool_dispatcher_override: Some(probe),
+            resume_session: Some(serde_json::from_slice(&saved).unwrap()),
+            ..meerkat::AgentBuildConfig::new("claude-sonnet-4-5")
+        }, &meerkat::Config::default()).await.unwrap();
+        assert_eq!(resumed.session().id(), &original);
+        let metadata = resumed.session().session_metadata().unwrap();
+        let policy = metadata.tooling.tool_access_policy.as_ref();
+        assert_eq!(persisted_mode(policy).unwrap(), ExecutionMode::RepositoryReadOnly);
+        let denied = resumed.dispatch_external_tool_call(meerkat_core::ToolCall::new("resumed".into(), "shell".into(), json!({}))).await.unwrap();
+        assert!(denied.result.is_error);
+        assert!(validate_requested_mode(Some(ExecutionMode::FullAccess), ExecutionMode::RepositoryReadOnly).is_err());
+    }
+
 }

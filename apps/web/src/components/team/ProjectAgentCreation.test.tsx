@@ -49,7 +49,11 @@ vi.mock("../../state/projectClones", () => ({ useProjectClone: () => null }));
 vi.mock("../../state/environments", () => ({
   useEnvironments: () => ({
     environments: [
-      { environmentId: "environment-a", serverConfig: { providers: state.providers } },
+      {
+        environmentId: "environment-a",
+        entry: { target: { _tag: "PrimaryConnectionTarget" } },
+        serverConfig: { providers: state.providers },
+      },
     ],
   }),
 }));
@@ -288,7 +292,7 @@ it("shares only matching composer account guidance while retaining agent creatio
   expect(state.create).not.toHaveBeenCalled();
 });
 
-it("creates a custom agent with the preferred reasoning and no visible cache control", async () => {
+it("creates a local collaborator with the preferred reasoning and no visible cache control", async () => {
   const options = [{ id: "reasoning_effort", value: "high" }];
   await act(async () => {
     renderer = create(
@@ -297,10 +301,12 @@ it("creates a custom agent with the preferred reasoning and no visible cache con
   });
   expect(text()).toContain("Reasoning level");
   expect(text()).toContain("High");
+  expect(text()).toContain("Read and collaborate");
   expect(text()).not.toContain("Prompt caching");
   await fill();
   await submit();
   expect(state.create.mock.calls[0]![0].input.options).toEqual(options);
+  expect(state.create.mock.calls[0]![0].input.accessMode).toBe("read-and-collaborate");
   expect(
     createProjectAgentCreationDraftStore(scope, storage).getState().draft.value.options,
   ).toEqual(options);

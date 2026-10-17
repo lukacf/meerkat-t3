@@ -1,6 +1,7 @@
 import type { ConnectionTarget } from "@t3tools/client-runtime/connection";
 import {
   PRIMARY_LOCAL_ENVIRONMENT_ID,
+  SHARED_LOCAL_ENVIRONMENT_ID,
   type DesktopBridge,
   type DesktopEnvironmentBootstrap,
 } from "@t3tools/contracts";
@@ -36,6 +37,18 @@ export function desktopLocalBackendId(target: ConnectionTarget): string | null {
   return isDesktopLocalConnectionTarget(target)
     ? target.connectionId.slice(DESKTOP_LOCAL_CONNECTION_ID_PREFIX.length)
     : null;
+}
+
+export function isDesktopSharedHostTarget(target: ConnectionTarget): boolean {
+  return desktopLocalBackendId(target) === SHARED_LOCAL_ENVIRONMENT_ID;
+}
+
+/** Both paired participants and the desktop's own host can supply shared specialists. */
+export function isSharedSpecialistHostTarget(target: ConnectionTarget): boolean {
+  return (
+    target._tag === "BearerConnectionTarget" &&
+    (target.sharedWorkspace === true || isDesktopSharedHostTarget(target))
+  );
 }
 
 export function isWslConnectionTarget(target: ConnectionTarget): boolean {

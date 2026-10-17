@@ -186,6 +186,7 @@ struct DisposalTask {
 struct DisposalProgress {
     runtime_phases_completed: bool,
     parent_closed: bool,
+    native_child_root_pending: bool,
     native_child_root_released: bool,
     children_closed: HashSet<String>,
 }
@@ -322,20 +323,58 @@ async fn dispose_runtime(
 ) -> Result<(), String> {
     let parent = runtime.mob_handle();
     let parent_id = parent.mob_id().clone();
+    let mut retained_child_root = None;
     if !progress.runtime_phases_completed {
         let report = while_interrupting(runtime, &parent, runtime.shutdown()).await;
-        if !report.cleanup_completed() {
+        let child_root_pending = report.cleanup_retained_until_process_exit();
+        if !report.cleanup_completed() && !child_root_pending {
             return Err(format!(
                 "MobKit parent cleanup did not complete: {report:?}"
             ));
         }
+        // This native classification attests every authority-owning phase
+        // except child-root release. Keep that receipt: repeating Shutdown
+        // against the terminal parent can no longer reach child stand-down.
+        progress.native_child_root_pending = child_root_pending;
         progress.native_child_root_released = matches!(
             report.child_mob_stand_down,
             meerkat_mobkit::ChildMobStandDownOutcome::Released { .. }
         );
         progress.runtime_phases_completed = true;
+        if child_root_pending {
+            retained_child_root = Some(format!(
+                "MobKit parent cleanup did not complete: {report:?}"
+            ));
+        }
     }
     finish_parent_actor(runtime, &parent, progress).await?;
+
+    // The first Held remains an incomplete cleanup, even with no children.
+    // A later caller retries only the outstanding native child-root owner.
+    if let Some(error) = retained_child_root {
+        return Err(error);
+    }
+    if progress.native_child_root_pending {
+        let outcome = runtime
+            .mob_runtime()
+            .stand_down_child_mobs(
+                std::time::Instant::now()
+                    + meerkat_mobkit::unified_runtime::lifecycle::MOB_TERMINAL_SHUTDOWN_BUDGET,
+            )
+            .await;
+        // A prior Held proves a durable root existed. Only its actual release
+        // receipt completes that debt; even NotConfigured would not prove it.
+        if !matches!(
+            outcome,
+            meerkat_mobkit::ChildMobStandDownOutcome::Released { .. }
+        ) {
+            return Err(format!(
+                "Native child-mob cleanup did not complete: {outcome:?}. Retained for retry."
+            ));
+        }
+        progress.native_child_root_pending = false;
+        progress.native_child_root_released = true;
+    }
 
     // Durable children have one native shutdown owner. Its released-root
     // receipt proves their settlement; asking an already closed child again

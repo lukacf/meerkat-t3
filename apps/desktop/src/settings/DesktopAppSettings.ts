@@ -26,6 +26,8 @@ import { isValidDistroName } from "../wsl/wslPathParsing.ts";
 
 export interface DesktopSettings {
   readonly localEnvironmentEnabled: boolean;
+  readonly sharedHostEnabled: boolean;
+  readonly sharedHostPort: number | null;
   readonly linuxPasswordStore: LinuxPasswordStorePreference;
   readonly mainWindowBounds: DesktopWindowBounds | null;
   readonly mainWindowMaximized: boolean;
@@ -75,6 +77,8 @@ export const DEFAULT_MAIN_WINDOW_SIZE = {
 
 export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   localEnvironmentEnabled: true,
+  sharedHostEnabled: false,
+  sharedHostPort: null,
   linuxPasswordStore: DEFAULT_LINUX_PASSWORD_STORE,
   mainWindowBounds: null,
   mainWindowMaximized: false,
@@ -97,6 +101,10 @@ const DesktopWindowBoundsDocument = Schema.Struct({
 
 const DesktopSettingsDocument = Schema.Struct({
   localEnvironmentEnabled: Schema.optionalKey(Schema.Boolean),
+  sharedHostEnabled: Schema.optionalKey(Schema.Boolean),
+  sharedHostPort: Schema.optionalKey(
+    Schema.Int.check(Schema.isBetween({ minimum: 1024, maximum: 65535 })),
+  ),
   linuxPasswordStore: Schema.optionalKey(Schema.Unknown),
   mainWindowBounds: Schema.optionalKey(Schema.NullOr(DesktopWindowBoundsDocument)),
   mainWindowMaximized: Schema.optionalKey(Schema.Boolean),
@@ -155,6 +163,10 @@ export class DesktopAppSettings extends Context.Service<
   {
     readonly load: Effect.Effect<DesktopSettings>;
     readonly get: Effect.Effect<DesktopSettings>;
+    readonly setSharedHost: (input: {
+      readonly enabled: boolean;
+      readonly port: number | null;
+    }) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
     readonly setLocalEnvironmentEnabled: (
       enabled: boolean,
     ) => Effect.Effect<DesktopSettingsChange, DesktopSettingsWriteError>;
@@ -231,6 +243,8 @@ function normalizeDesktopSettingsDocument(
 
   return {
     localEnvironmentEnabled: parsed.localEnvironmentEnabled !== false,
+    sharedHostEnabled: parsed.sharedHostEnabled === true,
+    sharedHostPort: parsed.sharedHostPort ?? null,
     linuxPasswordStore: normalizeLinuxPasswordStorePreference(parsed.linuxPasswordStore),
     mainWindowBounds,
     mainWindowMaximized: mainWindowBounds !== null && parsed.mainWindowMaximized === true,
@@ -253,6 +267,8 @@ function toDesktopSettingsDocument(
   defaults: DesktopSettings,
 ): DesktopSettingsDocument {
   const document: Mutable<DesktopSettingsDocument> = {};
+  if (settings.sharedHostEnabled) document.sharedHostEnabled = true;
+  if (settings.sharedHostPort !== null) document.sharedHostPort = settings.sharedHostPort;
 
   if (settings.localEnvironmentEnabled !== defaults.localEnvironmentEnabled) {
     document.localEnvironmentEnabled = settings.localEnvironmentEnabled;
@@ -516,6 +532,12 @@ export const make = Effect.gen(function* () {
 
   return DesktopAppSettings.of({
     get: SynchronizedRef.get(settingsRef),
+    setSharedHost: (input) =>
+      persist((settings) =>
+        settings.sharedHostEnabled === input.enabled && settings.sharedHostPort === input.port
+          ? settings
+          : { ...settings, sharedHostEnabled: input.enabled, sharedHostPort: input.port },
+      ),
     load: Effect.gen(function* () {
       const settings = yield* readSettings(
         fileSystem,
@@ -596,6 +618,12 @@ export const layerTest = (initialSettings: DesktopSettings = DEFAULT_DESKTOP_SET
 
       return DesktopAppSettings.of({
         get: SynchronizedRef.get(settingsRef),
+        setSharedHost: (input) =>
+          update((settings) =>
+            settings.sharedHostEnabled === input.enabled && settings.sharedHostPort === input.port
+              ? settings
+              : { ...settings, sharedHostEnabled: input.enabled, sharedHostPort: input.port },
+          ),
         load: SynchronizedRef.get(settingsRef),
         setMainWindowBounds: (bounds, isMaximized) =>
           update((settings) => setMainWindowBounds(settings, bounds, isMaximized)),

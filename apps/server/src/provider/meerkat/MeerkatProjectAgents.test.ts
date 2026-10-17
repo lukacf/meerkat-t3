@@ -887,9 +887,19 @@ describe("Meerkat persistent project agents", () => {
         requestId: "full-access-specialist",
         accessMode: "full-access",
       });
+      const collaborate = yield* h.service.projectAgentCreate({
+        ...createInput,
+        requestId: "collaborating-specialist",
+        accessMode: "read-and-collaborate",
+      });
       expect(inspect.accessMode).toBe("read-only");
       expect(full.accessMode).toBe("full-access");
-      expect(h.creates.map((item) => item.accessMode)).toEqual(["read-only", "full-access"]);
+      expect(collaborate.accessMode).toBe("read-and-collaborate");
+      expect(h.creates.map((item) => item.accessMode)).toEqual([
+        "read-only",
+        "full-access",
+        "read-and-collaborate",
+      ]);
       const legacyRetry = yield* h.service.projectAgentCreate({
         ...createInput,
         requestId: "full-access-specialist",
@@ -903,9 +913,9 @@ describe("Meerkat persistent project agents", () => {
         }),
       );
       expect(changed.message).toContain("different agent settings");
-      expect(h.creates).toHaveLength(2);
+      expect(h.creates).toHaveLength(3);
       const reopened = yield* h.reopen;
-      for (const agent of [inspect, full]) {
+      for (const agent of [inspect, full, collaborate]) {
         yield* reopened.projectAgentLifecycle({
           projectId,
           agentId: agent.agentId,
@@ -924,11 +934,13 @@ describe("Meerkat persistent project agents", () => {
         expect.arrayContaining([
           [inspect.agentId, "read-only"],
           [full.agentId, "full-access"],
+          [collaborate.agentId, "read-and-collaborate"],
         ]),
       );
-      expect(h.creates.slice(2).map((item) => item.accessMode)).toEqual([
+      expect(h.creates.slice(3).map((item) => item.accessMode)).toEqual([
         "read-only",
         "full-access",
+        "read-and-collaborate",
       ]);
     }).pipe(Effect.provide(testLayer)),
   );
@@ -1786,6 +1798,106 @@ describe("Meerkat persistent project agents", () => {
     }).pipe(Effect.provide(testLayer)),
   );
 
+  it.effect(
+    "commits caller authorization with the first claim and never reapplies it to uncertain delivery",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        const h = yield* harness();
+        const agent = yield* h.service.projectAgentCreate(createInput);
+        const input = {
+          projectId,
+          instanceId,
+          agentRef: agent.agentRef!,
+          requestId: "guarded-admission",
+          text: "Review",
+          handlingMode: "queue" as const,
+        };
+        const sql = yield* SqlClient.SqlClient;
+        const denied = {
+          check: Effect.gen(function* () {
+            yield* sql`INSERT INTO shared_workspace(singleton, definition_json) VALUES (1, '{}')`;
+            return yield* new MeerkatTeamError({
+              projectId,
+              operation: "agent-control",
+              message: "Access revoked",
+            });
+          }),
+        };
+        expect(
+          (yield* h.service.agentSendWithAdmission(input, denied).pipe(Effect.flip)).message,
+        ).toBe("Access revoked");
+        expect(yield* sql`SELECT * FROM meerkat_agent_delivery_receipts`).toEqual([]);
+        expect(yield* sql`SELECT * FROM shared_workspace`).toEqual([]);
+        expect(h.sends).toHaveLength(0);
+        h.setFailSend(true);
+        expect(
+          (yield* h.service.agentSendWithAdmission(input, {
+            check:
+              sql`INSERT INTO shared_workspace(singleton, definition_json) VALUES (1, '{}')`.pipe(
+                Effect.asVoid,
+              ),
+          })).status,
+        ).toBe("uncertain");
+        expect(yield* sql`SELECT * FROM shared_workspace`).toHaveLength(1);
+        expect(yield* sql`SELECT * FROM meerkat_agent_delivery_receipts`).toHaveLength(1);
+        const reopened = yield* h.reopen;
+        expect((yield* reopened.agentSendWithAdmission(input, denied)).status).toBe("uncertain");
+        expect(h.sends).toHaveLength(1);
+        let missing = 0;
+        yield* reopened.agentDeliveryReconcile(
+          input,
+          Effect.sync(() => {
+            missing++;
+          }),
+        );
+        expect(missing).toBe(0);
+        yield* reopened.agentDeliveryReconcile(
+          { ...input, requestId: "not-claimed" },
+          Effect.sync(() => {
+            missing++;
+          }),
+        );
+        expect(missing).toBe(1);
+      }).pipe(Effect.provide(testLayer)),
+  );
+
+  it.effect("checks the required native policy again after preparation before claiming", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      const h = yield* harness();
+      const agent = yield* h.service.projectAgentCreate({
+        ...createInput,
+        accessMode: "repository-read-only",
+      });
+      h.setPreparation(
+        Effect.sync(() => {
+          for (const [key, state] of h.native)
+            h.native.set(key, {
+              ...state,
+              mobs: state.mobs.map((mob) => ({ ...mob, accessMode: "full-access" })),
+            });
+        }),
+      );
+      const input = {
+        projectId,
+        instanceId,
+        agentRef: agent.agentRef!,
+        requestId: "policy-changed",
+        text: "Review",
+        handlingMode: "queue" as const,
+      };
+      expect(
+        (yield* h.service
+          .agentSendWithAdmission(input, { accessMode: "repository-read-only", check: Effect.void })
+          .pipe(Effect.flip)).message,
+      ).toContain("required observed execution policy");
+      const sql = yield* SqlClient.SqlClient;
+      expect(yield* sql`SELECT * FROM meerkat_agent_delivery_receipts`).toEqual([]);
+      expect(h.sends).toHaveLength(0);
+    }).pipe(Effect.provide(testLayer)),
+  );
+
   it.effect("claims concurrent preparations of the same immutable request only once", () =>
     Effect.gen(function* () {
       yield* seed;
@@ -2521,6 +2633,103 @@ const selectedProposal = {
 };
 
 describe("Meerkat native project proposals", () => {
+  it.effect(
+    "prepares generated shared specialists with repository-only policy and preserves it on retry",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        yield* proposalWorkspace();
+        yield* bindProposalThread;
+        yield* nativeProposal({});
+        const h = yield* harness();
+        const input = { ...selectedProposal, accessMode: "repository-read-only" as const };
+        const first = yield* h.service.projectProposalCreate(input);
+        const agent = first.results[0]!.agent!;
+        expect(first.results[0]?.error).toBeNull();
+        expect(agent.accessMode).toBe("repository-read-only");
+        expect(h.creates[0]?.accessMode).toBe("repository-read-only");
+        expect(h.creates[0]?.instructions).toContain("attributed requests in the shared workspace");
+        expect(h.sends).toHaveLength(1);
+        const reopened = yield* h.reopen;
+        const retry = yield* reopened.projectProposalCreate(input);
+        expect(retry.results[0]?.agent).toMatchObject({
+          agentId: agent.agentId,
+          accessMode: "repository-read-only",
+        });
+        expect(h.creates).toHaveLength(1);
+        expect(h.sends).toHaveLength(1);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "shared proposals leave differently permitted local roles and their assignments untouched",
+    () =>
+      Effect.gen(function* () {
+        yield* seed;
+        yield* proposalWorkspace();
+        yield* bindProposalThread;
+        yield* nativeProposal({});
+        const h = yield* harness();
+        const first = yield* h.service.projectProposalCreate({
+          ...selectedProposal,
+          accessMode: "read-and-collaborate",
+        });
+        const original = first.results[0]!.agent!;
+        const payload = proposalPayload();
+        payload.agents[0]!.charter = "A changed shared responsibility";
+        yield* nativeProposal({ sequence: 2, toolId: "shared-proposal", payload });
+        const rejected = yield* h.service.projectProposalCreate({
+          ...selectedProposal,
+          proposalId: "shared-proposal",
+          accessMode: "repository-read-only",
+        });
+        expect(rejected.results[0]?.error).toContain("existing local agent");
+        expect(rejected.results[0]?.agent).toBeNull();
+        const observed = (yield* h.service.projectTeam({ projectId })).projectAgents[0]!;
+        expect(observed).toMatchObject({
+          agentId: original.agentId,
+          accessMode: original.accessMode,
+          charter: original.charter,
+        });
+        expect(h.revisions).toEqual([]);
+        expect(h.creates).toHaveLength(1);
+        expect(h.sends).toHaveLength(1);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("keeps published specialist changes in shared composition history", () =>
+    Effect.gen(function* () {
+      yield* seed;
+      yield* proposalWorkspace();
+      yield* bindProposalThread;
+      yield* nativeProposal({});
+      const h = yield* harness();
+      const first = yield* h.service.projectProposalCreate({
+        ...selectedProposal,
+        accessMode: "repository-read-only",
+      });
+      const original = first.results[0]!.agent!;
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`INSERT INTO shared_specialists
+        (specialist_id,request_id,fingerprint,native_project_id,native_instance_id,native_agent_id,definition_json)
+        VALUES ('shared-core','register-core','fingerprint',${projectId},${instanceId},${original.agentId},'{}')`;
+      const payload = proposalPayload();
+      payload.agents[0]!.charter = "A changed shared responsibility";
+      yield* nativeProposal({ sequence: 2, toolId: "shared-proposal", payload });
+      const rejected = yield* h.service.projectProposalCreate({
+        ...selectedProposal,
+        proposalId: "shared-proposal",
+        accessMode: "repository-read-only",
+      });
+      expect(rejected.results[0]?.error).toContain("shared composition history");
+      const observed = (yield* h.service.projectTeam({ projectId })).projectAgents[0]!;
+      expect(observed).toMatchObject({ agentId: original.agentId, charter: original.charter });
+      expect(h.revisions).toEqual([]);
+      expect(h.creates).toHaveLength(1);
+      expect(h.sends).toHaveLength(1);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect(
     "inherits scoped source reasoning once and preserves admitted creation across picker changes",
     () =>
@@ -3553,5 +3762,52 @@ it.effect(
       expect(
         (yield* h.service.projectTeam({ projectId })).projectAgents[0]?.preparation?.status,
       ).toBe("ready");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+);
+
+it.effect(
+  "revises shared responsibilities through native activation without studying the host checkout",
+  () =>
+    Effect.gen(function* () {
+      yield* seed;
+      yield* proposalWorkspace();
+      const h = yield* harness();
+      const first = yield* h.service.projectAgentCreate({
+        ...createInput,
+        accessMode: "repository-read-only",
+      });
+      const input = {
+        projectId,
+        agentId: first.agentId,
+        requestId: "shared-revision",
+        instructions: "Use immutable revisions in the shared API project.",
+      };
+      h.setBusy(true);
+      const pending = yield* h.service.projectAgentReviseShared(input);
+      expect(pending.applied).toBe(false);
+      expect(h.revisions).toHaveLength(0);
+      expect(h.sends).toHaveLength(0);
+      expect(h.preparations).toHaveLength(0);
+      h.setBusy(false);
+      const reopened = yield* h.reopen;
+      const applied = yield* reopened.projectAgentReviseShared(input);
+      expect(applied).toMatchObject({ applied: true, revisionId: pending.revisionId });
+      expect(h.revisions).toHaveLength(1);
+      expect(h.revisions[0]?.instructions).toContain(input.instructions);
+      expect(h.revisions[0]?.instructions).not.toContain(
+        "inspect the relevant current working files",
+      );
+      expect(h.sends).toHaveLength(0);
+      expect(h.preparations).toHaveLength(0);
+      expect(yield* reopened.projectAgentReviseShared(input)).toEqual(applied);
+      expect(h.revisions).toHaveLength(1);
+      const changed = yield* reopened
+        .projectAgentReviseShared({ ...input, instructions: "A different immutable request" })
+        .pipe(Effect.flip);
+      expect(changed.message).toContain("different responsibilities");
+      const sql = yield* SqlClient.SqlClient;
+      expect(
+        yield* sql`SELECT * FROM meerkat_project_agent_revisions WHERE agent_id=${first.agentId} AND revision_id=${applied.revisionId}`,
+      ).toHaveLength(1);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
 );

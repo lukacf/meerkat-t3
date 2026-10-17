@@ -4,6 +4,7 @@ use super::*;
 
 fn fixture() -> DesktopProviderAuth {
     DesktopProviderAuth {
+        auth_scope: Ok(None),
         global_config_path: default_global_config_path(),
         copilot_accounts: Default::default(),
         account_mutations: Default::default(),
@@ -151,6 +152,9 @@ impl TokenStore for InteractiveOnlyStore {
 
     async fn observe_status(&self, _: &TokenKey) -> Result<meerkat_providers::auth_store::TokenStoreObservation, meerkat_providers::auth_store::TokenStoreError> {
         // Mirrors Keychain: passive observation never returns secret material.
+        if self.pending && self.calls.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            return Ok(meerkat_providers::auth_store::TokenStoreObservation::Pending);
+        }
         Ok(meerkat_providers::auth_store::TokenStoreObservation::NotObserved)
     }
 
@@ -211,6 +215,10 @@ async fn explicit_check_stays_bounded_when_credential_access_does_not_complete()
     auth.persistence = Ok(ProviderAuthPersistence::new(store.clone(), Arc::new(InMemoryCoordinator::new())));
     let result = auth.check_with_timeout(Some(&target(&row)), std::time::Duration::ZERO).await;
     assert!(result.is_err());
+    assert_eq!(store.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    let retry = tokio::time::timeout(std::time::Duration::from_secs(1), auth.check(Some(&target(&row))))
+        .await.expect("a pending observation must not wait on another interactive read");
+    assert!(retry.is_err());
     assert_eq!(store.calls.load(std::sync::atomic::Ordering::SeqCst), 1);
     let overview = auth.status(Some(&json!({}))).await.unwrap();
     let account = overview["connections"].as_array().unwrap().iter()

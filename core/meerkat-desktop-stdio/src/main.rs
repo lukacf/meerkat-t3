@@ -4,7 +4,7 @@ mod auxiliary_requests;
 
 use anyhow::Result;
 use meerkat_desktop_contracts::{EventEmit, RequestContext, RpcRequest};
-use meerkat_desktop_gateway::MeerkatGateway;
+use meerkat_desktop_gateway::{CredentialSettlement, MeerkatGateway};
 use serde_json::json;
 use tokio::io::{self, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{mpsc, oneshot};
@@ -179,10 +179,15 @@ async fn async_main() -> Result<()> {
     // Keep output forwarding alive until the runtime drains and the admitted
     // RPC tasks have settled. EOF and termination signals use the same path.
     let deadline = tokio::time::Instant::now() + MeerkatGateway::shutdown_horizon();
+    let mut credential_settlement = json!({"status":"not_observed"});
     let mut failures = finish_native_cleanup(
         gateway.shutdown(),
         gateway.drain_storage_observers(),
-        gateway.settle_credential_mutations(deadline),
+        async {
+            let (observation, failures) = credential_settlement_output(gateway.settle_credential_mutations(deadline).await);
+            credential_settlement = observation;
+            failures
+        },
         &mut requests,
         deadline,
     ).await;
@@ -202,6 +207,7 @@ async fn async_main() -> Result<()> {
         "params":{
             "cleanupCompleted":failures.is_empty(),
             "errors":failures,
+            "credentialSettlement":credential_settlement,
             "trigger":shutdown_trigger.diagnostic()
         }
     }))?);
@@ -217,6 +223,17 @@ async fn async_main() -> Result<()> {
         "Native runtime cleanup did not complete"
     );
     Ok(())
+}
+
+fn credential_settlement_output(result: Result<CredentialSettlement, String>) -> (serde_json::Value, Vec<String>) {
+    match result {
+        Ok(CredentialSettlement::Settled) => (json!({"status":"settled"}), Vec::new()),
+        Ok(CredentialSettlement::Unsettled { pending }) => (
+            json!({"status":"unsettled", "pending":pending}),
+            vec![format!("Credential work is still running at exit; outcome unknown: {pending} operations remain")],
+        ),
+        Err(message) => (json!({"status":"not_observed"}), vec![message]),
+    }
 }
 
 async fn finish_native_cleanup(
@@ -658,6 +675,32 @@ mod tests {
         ).await;
         assert_eq!(*phases.lock().unwrap(), ["native", "observers", "credentials"]);
         assert_eq!(failures, ["observer refusal", "credential work remains pending"]);
+    }
+
+    #[tokio::test]
+    async fn credential_settlement_keeps_unsettled_work_in_the_cleanup_failure() {
+        let (settled, errors) = super::credential_settlement_output(Ok(super::CredentialSettlement::Settled));
+        assert_eq!(settled, json!({"status":"settled"}));
+        assert!(errors.is_empty());
+        let mut observation = json!({"status":"not_observed"});
+        let mut requests = tokio::task::JoinSet::new();
+        let errors = super::finish_native_cleanup(
+            async { Vec::new() },
+            async { Vec::new() },
+            async {
+                let (value, errors) = super::credential_settlement_output(Ok(super::CredentialSettlement::Unsettled { pending: 2 }));
+                observation = value;
+                errors
+            },
+            &mut requests,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        ).await;
+        assert_eq!(observation, json!({"status":"unsettled", "pending":2}));
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("outcome unknown"));
+        let (unobserved, errors) = super::credential_settlement_output(Err("admission remains open".into()));
+        assert_eq!(unobserved, json!({"status":"not_observed"}));
+        assert_eq!(errors, ["admission remains open"]);
     }
 
     #[tokio::test]

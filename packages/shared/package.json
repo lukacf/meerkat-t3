@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./sharedRepository": {
+      "types": "./src/sharedRepository.ts",
+      "import": "./src/sharedRepository.ts"
+    },
     "./executionModes": {
       "types": "./src/executionModes.ts",
       "import": "./src/executionModes.ts"

@@ -1,4 +1,6 @@
-// @effect-diagnostics nodeBuiltinImport:off globalTimers:off - this opt-in test owns native children, a loopback fixture and bounded failure deadlines.
+// @effect-diagnostics nodeBuiltinImport:off globalTimers:off globalDate:off - this opt-in test owns native children, a loopback fixture, real-process timing evidence and bounded failure deadlines.
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 import * as NodeHttp from "node:http";
 import * as NodeOS from "node:os";
@@ -23,6 +25,78 @@ import {
 
 const binaryPath = process.env.T3CODE_TEST_MEERKAT_BINARY;
 const previousBinaryPath = process.env.T3CODE_TEST_MEERKAT_PREVIOUS_BINARY;
+const creationTimeoutMs = 60_000;
+const maximumShutdownBudgetMs = 420_000;
+// At most four distinct processes close sequentially in the upgrade case.
+// This outer ceiling must not interrupt an owned process's native cleanup.
+const fixtureTimeoutMs = 4 * (maximumShutdownBudgetMs + 5_000) + 5 * creationTimeoutMs + 180_000;
+const decodeHealth = Schema.decodeUnknownSync(
+  Schema.Struct({
+    ok: Schema.Literal(true),
+    shutdownHorizonMs: Schema.Number,
+    build: Schema.Struct({
+      gatewayVersion: Schema.String,
+      meerkatVersion: Schema.String,
+      mobkitVersion: Schema.String,
+      cargoLockSha256: Schema.String,
+      platform: Schema.String,
+      arch: Schema.String,
+    }),
+  }),
+);
+
+async function executableIdentity(path: string) {
+  const realPath = await NodeFSP.realpath(path);
+  const before = await NodeFSP.stat(realPath);
+  const hash = NodeCrypto.createHash("sha256");
+  for await (const bytes of NodeFS.createReadStream(realPath)) hash.update(bytes);
+  const after = await NodeFSP.stat(realPath);
+  if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ino !== after.ino) {
+    throw new Error("Native executable changed while recording its identity");
+  }
+  return { path: realPath, sha256: hash.digest("hex"), bytes: after.size };
+}
+
+function failureEvidence(error: unknown) {
+  const fields = record(error);
+  const details = record(fields?.details);
+  const safeMessage = (message: string) =>
+    message.replaceAll("cold-fixture-key", "[fixture credential]").slice(0, 4_000);
+  return {
+    name: error instanceof Error ? error.name : "UnknownFailure",
+    // This fixture owns synthetic data only. Never retain request parameters,
+    // provider payloads, the inherited environment, or credentials in evidence.
+    message: safeMessage(error instanceof Error ? error.message : "Non-Error failure"),
+    ...(typeof details?.error === "string" ? { nativeError: safeMessage(details.error) } : {}),
+    ...(Array.isArray(details?.errors)
+      ? {
+          cleanupErrors: details.errors
+            .filter((value): value is string => typeof value === "string")
+            .slice(0, 16)
+            .map(safeMessage),
+        }
+      : {}),
+    ...(typeof fields?.kind === "string" ? { kind: fields.kind } : {}),
+    ...(typeof fields?.typedCode === "string" ? { typedCode: fields.typedCode } : {}),
+    ...(typeof fields?.outcomeUnknown === "boolean"
+      ? { outcomeUnknown: fields.outcomeUnknown }
+      : {}),
+  };
+}
+
+type ProcessEvidence = {
+  phase: string;
+  pid: number | null;
+  executable: Awaited<ReturnType<typeof executableIdentity>>;
+  health?: ReturnType<typeof decodeHealth>;
+  shutdownBudgetMs?: number;
+  cleanup?: "settled" | "failed";
+  closeObservation?: {
+    kind: string;
+    cleanupCompleted: boolean | null;
+    trigger: string | null;
+  };
+};
 const imageBase64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==";
 const decodeSnapshot = Schema.decodeUnknownSync(
@@ -227,16 +301,6 @@ async function completeTurn(
   }
 }
 
-async function closeWithEvidence(client: MeerkatGatewayClient) {
-  try {
-    await client.close();
-  } catch (error) {
-    const details =
-      error && typeof error === "object" && "details" in error ? error.details : undefined;
-    throw new Error(`Native shutdown did not settle: ${JSON.stringify(details)}`, { cause: error });
-  }
-}
-
 describe.skipIf(!binaryPath)("native Meerkat cold restart", () => {
   it.each([
     { scenario: "same-version restart", initialBinary: binaryPath },
@@ -245,7 +309,7 @@ describe.skipIf(!binaryPath)("native Meerkat cold restart", () => {
       : []),
   ])(
     "$scenario preserves exact assistant occurrences, sessions, images and unacknowledged output",
-    async ({ initialBinary }) => {
+    async ({ scenario, initialBinary }) => {
       if (!binaryPath) throw new Error("Native test executable was not supplied");
       const root = await NodeFSP.realpath(
         await NodeFSP.mkdtemp(NodePath.join(NodeOS.tmpdir(), "meerkat-cold-restart-test-")),
@@ -324,6 +388,90 @@ describe.skipIf(!binaryPath)("native Meerkat cold restart", () => {
         }
       });
       let client: MeerkatGatewayClient | undefined;
+      let stage = "prepare fixture";
+      let primaryFailure: unknown;
+      let failed = false;
+      const cleanupFailures: unknown[] = [];
+      const evidenceFailures: unknown[] = [];
+      const ownedClients = new Set<MeerkatGatewayClient>();
+      const processes: ProcessEvidence[] = [];
+      const steps: Array<{
+        stage: string;
+        operation: string;
+        pid: number | null;
+        startedAt: string;
+        elapsedMs?: number;
+        status: "pending" | "passed" | "failed";
+        error?: ReturnType<typeof failureEvidence>;
+      }> = [];
+      const evidencePath = NodePath.join(root, "restart-evidence.json");
+      let evidenceWrites = Promise.resolve();
+      const persistEvidence = () => {
+        const contents =
+          JSON.stringify(
+            {
+              scenario,
+              stage,
+              status:
+                failed || cleanupFailures.length > 0 || evidenceFailures.length > 0
+                  ? "failed"
+                  : stage === "finished"
+                    ? "passed"
+                    : "running",
+              creationTimeoutMs,
+              maximumShutdownBudgetMs,
+              processes,
+              steps,
+              requests,
+              providerErrors: errors.map(failureEvidence),
+              ...(failed ? { failure: failureEvidence(primaryFailure) } : {}),
+              cleanupFailures: cleanupFailures.map(failureEvidence),
+              evidenceFailures: evidenceFailures.map(failureEvidence),
+            },
+            null,
+            2,
+          ) + "\n";
+        // Serialize atomic replacements when failure cleanup closes two owners
+        // together. An evidence write failure must never prevent native cleanup.
+        evidenceWrites = evidenceWrites.then(async () => {
+          try {
+            const temporary = `${evidencePath}.tmp`;
+            await NodeFSP.writeFile(temporary, contents, { mode: 0o600 });
+            await NodeFSP.rename(temporary, evidencePath);
+          } catch (error) {
+            evidenceFailures.push(error);
+          }
+        });
+        return evidenceWrites;
+      };
+      const observe = async <T>(
+        pid: number | undefined,
+        operation: string,
+        work: () => Promise<T>,
+      ) => {
+        const step: (typeof steps)[number] = {
+          stage,
+          operation,
+          pid: pid ?? null,
+          startedAt: new Date().toISOString(),
+          status: "pending",
+        };
+        steps.push(step);
+        const started = Date.now();
+        await persistEvidence();
+        try {
+          const result = await work();
+          step.status = "passed";
+          return result;
+        } catch (error) {
+          step.status = "failed";
+          step.error = failureEvidence(error);
+          throw error;
+        } finally {
+          step.elapsedMs = Date.now() - started;
+          await persistEvidence();
+        }
+      };
       try {
         await NodeFSP.mkdir(projectPath);
         await new Promise<void>((resolve, reject) => {
@@ -366,14 +514,82 @@ enabled = false
         for (const key of Object.keys(env)) {
           if (/OPENAI|ANTHROPIC|GEMINI|GOOGLE|AZURE|PROXY/.test(key)) delete env[key];
         }
-        const start = (executable = binaryPath) =>
-          createMeerkatGatewayClient({
-            binaryPath: executable,
+        const start = async (phase: string, executable = binaryPath) => {
+          stage = phase;
+          const executableBuild = await executableIdentity(executable);
+          const native = createMeerkatGatewayClient({
+            binaryPath: executableBuild.path,
             cwd: projectPath,
             env,
             requestTimeoutMs: 15_000,
-            shutdownTimeoutMs: 15_000,
+            // Omit the override: the production client uses health's native
+            // horizon plus its 15s margin (currently 337s + 15s = 352s).
           });
+          const processEvidence: ProcessEvidence = {
+            phase,
+            pid: native.pid ?? null,
+            executable: executableBuild,
+          };
+          processes.push(processEvidence);
+          native.onClose((error) => {
+            const details = record(error.details);
+            const trigger = record(details?.trigger);
+            processEvidence.closeObservation = {
+              kind: error.kind,
+              cleanupCompleted:
+                typeof details?.cleanupCompleted === "boolean" ? details.cleanupCompleted : null,
+              trigger: typeof trigger?.kind === "string" ? trigger.kind : null,
+            };
+          });
+          let closing: Promise<void> | undefined;
+          const tracked: MeerkatGatewayClient = {
+            pid: native.pid,
+            request: (method, params, options) =>
+              observe(native.pid, method, () => native.request(method, params, options)),
+            subscribe: (listener) => native.subscribe(listener),
+            onClose: (listener) => native.onClose(listener),
+            close: () => {
+              closing ??= observe(
+                native.pid,
+                "close: native receipt and process exit",
+                async () => {
+                  try {
+                    await native.close();
+                    processEvidence.cleanup = "settled";
+                  } catch (error) {
+                    processEvidence.cleanup = "failed";
+                    throw error;
+                  } finally {
+                    ownedClients.delete(tracked);
+                  }
+                },
+              );
+              return closing;
+            },
+          };
+          ownedClients.add(tracked);
+          const health = decodeHealth(await tracked.request("system.v1.health"));
+          processEvidence.health = health;
+          processEvidence.shutdownBudgetMs = Math.max(342_000, health.shutdownHorizonMs + 15_000);
+          expect(Number.isSafeInteger(health.shutdownHorizonMs)).toBe(true);
+          expect(health.shutdownHorizonMs).toBeGreaterThan(0);
+          expect(processEvidence.shutdownBudgetMs).toBeLessThanOrEqual(maximumShutdownBudgetMs);
+          expect(health.build.cargoLockSha256).toMatch(/^[0-9a-f]{64}$/);
+          const sameExecutable = processes.find(
+            (item) => item !== processEvidence && item.executable.path === executableBuild.path,
+          );
+          if (sameExecutable) {
+            expect(executableBuild).toEqual(sameExecutable.executable);
+            expect(health.build).toEqual(sameExecutable.health?.build);
+          }
+          await persistEvidence();
+          return tracked;
+        };
+        const create = (
+          owner: MeerkatGatewayClient,
+          method: string,
+          params: Readonly<Record<string, unknown>>,
+        ) => owner.request(method, params, { timeoutMs: creationTimeoutMs });
         const scope = { projectPath, executionPath: projectPath, stateRoot, model: "gpt-5.6-sol" };
         const thread = {
           ...scope,
@@ -389,11 +605,12 @@ enabled = false
           label: "Cold reviewer",
           role: "reviewer",
         };
-        client = start(initialBinary);
+        client = await start("initial runtime startup", initialBinary);
         const firstPid = client.pid;
         expect(firstPid).toBeTypeOf("number");
-        await client.request("mobs.v1.createThreadMob", thread);
-        await client.request("mobs.v1.createDomainMob", reviewer);
+        await create(client, "mobs.v1.createThreadMob", thread);
+        await create(client, "mobs.v1.createDomainMob", reviewer);
+        stage = "initial conversations and durable evidence";
         const uploaded = decodeImageUpload(
           await client.request("mobs.v1.imageUpload", {
             ...thread,
@@ -452,32 +669,28 @@ enabled = false
         if (initialBinary !== binaryPath) {
           // An idle predecessor still owns its SQLite connection. Upgrade must
           // refuse that exact owner, even when no database write is in flight.
-          const competing = start();
-          try {
-            await expect(
-              competing.request("mobs.v1.createThreadMob", thread),
-            ).rejects.toMatchObject({
-              typedCode: "POLICY_ERROR",
-              details: {
-                error: expect.stringContaining("Cannot upgrade saved conversation storage"),
-              },
-            });
-            const stillOwned = decodeHistory(
-              await client.request("mobs.v1.consoleHistory", {
-                ...thread,
-                expected: targets[0]!.expected,
-              }),
-            );
-            expect(assistantMessages(stillOwned.transcript)).toEqual(warmOccurrences[0]!.messages);
-          } finally {
-            await closeWithEvidence(competing);
-          }
+          const competing = await start("competing owner refusal");
+          await expect(create(competing, "mobs.v1.createThreadMob", thread)).rejects.toMatchObject({
+            typedCode: "POLICY_ERROR",
+            details: {
+              error: expect.stringContaining("Cannot upgrade saved conversation storage"),
+            },
+          });
+          const stillOwned = decodeHistory(
+            await client.request("mobs.v1.consoleHistory", {
+              ...thread,
+              expected: targets[0]!.expected,
+            }),
+          );
+          expect(assistantMessages(stillOwned.transcript)).toEqual(warmOccurrences[0]!.messages);
+          await competing.close();
         }
 
         // close() awaits child exit. The next client owns a distinct process and
         // can learn these identities only from the saved workspace state.
-        await closeWithEvidence(client);
-        client = start();
+        stage = "first shutdown";
+        await client.close();
+        client = await start("first cold restart and retained reads");
         expect(client.pid).toBeTypeOf("number");
         expect(client.pid).not.toBe(firstPid);
         expect(decodeSnapshot(await client.request("mobs.v1.teamSnapshot", scope)).loaded).toBe(
@@ -529,8 +742,10 @@ enabled = false
         );
         expect(requests).toHaveLength(2);
 
-        await client.request("mobs.v1.createThreadMob", thread);
-        await client.request("mobs.v1.createDomainMob", reviewer);
+        stage = "resume saved runtimes";
+        await create(client, "mobs.v1.createThreadMob", thread);
+        await create(client, "mobs.v1.createDomainMob", reviewer);
+        stage = "continued conversation and exact occurrence evidence";
         const resumed = decodeSnapshot(await client.request("mobs.v1.teamSnapshot", scope));
         for (const { target, expected } of targets) {
           expect(savedTarget(resumed, target.mobId, expected.identity)).toEqual(expected);
@@ -558,8 +773,9 @@ enabled = false
           { phase: "continue", hasImage: true },
         ]);
         const secondPid = client.pid;
-        await closeWithEvidence(client);
-        client = start();
+        stage = "second shutdown";
+        await client.close();
+        client = await start("second cold restart and retained reads");
         expect(client.pid).not.toBe(secondPid);
         expect(decodeSnapshot(await client.request("mobs.v1.teamSnapshot", scope)).loaded).toBe(
           false,
@@ -579,22 +795,46 @@ enabled = false
         );
         expect(requests).toHaveLength(3);
         expect(errors).toEqual([]);
-        await closeWithEvidence(client);
+        stage = "final shutdown";
+        await client.close();
         client = undefined;
+      } catch (error) {
+        failed = true;
+        primaryFailure = error;
       } finally {
+        // Close every retained owner, including a competing process or a startup
+        // whose health request failed. Cleanup never replaces the original error.
+        const settlements = await Promise.allSettled(
+          [...ownedClients].map((owner) => owner.close()),
+        );
+        for (const settlement of settlements) {
+          if (settlement.status === "rejected") cleanupFailures.push(settlement.reason);
+        }
+        provider.closeAllConnections();
         try {
-          if (client) await closeWithEvidence(client);
-        } finally {
-          provider.closeAllConnections();
           if (provider.listening) {
             await new Promise<void>((resolve, reject) =>
               provider.close((error) => (error ? reject(error) : resolve())),
             );
           }
-          await NodeFSP.rm(root, { recursive: true, force: true });
+        } catch (error) {
+          cleanupFailures.push(error);
         }
+        if (!failed && cleanupFailures.length === 0 && evidenceFailures.length === 0)
+          stage = "finished";
+        await persistEvidence();
+        // Retain only synthetic fixture state, outside the repository, so an
+        // unknown admission or restoration failure can be diagnosed precisely.
+        process.stderr.write(`Cold restart evidence (${scenario}): ${evidencePath}\n`);
+      }
+      if (failed || cleanupFailures.length > 0 || evidenceFailures.length > 0) {
+        throw new AggregateError(
+          [...(failed ? [primaryFailure] : []), ...cleanupFailures, ...evidenceFailures],
+          `Native cold restart failed during ${stage}; retained evidence: ${evidencePath}`,
+          failed ? { cause: primaryFailure } : undefined,
+        );
       }
     },
-    60_000,
+    fixtureTimeoutMs,
   );
 });

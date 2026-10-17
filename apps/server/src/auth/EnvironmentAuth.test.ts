@@ -495,6 +495,9 @@ it.layer(NodeServices.layer)("EnvironmentAuth.layer", (it) => {
         "access:read",
         "access:write",
         "relay:write",
+        "shared:read",
+        "shared:contribute",
+        "shared:admin",
       ]);
       expect(verified.subject).toBe("administrative-bootstrap");
     }).pipe(Effect.provide(makeEnvironmentAuthLayer())),

@@ -132,6 +132,37 @@ const withHarness = <A, E, R>(
     );
   }).pipe(Effect.scoped, Effect.provide(NodeServices.layer));
 
+it.effect(
+  "keeps the managed shared host isolated and loopback-only despite primary network exposure",
+  () =>
+    withHarness(
+      Effect.gen(function* () {
+        const configuration = yield* DesktopBackendConfiguration.DesktopBackendConfiguration;
+        const environment = yield* DesktopEnvironment.DesktopEnvironment;
+        const primary = yield* configuration.resolvePrimary;
+        const host = yield* configuration.resolveSharedHost(4889);
+        assert.equal(
+          host.bootstrap.t3Home,
+          environment.path.join(environment.baseDir, "shared-host"),
+        );
+        assert.notEqual(host.bootstrap.t3Home, primary.bootstrap.t3Home);
+        assert.equal(primary.bootstrap.host, "0.0.0.0");
+        assert.equal(host.bootstrap.host, "127.0.0.1");
+        assert.equal(host.bootstrap.port, 4889);
+        assert.equal(host.bootstrap.tailscaleServeEnabled, false);
+        assert.equal(host.httpBaseUrl.href, "http://127.0.0.1:4889/");
+        assert.equal(host.bootstrap.desktopBootstrapToken, primary.bootstrap.desktopBootstrapToken);
+        assert.equal(host.env.T3CODE_HOME, undefined);
+        assert.equal(
+          host.env.MEERKAT_DESKTOP_AUTH_ROOT,
+          environment.path.join(environment.baseDir, "shared-host", "meerkat-auth"),
+        );
+        assert.equal(primary.env.MEERKAT_DESKTOP_AUTH_ROOT, undefined);
+        assert.equal(host.entryPath, primary.entryPath);
+      }),
+    ),
+);
+
 interface PackagedWslHarnessContext {
   readonly baseDir: string;
   readonly archivePath: string;

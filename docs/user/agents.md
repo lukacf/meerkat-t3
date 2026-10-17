@@ -20,7 +20,7 @@ For example, connect a service's API specialist to the client specialist in a se
 
 A connection allows peer messages when permissions permit. It does not send a task by itself, merge conversations, share every past message, or move either agent into the other's checkout. State the objective and ask the agent to coordinate with the named peers. Include the exact branch, commit, or worktree when that matters to the work.
 
-Peer replies require **Full access**, which also permits commands and file changes. A **Read-only** specialist can inspect files and answer you directly, but cannot send a report to another agent. Review-only instructions do not enforce read-only access. Check each agent's permissions before connecting it for two-way collaboration.
+New local specialists default to **Read and collaborate**. They can inspect repository files and exchange messages with connected peers, while commands, file changes, browser control, and external tools remain blocked. A **Read-only** specialist can inspect files and answer you directly, but cannot send a report to another agent. Existing specialists keep their saved permissions. [Shared specialists](shared-specialists.md) use a separate repository-only policy for explicit-revision evidence. Check each agent's permissions before connecting it for two-way collaboration.
 
 Use **Connections** to open a peer's conversation or **Manage connections** to disconnect it. Inspect the connection status: a saved connection can be offline. Follow attention links for questions or approvals, and read the replies in the requesting agent's conversation.
 
@@ -40,7 +40,7 @@ For browser work with a Full access specialist, select an existing task in the e
 
 ## Permissions
 
-Project-agent permissions are separate from a thread's permissions. A specialist's name, domain, or assignment does not restrict its tools. Choose **Read-only** for direct advice without edits, commands, or peer messaging, or **Full access** when it should collaborate with other agents or run tools. Project agents do not currently support Supervised mode. Reconnecting or changing an assignment does not change its access; create another agent to choose a different mode. [Permissions](permission-modes.md) explains the distinction.
+Project-agent permissions are separate from a thread's permissions. A specialist's name, domain, or assignment does not restrict its tools. Use **Read and collaborate** for repository guidance and peer coordination, **Read-only** for direct advice without peer messaging, or **Full access** when the specialist itself needs to run commands or change files. A task coordinator with suitable permissions can implement changes using the specialists' advice. Project agents do not currently support Supervised mode. Reconnecting or changing an assignment does not change its access; create another agent to choose a different mode. [Permissions](permission-modes.md) explains the distinction.
 
 ## Follow-up messages
 

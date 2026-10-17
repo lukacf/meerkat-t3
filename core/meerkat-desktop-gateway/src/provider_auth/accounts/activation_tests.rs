@@ -60,6 +60,7 @@ impl Fixture {
         let store = Arc::new(ControlledStore::default());
         Self {
             auth: DesktopProviderAuth {
+                auth_scope: Ok(None),
                 global_config_path: default_global_config_path(),
                 copilot_accounts: Default::default(), account_mutations: Default::default(),
                 auth_http: auth_http_client(),
@@ -71,7 +72,7 @@ impl Fixture {
     async fn configure(&self, method: &str) -> Value {
         self.auth.configure(Some(&json!({"methodId":method}))).await.unwrap()["connection"].clone()
     }
-    async fn config(&self) -> Config { self.auth.global_runtime().get().await.unwrap().config }
+    async fn config(&self) -> Config { self.auth.global_runtime().unwrap().get().await.unwrap().config }
     async fn target(&self, row: &Value) -> ResolvedConnectionTarget {
         resolve_target(&self.config().await, row.as_object().unwrap()).unwrap()
     }
@@ -109,7 +110,7 @@ async fn completed_chatgpt_activates_over_disconnected_copilot_and_survives_relo
     let old = f.configure("github-copilot").await;
     let new = f.configure("openai-chatgpt").await;
     let old_id = old["bindingId"].as_str().unwrap();
-    let runtime = f.auth.global_runtime();
+    let runtime = f.auth.global_runtime().unwrap();
     let snapshot = runtime.get().await.unwrap();
     let workspace = snapshot.config.realm["global"].clone();
     runtime.patch(ConfigDelta(json!({"realm":{
@@ -156,7 +157,7 @@ async fn connected_and_host_managed_defaults_are_preserved() {
     let target = f.publish(&new).await;
     assert_eq!(f.auth.activate_connected_account(&target).await["status"], "unchanged");
     assert_eq!(f.selected(Provider::OpenAI).await.as_str(), first["bindingId"].as_str().unwrap());
-    let runtime = f.auth.global_runtime();
+    let runtime = f.auth.global_runtime().unwrap();
     let snapshot = runtime.get().await.unwrap();
     let mut config = snapshot.config;
     config.realm.get_mut("global").unwrap().auth.get_mut(first["profileId"].as_str().unwrap()).unwrap().source =
@@ -209,7 +210,7 @@ async fn concurrent_config_choice_wins_activation_cas_and_keeps_committed_creden
     let activate = f.auth.activate_connected_account(&target);
     let concurrent = async {
         f.store.entered.notified().await;
-        let runtime = f.auth.global_runtime();
+        let runtime = f.auth.global_runtime().unwrap();
         let snapshot = runtime.get().await.unwrap();
         runtime.patch(default_selection_delta(&snapshot.config.realm["global"],
             &[(Provider::OpenAI, chosen_target.auth_binding.binding.clone())]), Some(snapshot.generation)).await.unwrap();
@@ -237,7 +238,7 @@ async fn native_refreshing_default_is_preserved_and_reauth_required_default_is_r
     assert_eq!(f.selected(Provider::OpenAI).await, original.auth_binding.binding);
 
     f.publish_until(&old, Utc::now() - chrono::Duration::minutes(5)).await;
-    let runtime = f.auth.global_runtime();
+    let runtime = f.auth.global_runtime().unwrap();
     let snapshot = runtime.get().await.unwrap();
     let mut config = snapshot.config;
     config.realm.get_mut("global").unwrap().auth.get_mut(old["profileId"].as_str().unwrap()).unwrap()
@@ -284,7 +285,7 @@ async fn activated_chatgpt_rehydrates_with_a_fresh_auth_authority() {
     };
     let key = meerkat_core::handles::LeaseKey::from_credential_identity(&target.credential_identity);
     assert!(fresh.authority.generated_auth_lease_handle().snapshot(&key).phase.is_none());
-    let config = fresh.global_runtime().get().await.unwrap().config;
+    let config = fresh.global_runtime().unwrap().get().await.unwrap().config;
     let status = fresh.host_service().unwrap()
         .status(&config, &oauth_target(&target).unwrap()).await.unwrap();
     assert_eq!(status.phase, meerkat_core::auth::AuthStatusPhase::Valid);

@@ -2,6 +2,7 @@ import {
   AuthAdministrativeScopes,
   AuthSessionId,
   AuthStandardClientScopes,
+  AuthSharedParticipantScopes,
 } from "@t3tools/contracts";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
@@ -87,6 +88,12 @@ const pairingCreateCommand = Command.make("create", {
   label: labelFlag,
   baseUrl: baseUrlFlag,
   json: jsonFlag,
+  sharedWorkspace: Flag.Boolean("shared-workspace").pipe(
+    Flag.withDescription(
+      "Allow shared specialist collaboration without host files, settings or terminal access.",
+    ),
+    Flag.withDefault(false),
+  ),
 }).pipe(
   Command.withDescription("Issue a new client pairing token."),
   Command.withHandler((flags) =>
@@ -95,7 +102,7 @@ const pairingCreateCommand = Command.make("create", {
       (environmentAuth) =>
         Effect.gen(function* () {
           const issued = yield* environmentAuth.createPairingLink({
-            scopes: AuthStandardClientScopes,
+            scopes: flags.sharedWorkspace ? AuthSharedParticipantScopes : AuthStandardClientScopes,
             subject: "one-time-token",
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),

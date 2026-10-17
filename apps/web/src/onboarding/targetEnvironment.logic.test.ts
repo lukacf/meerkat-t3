@@ -90,6 +90,22 @@ const desktopLocalEnvironment = {
 } as const;
 
 describe("resolveOnboardingTargetEnvironment", () => {
+  it("does not select a shared-only host as a development environment", () => {
+    const shared = {
+      ...pairedRemote,
+      entry: {
+        target: new BearerConnectionTarget({ ...pairedRemote.entry.target, sharedWorkspace: true }),
+      },
+    };
+    expect(
+      resolveOnboardingTargetEnvironment({
+        mode: "direct",
+        environments: [shared, primaryEnvironment],
+        primaryEnvironment,
+        pairedEnvironmentId: shared.environmentId,
+      }),
+    ).toBeNull();
+  });
   it("waits for the exact paired machine instead of using an older connected machine", () => {
     const pendingPairedRemote = { ...pairedRemote, connection: { phase: "connecting" } };
 

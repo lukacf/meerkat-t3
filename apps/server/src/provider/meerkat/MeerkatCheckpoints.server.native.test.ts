@@ -24,6 +24,7 @@ import {
   bounded,
   configureWorkspace,
   exchangeToken,
+  fixtureTimeoutMs,
   ownedServer,
   prepareFixture,
   readRetainedNativeHistory,
@@ -114,11 +115,13 @@ describe.skipIf(!packageApp)("Meerkat packaged manual workspace snapshots", () =
               await server?.close();
               cleanupComplete = true;
             } finally {
-              fixture.provider.closeAllConnections();
-              if (fixture.provider.listening)
-                await new Promise<void>((resolve, reject) =>
-                  fixture.provider.close((error) => (error ? reject(error) : resolve())),
-                );
+              if (cleanupComplete) {
+                fixture.provider.closeAllConnections();
+                if (fixture.provider.listening)
+                  await new Promise<void>((resolve, reject) =>
+                    fixture.provider.close((error) => (error ? reject(error) : resolve())),
+                  );
+              }
               const directory = NodePath.join(root, "evidence");
               await NodeFSP.mkdir(directory, { recursive: true, mode: 0o700 });
               await NodeFSP.writeFile(
@@ -150,7 +153,7 @@ describe.skipIf(!packageApp)("Meerkat packaged manual workspace snapshots", () =
           throw new Error("Checkpoint provider port unavailable");
         const prepared = yield* Effect.promise(() =>
           prepareFixture(root, pkg.runtime, address.port),
-        );
+        ).pipe(Effect.uninterruptible);
         yield* Effect.promise(() =>
           initializeCheckpointRepository(prepared.projectPath, prepared.env),
         );
@@ -163,6 +166,7 @@ describe.skipIf(!packageApp)("Meerkat packaged manual workspace snapshots", () =
           prepared.baseDir,
           port,
           prepared.env,
+          prepared.shutdownHorizonMs,
           NodePath.join(prepared.evidenceRoot, "server-diagnostics.json"),
           pkg.executable,
         );
@@ -219,7 +223,7 @@ describe.skipIf(!packageApp)("Meerkat packaged manual workspace snapshots", () =
                   address.port,
                   prepared.env,
                 ),
-              );
+              ).pipe(Effect.uninterruptible);
             const shell = yield* watch(
               client[ORCHESTRATION_WS_METHODS.subscribeShell]({ requestCompletionMarker: true }),
             );
@@ -594,7 +598,7 @@ describe.skipIf(!packageApp)("Meerkat packaged manual workspace snapshots", () =
             });
           }),
         ).pipe(Effect.raceFirst(Effect.promise(() => fixture.failed)));
-      }).pipe(Effect.scoped, Effect.timeout("240 seconds")),
-    250_000,
+      }).pipe(Effect.timeout(240_000), Effect.scoped),
+    fixtureTimeoutMs(240_000) + 10_000,
   );
 });

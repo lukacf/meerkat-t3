@@ -32,7 +32,7 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 # Keep the runtime and composition layer on the same released 0.9 family.
 # The local MobKit alias preserves existing integration names after the
 # upstream package was renamed to meerkat-meta.
-meerkat = { version = "=0.9.1", features = [
+meerkat = { version = "=0.9.2", features = [
   "comms",
   "skills",
   "mcp",
@@ -41,15 +41,15 @@ meerkat = { version = "=0.9.1", features = [
   "session-store",
   "sqlite-store",
 ] }
-meerkat-mcp = "=0.9.1"
-meerkat-core = "=0.9.1"
-meerkat-contracts = "=0.9.1"
-meerkat-mobkit = { package = "meerkat-meta", version = "=0.9.1" }
-meerkat-mob = "=0.9.1"
-meerkat-runtime = "=0.9.1"
-meerkat-providers = { version = "=0.9.1", features = ["native-keyring", "refresh-file-lock"] }
-meerkat-copilot = { version = "=0.9.1", default-features = false, features = ["oauth"] }
-meerkat-store = { version = "=0.9.1", features = ["sqlite"] }
-meerkat-models = "=0.9.1"
-meerkat-sqlite = "=0.9.1"
-meerkat-tools = "=0.9.1"
+meerkat-mcp = "=0.9.2"
+meerkat-core = "=0.9.2"
+meerkat-contracts = "=0.9.2"
+meerkat-mobkit = { package = "meerkat-meta", version = "=0.9.2" }
+meerkat-mob = "=0.9.2"
+meerkat-runtime = "=0.9.2"
+meerkat-providers = { version = "=0.9.2", features = ["native-keyring", "refresh-file-lock"] }
+meerkat-copilot = { version = "=0.9.2", default-features = false, features = ["oauth"] }
+meerkat-store = { version = "=0.9.2", features = ["sqlite"] }
+meerkat-models = "=0.9.2"
+meerkat-sqlite = "=0.9.2"
+meerkat-tools = "=0.9.2"

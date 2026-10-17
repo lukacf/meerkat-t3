@@ -28,6 +28,7 @@ import {
   bounded,
   configureWorkspace,
   exchangeToken,
+  fixtureTimeoutMs,
   ownedServer,
   prepareFixture,
   readRetainedNativeHistory,
@@ -697,11 +698,13 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
                   await server?.close();
                   cleanupComplete = true;
                 } finally {
-                  fixture.provider.closeAllConnections();
-                  if (fixture.provider.listening)
-                    await new Promise<void>((resolve, reject) =>
-                      fixture.provider.close((error) => (error ? reject(error) : resolve())),
-                    );
+                  if (cleanupComplete) {
+                    fixture.provider.closeAllConnections();
+                    if (fixture.provider.listening)
+                      await new Promise<void>((resolve, reject) =>
+                        fixture.provider.close((error) => (error ? reject(error) : resolve())),
+                      );
+                  }
                   if (Exit.isFailure(exit)) {
                     const evidence = NodePath.join(root, "evidence");
                     await NodeFSP.mkdir(evidence, { recursive: true, mode: 0o700 });
@@ -755,7 +758,7 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
           if (!address || typeof address === "string") throw new Error("No fixture provider port");
           const prepared = yield* Effect.promise(() =>
             prepareFixture(root, runtimeDirectory, address.port),
-          );
+          ).pipe(Effect.uninterruptible);
           yield* Effect.promise(() => initializeRepository(prepared.projectPath, prepared.env));
           const port = yield* Effect.promise(availablePort);
           expect(port).not.toBe(52258);
@@ -766,6 +769,7 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
             prepared.baseDir,
             port,
             prepared.env,
+            prepared.shutdownHorizonMs,
             NodePath.join(prepared.evidenceRoot, "server-diagnostics.json"),
           );
           const ready = server.ready;
@@ -824,7 +828,7 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
                     address.port,
                     prepared.env,
                   ),
-                );
+                ).pipe(Effect.uninterruptible);
                 yield* client[WS_METHODS.projectsWriteFile]({
                   cwd: path,
                   relativePath: "scope.txt",
@@ -1408,8 +1412,8 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
               ).toBe("PROJECT_ROOT\n");
             }),
           ).pipe(Effect.raceFirst(Effect.promise(() => fixture.failed)));
-        }).pipe(Effect.scoped, Effect.timeout("240 seconds")),
-      250_000,
+        }).pipe(Effect.timeout(240_000), Effect.scoped),
+      fixtureTimeoutMs(240_000) + 10_000,
     );
   },
 );

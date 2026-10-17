@@ -36,10 +36,12 @@ const fixture = Effect.fn("test.nativeNotices.fixture")(function* () {
   const destinationDir = path.join(root, "staged");
   const t3LicensePath = path.join(root, "LICENSE");
   const monitorLockPath = path.join(root, "Cargo.lock");
+  const gatewayLockPath = path.join(root, "gateway-Cargo.lock");
   const monitorBinaryPath = path.join(root, "t3-resource-monitor");
   yield* fs.makeDirectory(bundleDir);
   yield* fs.writeFileString(t3LicensePath, license);
   yield* fs.writeFileString(monitorLockPath, "monitor lock bytes\n");
+  yield* fs.writeFileString(gatewayLockPath, "gateway lock");
   yield* fs.writeFileString(monitorBinaryPath, "monitor binary bytes\n");
   for (const [file, bytes] of Object.entries(payloads)) {
     yield* fs.makeDirectory(path.dirname(path.join(bundleDir, file)), { recursive: true });
@@ -77,7 +79,7 @@ const fixture = Effect.fn("test.nativeNotices.fixture")(function* () {
       bundleDir,
       destinationDir,
       target: manifest.target,
-      gateway: manifest.bindings.gateway,
+      gateway: { ...manifest.bindings.gateway, cargoLockPath: gatewayLockPath },
       resourceMonitor: { cargoLockPath: monitorLockPath, binaryPath: monitorBinaryPath },
       t3LicensePath,
     },
@@ -295,6 +297,26 @@ it.layer(NodeServices.layer)("native notice staging", (it) => {
       ),
     );
   }
+
+  it.effect("rejects a stale runtime and notice pair after the source gateway lock changes", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* f.fs.writeFileString(f.input.gateway.cargoLockPath, "upgraded source lock\n");
+        yield* assertRejected(f, "Current gateway Cargo.lock differs from the provisioned runtime");
+      }),
+    ),
+  );
+
+  it.effect("requires the current gateway lock to exist as a regular file", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const f = yield* fixture();
+        yield* f.fs.remove(f.input.gateway.cargoLockPath);
+        yield* assertRejected(f, "Cannot read regular input");
+      }),
+    ),
+  );
 
   it.effect("rejects replacement of the repository license", () =>
     Effect.scoped(

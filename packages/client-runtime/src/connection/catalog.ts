@@ -22,6 +22,7 @@ export class BearerConnectionProfile extends Schema.TaggedClass<BearerConnection
     ...ConnectionProfileBase,
     httpBaseUrl: Schema.String,
     wsBaseUrl: Schema.String,
+    sharedWorkspace: Schema.optionalKey(Schema.Boolean),
   },
 ) {}
 

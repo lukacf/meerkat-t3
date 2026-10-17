@@ -5,6 +5,7 @@ import {
   QrCodeIcon,
   TerminalIcon,
 } from "lucide-react";
+import { LocalSharedHostSettings } from "./LocalSharedHostSettings";
 import { useAtomValue } from "@effect/atom-react";
 import { Atom } from "effect/unstable/reactivity";
 import {
@@ -28,6 +29,10 @@ import {
   AuthRelayWriteScope,
   AuthReviewWriteScope,
   AuthStandardClientScopes,
+  AuthSharedParticipantScopes,
+  AuthSharedReadScope,
+  AuthSharedContributeScope,
+  AuthSharedAdminScope,
   AuthTerminalOperateScope,
   type AuthClientSession,
   type AuthEnvironmentScope,
@@ -56,8 +61,13 @@ import { formatElapsedDurationLabel, formatExpiresInLabel } from "../../timestam
 import { resolveDesktopPairingUrl, resolveHostedPairingUrl } from "./pairingUrls";
 import {
   applyWslEnableSelection,
+  endpointDefaultPreferenceKey,
+  pairingEndpointsForExposure,
+  selectPairingEndpoint,
   isQrShareableEndpoint,
   isWslSettingsRowVisible,
+  parsePairingUrlFields,
+  parseRemotePairingFields,
   selectQrEndpointOption,
 } from "./ConnectionsSettings.logic";
 import {
@@ -77,6 +87,7 @@ import {
 import { FoldedSettingsSection } from "./FoldedSettingsSection";
 import { LoadBalancingSettings } from "./LoadBalancingSettings";
 import { GitHubRoutingSettings } from "./GitHubRoutingSettings";
+import { SharedHostSettings } from "./SharedHostSettings";
 import { Input } from "../ui/input";
 import { CommandShortcut } from "../ui/command";
 import {
@@ -122,8 +133,7 @@ import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "..
 import { AnimatedHeight } from "../AnimatedHeight";
 import { EnvironmentMachineIcon } from "../EnvironmentMachineIcon";
 import { Textarea } from "../ui/textarea";
-import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "../../pairingUrl";
-import { readHostedPairingRequest } from "../../hostedPairing";
+import { setPairingTokenOnUrl } from "../../pairingUrl";
 import {
   createServerPairingCredential,
   revokeOtherServerClientSessions,
@@ -210,6 +220,22 @@ const PAIRING_SCOPE_OPTIONS: ReadonlyArray<{
   readonly title: string;
   readonly description: string;
 }> = [
+  {
+    scope: AuthSharedReadScope,
+    title: "View shared specialists",
+    description: "Read the shared directory, request outcomes, and retained product observations.",
+  },
+  {
+    scope: AuthSharedContributeScope,
+    title: "Work with shared specialists",
+    description:
+      "Join as a participant, attach local checkout references, and send attributed requests.",
+  },
+  {
+    scope: AuthSharedAdminScope,
+    title: "Manage shared workspace",
+    description: "Configure the workspace and register its host projects and specialists.",
+  },
   {
     scope: AuthOrchestrationReadScope,
     title: "View environment",
@@ -354,55 +380,6 @@ function parseManualDesktopSshTarget(input: {
   };
 }
 
-function parsePairingUrlFields(
-  input: string,
-): { readonly host: string; readonly pairingCode: string } | null {
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-
-  try {
-    const urlLikeInput =
-      /^[a-zA-Z][a-zA-Z\d+.-]*:\/\//u.test(trimmed) || trimmed.startsWith("//")
-        ? trimmed
-        : `https://${trimmed}`;
-    const url = new URL(urlLikeInput, window.location.origin);
-    const hostedPairingRequest = readHostedPairingRequest(url);
-    if (hostedPairingRequest) {
-      return {
-        host: hostedPairingRequest.host,
-        pairingCode: hostedPairingRequest.token,
-      };
-    }
-
-    const pairingCode = getPairingTokenFromUrl(url);
-    if (!pairingCode) return null;
-    return {
-      host: url.origin,
-      pairingCode,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function parseRemotePairingFields(input: { readonly host: string; readonly pairingCode: string }): {
-  readonly host: string;
-  readonly pairingCode: string;
-} {
-  const parsedPairingUrl = parsePairingUrlFields(input.host);
-  if (parsedPairingUrl) return parsedPairingUrl;
-
-  const host = input.host.trim();
-  const pairingCode = input.pairingCode.trim();
-  if (!host) {
-    throw new Error("Enter a backend host.");
-  }
-  if (!pairingCode) {
-    throw new Error("Enter a pairing code.");
-  }
-  return { host, pairingCode };
-}
-
 function formatDesktopSshConnectionError(error: unknown): string {
   const fallback = "Failed to connect SSH host.";
   const rawMessage = error instanceof Error ? error.message : fallback;
@@ -485,53 +462,8 @@ function toDesktopClientSessionRecord(clientSession: AuthClientSession): ServerC
   };
 }
 
-function selectPairingEndpoint(
-  endpoints: ReadonlyArray<AdvertisedEndpoint>,
-  defaultEndpointKey?: string | null,
-): AdvertisedEndpoint | null {
-  const availableEndpoints = endpoints.filter((endpoint) => endpoint.status !== "unavailable");
-  if (defaultEndpointKey) {
-    const selectedEndpoint = availableEndpoints.find(
-      (endpoint) => endpointDefaultPreferenceKey(endpoint) === defaultEndpointKey,
-    );
-    if (selectedEndpoint) {
-      return selectedEndpoint;
-    }
-  }
-  return (
-    availableEndpoints.find((endpoint) => endpoint.isDefault) ??
-    availableEndpoints.find((endpoint) => endpoint.reachability !== "loopback") ??
-    availableEndpoints.find((endpoint) => endpoint.compatibility.hostedHttpsApp === "compatible") ??
-    null
-  );
-}
-
 function isTailscaleHttpsEndpoint(endpoint: AdvertisedEndpoint): boolean {
   return endpoint.id.startsWith("tailscale-magicdns:");
-}
-
-function endpointDefaultPreferenceKey(endpoint: AdvertisedEndpoint): string {
-  if (endpoint.id.startsWith("desktop-loopback:")) {
-    return "desktop-core:loopback:http";
-  }
-  if (endpoint.id.startsWith("desktop-lan:")) {
-    return "desktop-core:lan:http";
-  }
-  if (endpoint.id.startsWith("tailscale-ip:")) {
-    return "tailscale:ip:http";
-  }
-  if (isTailscaleHttpsEndpoint(endpoint)) {
-    return "tailscale:magicdns:https";
-  }
-
-  let scheme = "unknown";
-  try {
-    scheme = new URL(endpoint.httpBaseUrl).protocol.replace(/:$/u, "");
-  } catch {
-    // Keep the stored preference stable even if a custom endpoint is malformed.
-  }
-
-  return `${endpoint.provider.id}:${endpoint.reachability}:${scheme}:${endpoint.label}`;
 }
 
 function resolveAdvertisedEndpointPairingUrl(
@@ -741,9 +673,8 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
     defaultEndpointKey,
   );
   const qrPairingUrl = selectedQrOption?.url ?? shareablePairingUrl;
-  // With no endpoint list the fallback is never loopback: selectPairingEndpoint
-  // skips loopback and the current-origin fallback is guarded by
-  // isLoopbackHostname, so only an explicit loopback selection hides the QR.
+  // Local-only hosting keeps a copyable link while suppressing a QR that would
+  // incorrectly invite another device to connect to its own loopback address.
   const canRenderQrForSelection = selectedQrOption?.qrShareable ?? true;
   if (expiresAtMs <= nowMs) {
     return null;
@@ -952,8 +883,8 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
           ) : (
             <div className="flex size-[192px] shrink-0 items-center justify-center self-center rounded-xl border border-border/50 p-4 sm:self-start">
               <p className="text-center text-2xs text-muted-foreground/70">
-                No QR for this endpoint. Another device scanning a loopback link would dial itself;
-                copy the URL for use on this machine instead.
+                This machine only. Copy this link into a separate environment on this Mac. It cannot
+                connect another computer.
               </p>
             </div>
           )}
@@ -1161,6 +1092,14 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
                     onClick={() => setPairingScopes([AuthOrchestrationReadScope])}
                   >
                     Read only
+                  </Button>
+                  <Button
+                    size="xs"
+                    variant="outline"
+                    disabled={isCreatingPairingLink}
+                    onClick={() => setPairingScopes([...AuthSharedParticipantScopes])}
+                  >
+                    Shared specialists
                   </Button>
                   <Button
                     size="xs"
@@ -1949,7 +1888,7 @@ export function ConnectionsSettings() {
   >(null);
   const [isRevokingOtherDesktopClients, setIsRevokingOtherDesktopClients] = useState(false);
   const [addBackendDialogOpen, setAddBackendDialogOpen] = useState(false);
-  const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "ssh">("remote");
+  const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "shared" | "ssh">("remote");
   const [savedBackendHost, setSavedBackendHost] = useState("");
   const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
   const [savedBackendSshHost, setSavedBackendSshHost] = useState("");
@@ -2356,7 +2295,10 @@ export function ConnectionsSettings() {
       return;
     }
 
-    const result = await connectPairing(remotePairingInput);
+    const result = await connectPairing({
+      ...remotePairingInput,
+      ...(savedBackendMode === "shared" ? { sharedWorkspace: true } : {}),
+    });
     if (result._tag === "Failure") {
       if (!isAtomCommandInterrupted(result)) {
         const error = squashAtomCommandFailure(result);
@@ -2552,14 +2494,9 @@ export function ConnectionsSettings() {
     [desktopAdvertisedEndpoints, isLocalBackendNetworkAccessible],
   );
   const visibleDesktopAdvertisedEndpoints = useMemo(
-    () =>
-      tailscaleHttpsEndpoint
-        ? [...visibleDesktopNetworkAdvertisedEndpoints, tailscaleHttpsEndpoint]
-        : visibleDesktopNetworkAdvertisedEndpoints,
-    [tailscaleHttpsEndpoint, visibleDesktopNetworkAdvertisedEndpoints],
+    () => pairingEndpointsForExposure(desktopAdvertisedEndpoints, isLocalBackendNetworkAccessible),
+    [desktopAdvertisedEndpoints, isLocalBackendNetworkAccessible],
   );
-  const isLocalBackendRemotelyReachable =
-    isLocalBackendNetworkAccessible || tailscaleHttpsEndpoint?.status === "available";
   const defaultDesktopNetworkAdvertisedEndpoint = useMemo(
     () =>
       selectPairingEndpoint(visibleDesktopNetworkAdvertisedEndpoints, defaultAdvertisedEndpointKey),
@@ -2571,8 +2508,14 @@ export function ConnectionsSettings() {
       selectPairingEndpoint(
         tailscaleHttpsEndpoint ? [tailscaleHttpsEndpoint] : [],
         defaultAdvertisedEndpointKey,
-      ),
-    [defaultAdvertisedEndpointKey, defaultDesktopNetworkAdvertisedEndpoint, tailscaleHttpsEndpoint],
+      ) ??
+      selectPairingEndpoint(visibleDesktopAdvertisedEndpoints, defaultAdvertisedEndpointKey),
+    [
+      defaultAdvertisedEndpointKey,
+      defaultDesktopNetworkAdvertisedEndpoint,
+      tailscaleHttpsEndpoint,
+      visibleDesktopAdvertisedEndpoints,
+    ],
   );
   const defaultDesktopAdvertisedEndpointKey = defaultDesktopAdvertisedEndpoint
     ? endpointDefaultPreferenceKey(defaultDesktopAdvertisedEndpoint)
@@ -2583,18 +2526,22 @@ export function ConnectionsSettings() {
     },
     [setDefaultAdvertisedEndpointKey],
   );
-  const handleSavedBackendHostChange = useCallback((value: string) => {
-    const parsedPairingUrl = parsePairingUrlFields(value);
-    if (parsedPairingUrl) {
-      setSavedBackendHost(parsedPairingUrl.host);
-      setSavedBackendPairingCode(parsedPairingUrl.pairingCode);
-      return;
-    }
-    setSavedBackendHost(value);
-  }, []);
+  const handleSavedBackendFieldChange = useCallback(
+    (field: "host" | "pairingCode", value: string) => {
+      const parsedPairingUrl = parsePairingUrlFields(value);
+      if (parsedPairingUrl) {
+        setSavedBackendHost(parsedPairingUrl.host);
+        setSavedBackendPairingCode(parsedPairingUrl.pairingCode);
+        return;
+      }
+      if (field === "host") setSavedBackendHost(value);
+      else setSavedBackendPairingCode(value);
+    },
+    [],
+  );
 
   const renderConnectionModeCard = (input: {
-    readonly mode: "remote" | "ssh";
+    readonly mode: "remote" | "shared" | "ssh";
     readonly title: string;
     readonly description: string;
     readonly icon?: ReactNode;
@@ -2645,7 +2592,7 @@ export function ConnectionsSettings() {
           <span className="mb-1.5 block text-xs font-medium text-foreground">Host</span>
           <Input
             value={savedBackendHost}
-            onChange={(event) => handleSavedBackendHostChange(event.target.value)}
+            onChange={(event) => handleSavedBackendFieldChange("host", event.target.value)}
             placeholder="backend.example.com"
             disabled={isAddingSavedBackend}
             spellCheck={false}
@@ -2655,7 +2602,7 @@ export function ConnectionsSettings() {
           <span className="mb-1.5 block text-xs font-medium text-foreground">Pairing code</span>
           <Input
             value={savedBackendPairingCode}
-            onChange={(event) => setSavedBackendPairingCode(event.target.value)}
+            onChange={(event) => handleSavedBackendFieldChange("pairingCode", event.target.value)}
             placeholder="PAIRCODE"
             disabled={isAddingSavedBackend}
             spellCheck={false}
@@ -2664,13 +2611,20 @@ export function ConnectionsSettings() {
       </div>
       <div>
         <span className="mt-1 block text-2xs text-muted-foreground">
-          Paste a full pairing URL here to fill both fields automatically.
+          Paste a full pairing URL into either field to fill both automatically, or enter the host
+          and pairing code separately.
         </span>
       </div>
     </div>
   );
   const renderRemoteModeBody = () => (
     <div className="space-y-4">
+      {savedBackendMode === "shared" ? (
+        <p className="text-sm text-muted-foreground">
+          Use a Shared specialists pairing link from the host. Your tasks and checkout stay on this
+          device.
+        </p>
+      ) : null}
       {renderRemoteFields()}
       {savedBackendError ? <p className="text-xs text-destructive">{savedBackendError}</p> : null}
       <Button
@@ -3367,7 +3321,7 @@ export function ConnectionsSettings() {
             ) : null}
           </SettingsSection>
 
-          {isLocalBackendRemotelyReachable ? (
+          {canManageLocalBackend ? (
             <FoldedSettingsSection
               id="authorized-clients"
               title="Authorized clients"
@@ -3677,6 +3631,23 @@ export function ConnectionsSettings() {
   return (
     <SettingsPageContainer width="wide">
       {primarySettings}
+      <LocalSharedHostSettings />
+      {primaryEnvironment &&
+      currentSessionScopes?.includes(AuthSharedAdminScope) &&
+      !(
+        primaryEnvironment.entry.target._tag === "BearerConnectionTarget" &&
+        primaryEnvironment.entry.target.sharedWorkspace === true
+      ) ? (
+        <SharedHostSettings
+          key={primaryEnvironment.environmentId}
+          host={primaryEnvironment}
+          title={
+            desktopBridge?.getSharedHostState
+              ? "Share the current environment"
+              : "Host shared specialists"
+          }
+        />
+      ) : null}
       <SettingsSection
         {...searchableSetting("remote-environments")}
         title="Environments"
@@ -3717,6 +3688,13 @@ export function ConnectionsSettings() {
                 <DialogPanel>
                   <div className="space-y-4">
                     <div className="grid gap-3 sm:grid-cols-2">
+                      {renderConnectionModeCard({
+                        mode: "shared",
+                        title: "Shared specialists",
+                        description:
+                          "Work with persistent specialists while keeping your local development environment.",
+                        icon: <ChevronsLeftRightEllipsisIcon aria-hidden className="size-4" />,
+                      })}
                       {renderConnectionModeCard({
                         mode: "remote",
                         title: "Remote link",

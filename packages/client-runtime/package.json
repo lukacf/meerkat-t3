@@ -219,6 +219,10 @@
       "types": "./src/state/sharedSettings.ts",
       "default": "./src/state/sharedSettings.ts"
     },
+    "./state/sharedWorkspace": {
+      "types": "./src/state/sharedWorkspace.ts",
+      "default": "./src/state/sharedWorkspace.ts"
+    },
     "./state/shell": {
       "types": "./src/state/shell.ts",
       "default": "./src/state/shell.ts"

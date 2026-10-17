@@ -256,6 +256,7 @@ async fn initial_model_proof(
             Some(llm.clone()),
             None,
             None,
+            None,
         )
         .await
         .unwrap(),
@@ -333,6 +334,7 @@ async fn initial_model_proof(
             stale_input,
             Arc::clone(&host_tools),
             Some(llm.clone()),
+            None,
             None,
             None,
         )

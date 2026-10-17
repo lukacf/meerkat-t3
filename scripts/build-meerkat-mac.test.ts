@@ -81,6 +81,21 @@ describe("explicit Meerkat Mac release configuration", () => {
         mode === "internal-unsigned" ? "internal-validation" : "release",
       );
       expect(plan.args.includes("--signed")).toBe(mode === "signed");
+      expect(plan.outputDirectory).toBe(
+        mode === "internal-unsigned" ? "release-internal" : "release-mac",
+      );
+    },
+  );
+
+  it.each(["", " /tmp/candidate", "/tmp/candidate ", "/tmp/candidate\nother", "--signed"])(
+    "refuses an ambiguous output directory: %j",
+    (outputDirectory) => {
+      expect(() =>
+        resolveMeerkatMacReleasePlan({
+          ...configuration,
+          MEERKAT_MAC_RELEASE_OUTPUT_DIR: outputDirectory,
+        }),
+      ).toThrow("OUTPUT_DIR");
     },
   );
 
@@ -231,6 +246,32 @@ describe("explicit Meerkat Mac release configuration", () => {
 });
 
 describe("Mac build invocation boundary", () => {
+  it("passes an explicit candidate directory as one argument without changing release policy", async () => {
+    const outputDirectory = "/tmp/MeerkaT3 candidate/0.1.0-preview.1";
+    const calls: { args: readonly string[]; env: NodeJS.ProcessEnv }[] = [];
+    const result = await buildMeerkatMac({
+      env: {
+        MEERKAT_MAC_RELEASE_MODE: "unsigned",
+        MEERKAT_MAC_RELEASE_VERSION: "0.1.0-preview.1",
+        MEERKAT_MAC_RELEASE_OUTPUT_DIR: outputDirectory,
+        MEERKAT_DESKTOP_UPDATE_REPOSITORY: "unselected/repository",
+      },
+      platform: "darwin",
+      arch: "arm64",
+      run: async (args, env) => {
+        calls.push({ args, env });
+        return 0;
+      },
+    });
+    expect(result.plan.outputDirectory).toBe(outputDirectory);
+    expect(result.plan.artifactPurpose).toBe("release");
+    expect(result.plan.enableUpdates).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.args.slice(-2)).toEqual(["--output-dir", outputDirectory]);
+    expect(calls[0]!.env.T3CODE_DESKTOP_SIGNED).toBe("false");
+    expect(calls[0]!.env.MEERKAT_DESKTOP_UPDATE_REPOSITORY).toBeUndefined();
+  });
+
   it("invokes one local unsigned release build without consulting an ambient Apple key path", async () => {
     const calls: { args: readonly string[]; env: NodeJS.ProcessEnv }[] = [];
     const result = await buildMeerkatMac({

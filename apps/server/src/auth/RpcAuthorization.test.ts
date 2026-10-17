@@ -3,6 +3,10 @@ import {
   AuthOrchestrationReadScope,
   AuthRelayReadScope,
   AuthRelayWriteScope,
+  AuthSharedReadScope,
+  AuthSharedContributeScope,
+  AuthSharedAdminScope,
+  AuthSharedParticipantScopes,
   WS_METHODS,
   WsRpcGroup,
 } from "@t3tools/contracts";
@@ -15,6 +19,51 @@ import {
 } from "./RpcAuthorization.ts";
 
 describe("RPC authorization scopes", () => {
+  it("keeps shared participant scopes separate from host settings, files and execution", () => {
+    expect(requiredScopeForRpcMethod(WS_METHODS.sharedWorkspaceSession)).toBe(AuthSharedReadScope);
+    expect(requiredScopeForRpcMethod(WS_METHODS.sharedSpecialistSend)).toBe(
+      AuthSharedContributeScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.sharedSpecialistRegister)).toBe(
+      AuthSharedAdminScope,
+    );
+    expect(requiredScopeForRpcMethod(WS_METHODS.sharedCheckoutRevision)).toBe(
+      AuthOrchestrationReadScope,
+    );
+    for (const method of [
+      WS_METHODS.serverGetConfig,
+      WS_METHODS.serverGetSettings,
+      WS_METHODS.meerkatAuthAction,
+      WS_METHODS.meerkatAgentSend,
+      WS_METHODS.meerkatAgentStop,
+      WS_METHODS.sharedCheckoutRevision,
+      WS_METHODS.sharedCheckoutPatch,
+    ]) {
+      expect([...AuthSharedParticipantScopes]).not.toContain(requiredScopeForRpcMethod(method));
+    }
+  });
+  it("requires shared administration for permanent composition and its retained operation records", () => {
+    for (const method of [
+      WS_METHODS.sharedCompositionExecute,
+      WS_METHODS.sharedCompositionOperation,
+    ]) {
+      expect(WsRpcGroup.requests.has(method)).toBe(true);
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthSharedAdminScope);
+      expect([...AuthSharedParticipantScopes]).not.toContain(requiredScopeForRpcMethod(method));
+    }
+  });
+  it("allows participants to read responsibility history without granting composition authority", () => {
+    expect(WsRpcGroup.requests.has(WS_METHODS.sharedCompositionHistory)).toBe(true);
+    expect(requiredScopeForRpcMethod(WS_METHODS.sharedCompositionHistory)).toBe(
+      AuthSharedReadScope,
+    );
+    expect([...AuthSharedParticipantScopes]).toContain(
+      requiredScopeForRpcMethod(WS_METHODS.sharedCompositionHistory),
+    );
+    expect([...AuthSharedParticipantScopes]).not.toContain(
+      requiredScopeForRpcMethod(WS_METHODS.sharedCompositionExecute),
+    );
+  });
   it("requires operate access for server-composed provider settings", () => {
     expect(WsRpcGroup.requests.has(WS_METHODS.serverUpdateProviderSettings)).toBe(true);
     expect(requiredScopeForRpcMethod(WS_METHODS.serverUpdateProviderSettings)).toBe(

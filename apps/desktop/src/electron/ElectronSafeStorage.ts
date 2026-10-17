@@ -70,18 +70,20 @@ export const make = Effect.gen(function* () {
   const platform = yield* HostProcessPlatform;
 
   return ElectronSafeStorage.of({
-    isEncryptionAvailable: Effect.try({
-      try: () => Electron.safeStorage.isEncryptionAvailable(),
+    // Keychain can wait for OS interaction. Keep that wait off Electron's UI
+    // thread; unavailable storage must still fail closed in the callers.
+    isEncryptionAvailable: Effect.tryPromise({
+      try: () => Electron.safeStorage.isAsyncEncryptionAvailable(),
       catch: (cause) => new ElectronSafeStorageAvailabilityError({ cause }),
     }),
     encryptString: (value) =>
-      Effect.try({
-        try: () => Electron.safeStorage.encryptString(value),
+      Effect.tryPromise({
+        try: () => Electron.safeStorage.encryptStringAsync(value),
         catch: (cause) => new ElectronSafeStorageEncryptError({ cause }),
       }),
     decryptString: (value) =>
-      Effect.try({
-        try: () => Electron.safeStorage.decryptString(Buffer.from(value)),
+      Effect.tryPromise({
+        try: async () => (await Electron.safeStorage.decryptStringAsync(Buffer.from(value))).result,
         catch: (cause) => new ElectronSafeStorageDecryptError({ cause }),
       }),
     selectedStorageBackend: Effect.sync(() => {
