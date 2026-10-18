@@ -1,12 +1,71 @@
+import { it } from "@effect/vitest";
 import { MEERKAT_REQUIRED_METHODS } from "@t3tools/shared/meerkatRuntime";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { Effect, Fiber, Stream } from "effect";
+import { afterEach, describe, expect, vi } from "vite-plus/test";
 
 import {
   closeOwnedServer,
   fixtureTimeoutMs,
   ownedServerShutdownBudget,
   validateFixtureHealth,
+  watch,
 } from "./MeerkatWorkflow.server.native.support.ts";
+
+describe("fixture observation diagnostics", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it.effect("preserves the phase, observed context, and original stream failure", () =>
+    Effect.gen(function* () {
+      const original = new Error("The fixture stream disconnected");
+      const observed = yield* watch(
+        Stream.concat(Stream.make({ status: "connecting" }), Stream.fail(original)),
+      );
+      const failure = yield* observed
+        .waitFor(() => false, "READY committed reply")
+        .pipe(Effect.flip);
+
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure._tag).toBe("FixtureObservationError");
+      expect(failure.message).toContain("READY committed reply");
+      expect(failure.message).toContain("connecting");
+      expect(failure.cause).toBe(original);
+    }),
+  );
+
+  it.effect("preserves deadline context without changing the default observation budget", () =>
+    Effect.gen(function* () {
+      vi.useFakeTimers();
+      const waiting = Promise.withResolvers<void>();
+      const settled = vi.fn();
+      const observed = yield* watch(Stream.make({ status: "connecting" }));
+      const result = yield* observed
+        .waitFor(() => {
+          waiting.resolve();
+          return false;
+        }, "READY committed reply")
+        .pipe(
+          Effect.flip,
+          Effect.tap(() => Effect.sync(settled)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+      yield* Effect.promise(() => waiting.promise);
+
+      yield* Effect.promise(() => vi.advanceTimersByTimeAsync(29_999));
+      expect(settled).not.toHaveBeenCalled();
+      yield* Effect.promise(() => vi.advanceTimersByTimeAsync(1));
+      const failure = yield* Fiber.join(result);
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure._tag).toBe("FixtureObservationError");
+      expect(failure.message).toContain("READY committed reply");
+      expect(failure.message).toContain("connecting");
+      expect(failure.cause).toBeInstanceOf(Error);
+      expect(failure.cause).toMatchObject({
+        message: "Deadline waiting for READY committed reply",
+      });
+      expect(vi.getTimerCount()).toBe(0);
+    }),
+  );
+});
 
 describe("owned fixture server shutdown", () => {
   afterEach(() => vi.useRealTimers());

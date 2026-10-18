@@ -22,6 +22,7 @@ import {
   validateMeerkatHealth,
   verifyMeerkatRuntime,
 } from "@t3tools/shared/meerkatRuntime";
+import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -409,6 +410,11 @@ export const withClient = Effect.fnUntraced(function* <A, E>(
   );
 });
 
+class FixtureObservationError extends Data.TaggedError("FixtureObservationError")<{
+  readonly message: string;
+  readonly cause: unknown;
+}> {}
+
 export const watch = Effect.fnUntraced(function* <A, E>(
   stream: Stream.Stream<A, E>,
   failureOf?: (value: A) => Error | undefined,
@@ -442,28 +448,31 @@ export const watch = Effect.fnUntraced(function* <A, E>(
       afterIndex = 0,
       timeoutMs = 30_000,
     ) =>
-      Effect.tryPromise(async () => {
-        const waiting = Promise.withResolvers<A>();
-        const check = () => {
-          if (failure !== undefined) waiting.reject(failure);
-          else {
-            const match = observed.find(
-              (entry) => entry.index > afterIndex && predicate(entry.value),
-            );
-            if (match) waiting.resolve(match.value);
+      Effect.tryPromise({
+        try: async () => {
+          const waiting = Promise.withResolvers<A>();
+          const check = () => {
+            if (failure !== undefined) waiting.reject(failure);
+            else {
+              const match = observed.find(
+                (entry) => entry.index > afterIndex && predicate(entry.value),
+              );
+              if (match) waiting.resolve(match.value);
+            }
+          };
+          listeners.add(check);
+          check();
+          try {
+            return await bounded(waiting.promise, stage, timeoutMs);
+          } finally {
+            listeners.delete(check);
           }
-        };
-        listeners.add(check);
-        check();
-        try {
-          return await bounded(waiting.promise, stage, timeoutMs);
-        } catch (cause) {
-          throw new Error(`${stage}: ${encodeObservationDiagnostic(observed).slice(-8_000)}`, {
+        },
+        catch: (cause) =>
+          new FixtureObservationError({
+            message: `${stage}: ${encodeObservationDiagnostic(observed).slice(-8_000)}`,
             cause,
-          });
-        } finally {
-          listeners.delete(check);
-        }
+          }),
       }),
   };
 });
