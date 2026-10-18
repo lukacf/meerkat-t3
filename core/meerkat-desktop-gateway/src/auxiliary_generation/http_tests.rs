@@ -24,6 +24,9 @@ fn local_response_fixture() -> (String, std::thread::JoinHandle<(String, Value)>
                 Err(error) => panic!("Local writing fixture failed: {error}"),
             }
         };
+        // BSD sockets inherit the listener's nonblocking mode. The request
+        // reader below uses blocking reads with a timeout on every platform.
+        socket.set_nonblocking(false).unwrap();
         socket
             .set_read_timeout(Some(Duration::from_secs(5)))
             .unwrap();

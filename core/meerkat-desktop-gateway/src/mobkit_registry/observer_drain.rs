@@ -273,18 +273,44 @@ mod tests {
         let reader = stores.event_store();
         drop(stores);
 
-        let error = disposal.drain().await.unwrap_err();
+        let (scope_sender, scope_receiver) = oneshot::channel();
+        let error = disposal
+            .drain_with(move |layout, root| {
+                let attempt = discover_and_drain(layout, root)?;
+                scope_sender.send(attempt.databases.clone()).unwrap();
+                Ok(attempt)
+            })
+            .await
+            .unwrap_err();
+        let attempted_scope = scope_receiver.await.unwrap();
         assert!(error.contains(child.to_str().unwrap()), "{error}");
+        // SQLite workers can add or remove sidecars after discovery. The
+        // retained attempt must match its own census, not a later directory
+        // listing. Exercise that distinction without depending on SQLite timing.
+        let later_file = child_root.join("arrived-after-first-drain");
+        std::fs::write(&later_file, b"").unwrap();
+        assert!(!attempted_scope.contains(&later_file));
         {
             let task = disposal.task.lock().await;
             let attempt = task.last_attempt.as_ref().unwrap().as_ref().unwrap();
+            assert_eq!(attempt.databases, attempted_scope);
             assert_eq!(
-                attempt.databases,
-                observer_paths(&disposal.layout, disposal.root_database.clone(),).unwrap()
+                attempt
+                    .results
+                    .iter()
+                    .map(|(path, _)| path)
+                    .collect::<Vec<_>>(),
+                attempt.databases.iter().collect::<Vec<_>>()
             );
+            assert_eq!(attempt.databases.first(), Some(&disposal.root_database));
             assert!(attempt.databases.contains(&child));
+            let child_result = attempt
+                .results
+                .iter()
+                .find(|(path, _)| path == &child)
+                .unwrap();
             assert!(matches!(
-                attempt.results[1].1,
+                &child_result.1,
                 Err(SqliteMobObserverDrainRefused::OtherOwners { .. })
             ));
             assert!(task.worker.is_none());
@@ -292,7 +318,15 @@ mod tests {
         }
         drop(reader);
         disposal.drain().await.unwrap();
-        assert!(disposal.task.lock().await.complete);
+        {
+            let task = disposal.task.lock().await;
+            assert!(task.complete);
+            let attempt = task.last_attempt.as_ref().unwrap().as_ref().unwrap();
+            assert_eq!(attempt.databases.first(), Some(&disposal.root_database));
+            assert!(attempt.databases.contains(&child));
+            assert!(attempt.databases.contains(&later_file));
+            assert!(attempt.outcome().is_ok());
+        }
         assert!(disposal.root_database.exists());
         assert!(child.exists());
     }
