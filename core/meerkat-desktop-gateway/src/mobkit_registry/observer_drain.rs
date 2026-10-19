@@ -444,7 +444,19 @@ mod tests {
             unjoined_workers: 0,
             joining_elsewhere: 0,
             replacement_registered: false,
+            retained_registrations: 0,
         }
+    }
+
+    #[test]
+    fn cancelled_native_registrations_do_not_keep_database_observers_open() {
+        // Core retains these OS registration threads and discards their result.
+        // They never access the database; this drain covers catch-up and ticks.
+        let report = SqliteMobObserverDrainReport {
+            retained_registrations: 1,
+            ..settled_report()
+        };
+        closed_attempt(report).outcome().unwrap();
     }
 
     #[test]
