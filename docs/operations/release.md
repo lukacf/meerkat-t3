@@ -1,6 +1,6 @@
 # Releasing MeerkaT3
 
-MeerkaT3 source uses Meerkat and Meta 0.9.2. There is no current public 0.9-based Mac
+MeerkaT3 source uses the pinned Meerkat Core 0.9.2 backport and registry Meta 0.9.2. There is no current public 0.9-based Mac
 binary yet. Source publication and binary release qualification are separate; an
 old prototype artifact is not the executable for the current source.
 

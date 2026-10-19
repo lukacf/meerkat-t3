@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import re
 import stat
+import subprocess
 import sys
 if sys.version_info < (3, 11):
     raise SystemExit("Native notice preparation requires Python 3.11 or newer (macOS system Python may be older).")
@@ -19,6 +20,7 @@ import tomllib
 TARGET = "aarch64-apple-darwin"
 ROOT_PACKAGES = {"gateway": "meerkat-desktop-stdio", "resourceMonitor": "t3-resource-monitor"}
 HASH = re.compile(r"[0-9a-f]{64}")
+GIT_SOURCE = re.compile(r"git\+https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\?rev=([a-f0-9]{40})#\1")
 
 
 def require(condition, message):
@@ -74,8 +76,9 @@ def read_lock(path):
     for package in tomllib.loads(regular(path).decode())["package"]:
         name, version = package["name"], package["version"]
         source, checksum = package.get("source"), package.get("checksum")
-        require(not source or (source.startswith("registry+") and HASH.fullmatch(checksum or "")),
-                f"Only workspace and checksum-pinned registry packages are supported: {name}@{version}")
+        require(not source or (source.startswith("registry+") and HASH.fullmatch(checksum or ""))
+                or (GIT_SOURCE.fullmatch(source) and checksum is None),
+                f"Expected workspace, checksum-pinned registry, or exact Git commit: {name}@{version}")
         key = f"{name}@{version}"
         require(key not in rows, f"Ambiguous lock identity: {key}")
         rows[key] = dict(key=key, name=name, version=version, source=source, checksum=checksum)
@@ -226,12 +229,25 @@ def derive_graph(context, output):
                 matching.append((package, artifact))
         require(len(matching) == 1, f"Fingerprint has no unique compiler artifact: {unit['id']}")
         package, artifact = matching[0]
-        manifest = Path(package["manifest_path"])
+        manifest = Path(package["manifest_path"]).resolve()
         parsed = tomllib.loads(regular(manifest).decode())
         require(parsed["package"]["name"] == package["name"], "Source manifest changed since metadata")
         version = parsed["package"]["version"]
         if isinstance(version, dict) and version.get("workspace") is True:
-            version = tomllib.loads(regular(context["workspace"] / "Cargo.toml").decode())["workspace"]["package"]["version"]
+            workspace = context["workspace"]
+            if (package.get("source") or "").startswith("git+"):
+                workspace = Path(subprocess.check_output(["git", "-C", str(manifest.parent),
+                    "rev-parse", "--show-toplevel"], text=True).strip())
+                # The supported upstream pin inherits package values from its Git root.
+                # A nested workspace requires its own evidence mapping.
+                require("workspace" not in parsed["package"], "Explicit Git package workspace is unsupported")
+                for parent in manifest.parent.parents:
+                    if parent == workspace:
+                        break
+                    require(not (parent / "Cargo.toml").is_file() or
+                            "workspace" not in tomllib.loads(regular(parent / "Cargo.toml").decode()),
+                            "Nested Git workspace is unsupported")
+            version = tomllib.loads(regular(workspace / "Cargo.toml").decode())["workspace"]["package"]["version"]
         require(version == package["version"], "Source version changed since metadata")
         unit.update(package=package, proc_macro="proc-macro" in artifact["target"]["kind"],
                     manifest={"path": str(manifest), "sha256": digest(manifest)})
@@ -269,7 +285,8 @@ def derive_graph(context, output):
             "root": {"package": ROOT_PACKAGES[context["product"]], "binary": str(binary),
                      "binarySha256": context["binary_hash"], "artifact": str(root["hashed_binary"]),
                      "fingerprintUnit": root["id"]}, "unresolvedEdges": [],
-            "selectedRegistryPackages": [selected[k] for k in sorted(selected) if selected[k]["source"]],
+            "selectedRegistryPackages": [selected[k] for k in sorted(selected) if (selected[k]["source"] or "").startswith("registry+")],
+            "selectedGitPackages": [selected[k] for k in sorted(selected) if (selected[k]["source"] or "").startswith("git+")],
             "selectedWorkspacePackages": [selected[k] for k in sorted(selected) if not selected[k]["source"]],
             "selectedUnitCount": len(evidence), "unitGraph": output.json(f"{context['product']}-units.json", evidence),
             "inputs": context["snapshots"]}
@@ -305,10 +322,16 @@ def prepare(options):
                     "repositoryPath": "core/LICENSE-MIT", "packageManifest": manifest}}]})
                 continue
             if key in rows:
-                require(rows[key]["registrySource"] == pinned["source"] and rows[key]["lockChecksum"] == pinned["checksum"],
+                require((rows[key].get("registrySource") or rows[key].get("gitSource")) == pinned["source"]
+                        and rows[key].get("lockChecksum") == pinned["checksum"],
                         f"Conflicting locked identity: {key}")
                 continue
             cached_source = str(Path(metadata["manifest_path"]).parent) if metadata else None
+            if pinned["source"].startswith("git+"):
+                require(metadata is not None, f"Missing pinned Git metadata: {key}")
+                rows[key] = {"name": pinned["name"], "version": pinned["version"], "gitSource": pinned["source"],
+                             "cachedSource": cached_source, "licenseExpression": metadata.get("license")}
+                continue  # Collector verifies the exact checkout and reads committed notice blobs.
             if cached_source:
                 path = Path(cached_source)
                 require(path.parent.parent.name == "src" and path.parent.parent.parent.name == "registry",
@@ -351,7 +374,8 @@ def prepare(options):
         require(digest(context["binary"]) == context["binary_hash"], "Binary changed during preparation")
     return {"inventory": inventory, "selection": selection, "supplements": supplement_record,
             "products": {p: {"profile": g["profile"], "selectedUnits": g["selectedUnitCount"],
-                             "selectedRegistryPackages": len(g["selectedRegistryPackages"])} for p, g in graphs.items()}}
+                             "selectedRegistryPackages": len(g["selectedRegistryPackages"]),
+                             "selectedGitPackages": len(g["selectedGitPackages"])} for p, g in graphs.items()}}
 
 
 def parser():

@@ -3,7 +3,16 @@
 The supported contributor path is an Apple Silicon Mac with the local Electron,
 web, and server stack. This repository includes the Rust gateway source; a separate
 Meerkat App checkout is not required. The native dependency set is locked to Meerkat
-and Meta 0.9.2 in `core/Cargo.lock`.
+Core 0.9.2 plus the pinned upstream SQLite lifecycle fixes, and registry Meta 0.9.2,
+in `core/Cargo.lock`.
+
+Core is pinned to upstream commit
+[`55fb03e3a5b9bf6d163335a894274b8f782f62cd`](https://github.com/lukacf/meerkat/commit/55fb03e3a5b9bf6d163335a894274b8f782f62cd)
+while the macOS SQLite watcher startup and shutdown fixes await a compatible
+published release. Every Core crate is patched to that same commit in
+`core/Cargo.toml`; Meta remains the published `=0.9.2` package. Do not remove an
+individual patch or follow a moving branch. Replace the complete patch set only
+when the replacement runtime passes native and packaged-app qualification.
 
 ## First checkout
 

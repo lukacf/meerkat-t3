@@ -4,6 +4,7 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
 import * as NodeZlib from "node:zlib";
+import { pinnedGitSource, readPinnedGitPackage } from "./lib/pinned-git-source.mjs";
 
 export const sha256 = (bytes) => NodeCrypto.createHash("sha256").update(bytes).digest("hex");
 const noticeName = /^(?:licen[cs]e|copying|copyright|notice|unlicense)(?:[._-].*)?$/i;
@@ -138,6 +139,9 @@ function publicProduct(graph, locked) {
     selectedRegistryPackages: graph.selectedRegistryPackages.map((item) =>
       publicSelectedPackage(item, locked),
     ),
+    selectedGitPackages: (graph.selectedGitPackages ?? []).map((item) =>
+      publicSelectedPackage(item, locked),
+    ),
     selectedWorkspacePackages: (graph.selectedWorkspacePackages ?? []).map((item) =>
       publicSelectedPackage(item, locked),
     ),
@@ -248,12 +252,19 @@ function lockedPackages(lock) {
         /^[A-Za-z0-9_-]+$/.test(name ?? "") && /^[A-Za-z0-9.+-]+$/.test(version ?? ""),
         "Unsupported Cargo.lock package entry",
       );
-      if (source)
+      if (source?.startsWith("git+")) {
+        pinnedGitSource(source);
+        check(
+          checksum === undefined,
+          "Git packages must use commit provenance, not a registry checksum",
+        );
+      } else if (source) {
         check(
           source.startsWith("registry+") && hashPattern.test(checksum ?? ""),
           `Expected a checksum-pinned registry package: ${name}@${version}`,
         );
-      if (source) publicUrl(source.slice("registry+".length));
+        publicUrl(source.slice("registry+".length));
+      }
       return { key: `${name}@${version}`, name, version, source, checksum };
     });
 }
@@ -343,10 +354,10 @@ export async function collectNativeNotices(options) {
       );
       all.set(item.key, { ...item, products: [...(existing?.products ?? []), product] });
     }
-    for (const item of graph.selectedRegistryPackages) {
+    for (const item of [...graph.selectedRegistryPackages, ...(graph.selectedGitPackages ?? [])]) {
       const pinned = locked.get(item.key);
       check(
-        pinned && pinned.source === item.source && pinned.checksum === item.checksum,
+        pinned && pinned.source === item.source && pinned.checksum === (item.checksum ?? undefined),
         `Selection is outside the lock: ${item.key}`,
       );
       selected.set(item.key, [...(selected.get(item.key) ?? []), { product, roles: item.roles }]);
@@ -365,7 +376,10 @@ export async function collectNativeNotices(options) {
   for (const item of [...all.values()].sort((a, b) => a.key.localeCompare(b.key, "en"))) {
     const known = index.get(item.key);
     check(
-      known?.lockChecksum === item.checksum && known.registrySource === item.source,
+      known &&
+        (item.source.startsWith("git+")
+          ? known.gitSource === item.source && known.lockChecksum === undefined
+          : known.lockChecksum === item.checksum && known.registrySource === item.source),
       `Package index differs from lock: ${item.key}`,
     );
     const record = {
@@ -376,6 +390,31 @@ export async function collectNativeNotices(options) {
         known.licenseExpression == null ? null : publicText(known.licenseExpression),
     };
     packages.push(record);
+    if (item.source.startsWith("git+")) {
+      const git = readPinnedGitPackage(item.source, known.cachedSource);
+      record.manifestSha256 = sha256(git.manifest);
+      record.gitCommitVerified = true;
+      for (const notice of git.notices) {
+        const copied = await write(`git/${item.key}/${safeRelative(notice.path)}`, notice.data);
+        record.notices.push({
+          ...copied,
+          source: {
+            kind: "git-commit",
+            repository: git.repository,
+            commit: git.commit,
+            repositoryPath: notice.path,
+            resolvedRepositoryPath: safeRelative(notice.resolvedPath),
+          },
+        });
+      }
+      if (record.notices.length === 0)
+        missing.push({
+          key: item.key,
+          selected: record.selected.length > 0,
+          reason: "notice-text-unavailable",
+        });
+      continue;
+    }
     const source = known.cachedSource;
     const archive =
       source &&
@@ -488,8 +527,14 @@ export async function collectNativeNotices(options) {
     collectionStatus,
     target: { platform: "macos", arch: "aarch64" },
     sourceInventorySha256: sha256(inventoryBytes),
-    selectedRegistryCount: selected.size,
-    allTargetRegistryCount: all.size,
+    selectedRegistryCount: [...selected.keys()].filter((key) =>
+      all.get(key).source.startsWith("registry+"),
+    ).length,
+    selectedGitCount: [...selected.keys()].filter((key) => all.get(key).source.startsWith("git+"))
+      .length,
+    allTargetRegistryCount: [...all.values()].filter((item) => item.source.startsWith("registry+"))
+      .length,
+    allTargetGitCount: [...all.values()].filter((item) => item.source.startsWith("git+")).length,
     packages,
     workspacePackages: [...workspace.values()],
     missing,
@@ -522,8 +567,14 @@ export async function collectNativeNotices(options) {
   );
   return {
     collectionStatus,
-    selectedRegistryCount: selected.size,
-    allTargetRegistryCount: all.size,
+    selectedRegistryCount: [...selected.keys()].filter((key) =>
+      all.get(key).source.startsWith("registry+"),
+    ).length,
+    selectedGitCount: [...selected.keys()].filter((key) => all.get(key).source.startsWith("git+"))
+      .length,
+    allTargetRegistryCount: [...all.values()].filter((item) => item.source.startsWith("registry+"))
+      .length,
+    allTargetGitCount: [...all.values()].filter((item) => item.source.startsWith("git+")).length,
     noticeFileCount: Object.keys(files).length - 4,
     missing,
     manifestSha256: sha256(await NodeFSP.readFile(NodePath.join(output, "manifest.json"))),

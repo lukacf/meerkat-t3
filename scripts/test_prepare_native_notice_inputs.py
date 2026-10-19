@@ -128,6 +128,106 @@ checksum = "{self.checksum}"
         with self.assertRaises(FileExistsError):
             MODULE.prepare(self.options)
 
+    def use_git_package(self, link_target="../LICENSE-MIT"):
+        checkout = self.root / "git-source"
+        self.package_source = checkout / "demo"
+        write(self.package_source / "Cargo.toml", '[package]\nname = "demo"\nversion.workspace = true\nlicense.workspace = true\n')
+        write(checkout / "Cargo.toml", '[workspace]\nmembers = ["demo"]\n[workspace.package]\nversion = "1.0.0"\nlicense = "MIT"\n')
+        write(checkout / "LICENSE-MIT", "Original Git fixture holder\r\n")
+        (self.package_source / "LICENSE-MIT").symlink_to(link_target)
+        def git(*args):
+            return subprocess.check_output(["git", "-C", str(checkout), *args], stderr=subprocess.DEVNULL).decode().strip()
+        git("init", "--quiet")
+        git("add", ".")
+        git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "commit", "--quiet", "-m", "fixture")
+        revision = git("rev-parse", "HEAD")
+        source = f"git+https://github.com/example/fixture?rev={revision}#{revision}"
+        write(checkout / ".cargo-ok", "")
+        for product in self.products.values():
+            lock = product["workspace"] / "Cargo.lock"
+            lock.write_text(lock.read_text().replace(REGISTRY, source).replace(f'checksum = "{self.checksum}"\n', ""))
+            package = product["metadata"]["packages"][1]
+            old_id = package["id"]
+            package.update(source=source, id=source + "#demo@1.0.0", manifest_path=str(self.package_source / "Cargo.toml"))
+            json_write(product["metadata_path"], product["metadata"])
+            for artifact in product["artifacts"]:
+                if artifact.get("package_id") == old_id:
+                    artifact["package_id"] = package["id"]
+            self.save_messages(product)
+        return checkout, source
+
+    def collect(self, result):
+        return subprocess.run(["node", str(Path(__file__).with_name("collect-native-license-notices.mjs")),
+            "--inventory", result["inventory"]["path"], "--selection", result["selection"]["path"],
+            "--supplements", result["supplements"]["path"], "--t3-license", str(self.source / "LICENSE"),
+            "--output", str(self.root / "collected")], capture_output=True, text=True)
+
+    def test_pinned_git_notices_use_committed_bytes_and_portable_provenance(self):
+        checkout, source = self.use_git_package()
+        result = MODULE.prepare(self.options)
+        graph = json.loads(Path(result["selection"]["path"]).read_text())["products"]["gateway"]
+        self.assertEqual(graph["selectedRegistryPackages"], [])
+        self.assertEqual(graph["selectedGitPackages"][0]["source"], source)
+        process = self.collect(result)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        self.assertEqual(json.loads(process.stdout)["selectedGitCount"], 1)
+        self.assertEqual(json.loads(process.stdout)["collectionStatus"], "collected")
+        inventory_bytes = (self.root / "collected/inventory.json").read_text()
+        self.assertNotIn(str(checkout), inventory_bytes)
+        package = json.loads(inventory_bytes)["packages"][0]
+        self.assertTrue(package["gitCommitVerified"])
+        self.assertEqual(package["notices"][0]["source"]["commit"], source.split("#")[1])
+        self.assertEqual((self.root / "collected" / package["notices"][0]["path"]).read_bytes(), b"Original Git fixture holder\r\n")
+
+    def test_git_collector_rejects_escaping_notice_link(self):
+        self.use_git_package("../../outside")
+        result = MODULE.prepare(self.options)
+        process = self.collect(result)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("escapes its repository", process.stderr)
+
+    def test_git_collector_rejects_cyclic_notice_link(self):
+        self.use_git_package("LICENSE-MIT")
+        result = MODULE.prepare(self.options)
+        process = self.collect(result)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("Cyclic Git notice link", process.stderr)
+
+    def test_git_collector_rejects_changed_checkout(self):
+        self.use_git_package()
+        result = MODULE.prepare(self.options)
+        write(self.package_source / "Cargo.toml", "changed manifest")
+        process = self.collect(result)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("changed or untracked", process.stderr)
+
+    def test_git_collector_rejects_untracked_compilation_inputs(self):
+        self.use_git_package()
+        result = MODULE.prepare(self.options)
+        write(self.package_source / "injected.rs", "unexpected source")
+        process = self.collect(result)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("changed or untracked", process.stderr)
+
+    def test_git_collector_rejects_a_different_checkout_commit(self):
+        checkout, _ = self.use_git_package()
+        result = MODULE.prepare(self.options)
+        subprocess.run(["git", "-C", str(checkout), "-c", "user.name=Fixture",
+            "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false",
+            "commit", "--quiet", "--allow-empty", "-m", "different commit"], check=True)
+        process = self.collect(result)
+        self.assertNotEqual(process.returncode, 0)
+        self.assertIn("differs from the locked commit", process.stderr)
+
+    def test_git_lock_rejects_moving_and_mismatched_revisions(self):
+        _, source = self.use_git_package()
+        lock = self.products["gateway"]["workspace"] / "Cargo.lock"
+        original = lock.read_text()
+        for replacement in (source.replace("?rev=", "?branch="), source[:-40] + "a" * 40):
+            lock.write_text(original.replace(source, replacement))
+            with self.assertRaisesRegex(ValueError, "exact Git commit"):
+                MODULE.read_lock(lock)
+
     def test_host_build_script_and_proc_macro_roles(self):
         product = self.products["gateway"]
         target = product["binary"].parents[2]

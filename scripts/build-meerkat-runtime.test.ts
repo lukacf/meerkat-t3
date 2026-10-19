@@ -17,7 +17,7 @@ describe("Meerkat runtime provisioning lock", () => {
       mobkit: { package: "meerkat-meta", version: "0.9.0" },
     });
   });
-  it("rejects path, git, missing and split dependency sets", () => {
+  it("rejects path, unpinned git, missing and split dependency sets", () => {
     for (const lock of [
       entry("meerkat"),
       entry("meerkat") + entry("meerkat-mobkit").replace('source = "registry+', 'source = "git+'),
@@ -38,4 +38,31 @@ describe("Meerkat runtime provisioning lock", () => {
         ),
       ).toThrow("Both meerkat-meta and meerkat-mobkit");
   });
+});
+
+const revision = "a".repeat(40);
+const gitEntry = (name: string, rev = revision) =>
+  entry(name, "0.9.2")
+    .replace(
+      "registry+https://github.com/rust-lang/crates.io-index",
+      `git+https://github.com/lukacf/meerkat?rev=${rev}#${rev}`,
+    )
+    .replace(/^checksum = .+$/m, "");
+it("accepts one exact upstream Core pin with registry Meta", () => {
+  expect(
+    lockedMeerkatReleases(
+      gitEntry("meerkat") + gitEntry("meerkat-sqlite") + entry("meerkat-meta", "0.9.2"),
+    ),
+  ).toEqual({ meerkat: "0.9.2", mobkit: { package: "meerkat-meta", version: "0.9.2" } });
+});
+it("rejects mixed Core sources, mutable pins and a Git Meta override", () => {
+  for (const core of [
+    gitEntry("meerkat") + entry("meerkat-sqlite", "0.9.2"),
+    gitEntry("meerkat") + gitEntry("meerkat-sqlite", "b".repeat(40)),
+    gitEntry("meerkat").replace("?rev=", "?branch="),
+    gitEntry("meerkat").replace(/#[a-f0-9]+/, "#" + "b".repeat(40)),
+    gitEntry("meerkat").replace("lukacf/meerkat", "unreviewed/meerkat"),
+  ])
+    expect(() => lockedMeerkatReleases(core + entry("meerkat-meta", "0.9.2"))).toThrow();
+  expect(() => lockedMeerkatReleases(gitEntry("meerkat") + gitEntry("meerkat-meta"))).toThrow();
 });

@@ -12,7 +12,7 @@ The repository supplies both steps:
   artifact messages, and the exact executable's fingerprint closure. It produces
   the package index and selected graph required by the collector.
 - `scripts/collect-native-license-notices.mjs` verifies cached crate archives against
-  lock checksums, copies available notice text verbatim, records missing inputs,
+  lock checksums, verifies exact Git checkouts, copies available notice text verbatim, records missing inputs,
   and binds the resulting bundle to both executable and lock hashes.
 
 These commands neither launch the app nor access provider accounts. The preparer
@@ -116,8 +116,8 @@ inputs for a build audit, but distribute only the reviewed bundle.
 
 A debug build can use the same process with its actual `debug` executable and build
 capture. The selection records `debug`; that result is not release-profile
-qualification. Custom profiles, universal binaries, non-Mac targets, git dependencies,
-and vendored-only registries are intentionally unsupported by this preparer. Extend
+qualification. Custom profiles, universal binaries, non-Mac targets, moving Git
+references, and vendored-only registries are intentionally unsupported by this preparer. Extend
 and test the evidence mapping before using those configurations.
 
 ## Review the result
@@ -133,6 +133,17 @@ current MIT declaration checked in metadata. The resource monitor retains this
 repository's `LICENSE`. Third-party archive notices are read directly from
 checksum-verified `.crate` files; the preparer does not trust edited extracted
 notice files in place of their archive.
+
+For Git dependencies, the lock must contain a public GitHub HTTPS URL with a full
+40-character `rev` equal to Cargo's resolved commit. The collector checks checkout
+HEAD and rejects tracked changes or untracked inputs (except Cargo's `.cargo-ok`
+marker). It reads the package manifest and applicable package/ancestor notice
+files directly from that commit's Git objects and checks their checkout bytes.
+Committed relative notice symlinks are resolved only to tracked files inside the
+same repository; escaping links and cycles are rejected.
+The portable inventory records repository, commit, manifest digest and notice
+paths; Git packages have their own selection and counts, without invented registry
+checksums. Run collection before changing or cleaning the Cargo checkout.
 
 Some locked crates do not include their upstream notice text in their published
 archive. `scripts/native-notice-supplements.json` pins the reviewed public source

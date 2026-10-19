@@ -1,6 +1,7 @@
 # MeerkaT3 distribution
 
-This repository contains preview source using Meerkat and Meta 0.9.2. There is no
+This repository contains preview source using the pinned Meerkat Core 0.9.2 backport
+and registry Meta 0.9.2. There is no
 current public 0.9-based Mac binary yet. The supported distribution target is Apple
 Silicon macOS, using ad-hoc signing and manual updates without an Apple Developer
 account. Optional Developer ID signing and notarization require explicitly
