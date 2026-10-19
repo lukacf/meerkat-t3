@@ -224,6 +224,13 @@ fn native_child_build_receives_late_browser_grant_without_replacing_builtins() {
             let restricted = child.resolve_bridge_session_id(&"restricted-worker".into()).await.unwrap();
             assert!(child_grant(&owner, &expected_child(&owner, &restricted).await).await.is_err());
             assert!(registry.shutdown().await.is_empty());
+            drop(child);
+            drop(state);
+            drop(owner);
+            // Actor shutdown does not release the store observers. Drain them
+            // before removing the fixture's SQLite files.
+            let drain = registry.drain_storage_observers().await;
+            assert!(drain.is_empty(), "browser child fixture: {drain:?}");
             std::fs::remove_dir_all(root).unwrap();
         });
     }).unwrap().join().unwrap();
@@ -430,7 +437,10 @@ async fn cold_child_browser_proof() {
         let prior_owner = Arc::downgrade(&owner);
         assert!(registry.shutdown().await.is_empty());
         drop(child);
+        drop(state);
         drop(owner);
+        let drain = registry.drain_storage_observers().await;
+        assert!(drain.is_empty(), "cold browser fixture {attempt}: {drain:?}");
         drop(registry);
         assert!(
             prior_owner.upgrade().is_none(),
