@@ -4,7 +4,7 @@
 
 The current build uses ad-hoc signing and **manual updates**. It does not download or install updates automatically, and **Check for Updates** may say that updates are unavailable. That does not mean a newer Meerkat build does not exist.
 
-No public desktop binary has been released yet. When packages are published, [MeerkaT3 Releases](https://github.com/lukacf/meerkat-t3/releases) will list them with release notes and checksums. If you already have a maintainer-supplied preview, use its replacement DMG or ZIP and the matching SHA-256 checksum. Source users should follow the [development runbook](https://github.com/lukacf/meerkat-t3/blob/main/docs/operations/development.md) to rebuild.
+The current prerelease is [v0.1.0-preview.1](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.1). Its release page provides the DMG, ZIP, installation guide and checksums. Check [MeerkaT3 Releases](https://github.com/lukacf/meerkat-t3/releases) for later versions and use the package and SHA-256 checksum from the same release. Source users should follow the [development runbook](https://github.com/lukacf/meerkat-t3/blob/main/docs/operations/development.md) to rebuild.
 
 Original T3 downloads, Homebrew packages, `t3 update`, and `npx t3` update a different product. They are not an update path for MeerkaT3.
 

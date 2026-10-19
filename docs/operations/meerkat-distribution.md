@@ -1,11 +1,12 @@
 # MeerkaT3 distribution
 
-This repository contains preview source using the pinned Meerkat Core 0.9.2 backport
-and registry Meta 0.9.2. There is no
-current public 0.9-based Mac binary yet. The supported distribution target is Apple
-Silicon macOS, using ad-hoc signing and manual updates without an Apple Developer
-account. Optional Developer ID signing and notarization require explicitly
-configured Apple credentials. Record the actual signing status with each archive.
+The current prerelease is [v0.1.0-preview.1](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.1),
+using the pinned Meerkat Core 0.9.2 backport and registry Meta 0.9.2. The supported
+distribution target is Apple Silicon (arm64) macOS, using ad-hoc signing and manual
+updates without an Apple Developer account. Clean-Mac or isolated-VM verification
+remains deferred for this preview. Optional Developer ID signing and notarization
+require explicitly configured Apple credentials. Record the actual signing status
+with each archive.
 
 The owned destination for qualified binaries is
 [lukacf/meerkat-t3 Releases](https://github.com/lukacf/meerkat-t3/releases). A fresh

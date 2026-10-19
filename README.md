@@ -8,9 +8,9 @@ Study a repository, prepare specialists for its domains, and keep working with t
 
 _Actual MeerkaT3 interface with sample projects and [demonstration content](docs/images/README.md). The screenshots below use the same sample data._
 
-**Source preview:** Apple Silicon Macs, macOS 13 or later. The current source uses Meerkat Core 0.9.2 with a [pinned upstream SQLite lifecycle fix](https://github.com/lukacf/meerkat/commit/55fb03e3a5b9bf6d163335a894274b8f782f62cd), plus Meta 0.9.2. A public desktop installer has not yet been published.
+**Desktop preview:** [v0.1.0-preview.1](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.1) for Apple Silicon Macs (arm64), macOS 13 or later. It uses Meerkat Core 0.9.2 with a [pinned upstream SQLite lifecycle fix](https://github.com/lukacf/meerkat/commit/55fb03e3a5b9bf6d163335a894274b8f782f62cd), plus Meta 0.9.2.
 
-[Build from source](docs/operations/development.md) · [First project](docs/user/getting-started.md) · [User guide](docs/README.md) · [Report an issue](https://github.com/lukacf/meerkat-t3/issues)
+[Download for Apple Silicon](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.1) · [Installation guide](docs/user/install.md) · [First project](docs/user/getting-started.md) · [User guide](docs/README.md) · [Report an issue](https://github.com/lukacf/meerkat-t3/issues)
 
 ## What changes from T3 Code?
 
@@ -47,7 +47,9 @@ Each agent retains its own conversation and checkout. Connections enable communi
 
 ## Get started
 
-Follow [Build from source](docs/operations/development.md) for the pinned Node, pnpm, Rust, and Xcode prerequisites, then:
+Download the DMG or ZIP from the [preview release](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.1), verify its checksum, and follow the [installation guide](docs/user/install.md).
+
+To build it yourself, follow [Build from source](docs/operations/development.md) for the pinned Node, pnpm, Rust, and Xcode prerequisites, then:
 
 ```sh
 git clone https://github.com/lukacf/meerkat-t3.git
@@ -66,7 +68,7 @@ Once the app opens:
 
 The runtime is included; a separate coding-agent CLI is not needed. Model access depends on your accounts, and model credits are not included. Hosted model requests send context to the selected provider. See [Accounts](docs/user/accounts.md) and [Data and privacy](docs/user/telemetry.md).
 
-Windows, Linux, mobile, remote installation, and the original T3 hosted services are outside this preview. Preview packages use ad-hoc signing and manual updates. Future installers and checksums will appear on [Releases](https://github.com/lukacf/meerkat-t3/releases).
+Windows, Linux, mobile, remote installation, and the original T3 hosted services are outside this preview. Preview packages use ad-hoc signing and manual updates. Clean-Mac or isolated-VM installation verification remains deferred for this preview.
 
 ## Documentation and contributing
 

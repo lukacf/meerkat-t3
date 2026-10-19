@@ -1,8 +1,12 @@
 # Releasing MeerkaT3
 
-MeerkaT3 source uses the pinned Meerkat Core 0.9.2 backport and registry Meta 0.9.2. There is no current public 0.9-based Mac
-binary yet. Source publication and binary release qualification are separate; an
-old prototype artifact is not the executable for the current source.
+[v0.1.0-preview.1](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.1)
+is the Apple Silicon (arm64) Mac prerelease using the pinned Meerkat Core 0.9.2
+backport and registry Meta 0.9.2. Its release page provides the DMG, ZIP,
+installation guide and checksums. It uses ad-hoc signing and manual updates.
+Clean-Mac or isolated-VM verification remains deferred, as recorded below.
+Source publication and binary release qualification remain separate; use the
+exact artifacts and limitations recorded for each release.
 
 The owned release destination is
 [lukacf/meerkat-t3](https://github.com/lukacf/meerkat-t3/releases). Never publish to
