@@ -74,15 +74,16 @@ describe("owned fixture server shutdown", () => {
     expect(ownedServerShutdownBudget(352_000)).toBe(397_000);
     expect(ownedServerShutdownBudget(1)).toBe(372_000);
     expect(ownedServerShutdownBudget(360_000)).toBe(405_000);
-    expect(fixtureTimeoutMs(240_000)).toBe(1_205_000);
-    expect(fixtureTimeoutMs(240_000, 1, false)).toBe(645_000);
-    expect(fixtureTimeoutMs(300_000, 2)).toBe(1_670_000);
-    expect(fixtureTimeoutMs(300_000, 2, false)).toBe(1_110_000);
-    for (const invalid of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 360_001])
+    expect(ownedServerShutdownBudget(392_000)).toBe(437_000);
+    expect(fixtureTimeoutMs(240_000)).toBe(1_269_000);
+    expect(fixtureTimeoutMs(240_000, 1, false)).toBe(677_000);
+    expect(fixtureTimeoutMs(300_000, 2)).toBe(1_766_000);
+    expect(fixtureTimeoutMs(300_000, 2, false)).toBe(1_174_000);
+    for (const invalid of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 392_001])
       expect(() => ownedServerShutdownBudget(invalid)).toThrow("native shutdown horizon");
   });
 
-  it("keeps waiting beyond the former 30-second cutoff and accepts ordinary exit", async () => {
+  it("honors the 0.9.10 cleanup horizon beyond the former fixture ceiling", async () => {
     vi.useFakeTimers();
     const exited = Promise.withResolvers<{ code: number | null; signal: null }>();
     const child = { pid: 123, exitCode: null, signalCode: null, kill: vi.fn(() => true) };
@@ -90,12 +91,12 @@ describe("owned fixture server shutdown", () => {
     const closed = closeOwnedServer(
       child,
       exited.promise,
-      ownedServerShutdownBudget(352_000),
+      ownedServerShutdownBudget(392_000),
       requested,
     );
     const settled = vi.fn();
     void closed.then(settled);
-    await vi.advanceTimersByTimeAsync(30_001);
+    await vi.advanceTimersByTimeAsync(420_001);
     expect(settled).not.toHaveBeenCalled();
     expect(child.kill.mock.calls).toEqual([["SIGTERM"]]);
     exited.resolve({ code: 130, signal: null });
@@ -111,11 +112,11 @@ describe("owned fixture server shutdown", () => {
     const closed = closeOwnedServer(
       child,
       exited.promise,
-      ownedServerShutdownBudget(352_000),
+      ownedServerShutdownBudget(392_000),
       vi.fn(),
     );
     const failure = expect(closed).rejects.toThrow("Deadline waiting for owned T3 server shutdown");
-    await vi.advanceTimersByTimeAsync(397_000);
+    await vi.advanceTimersByTimeAsync(437_000);
     await failure;
     await vi.advanceTimersByTimeAsync(60_000);
     expect(child.kill.mock.calls).toEqual([["SIGTERM"]]);

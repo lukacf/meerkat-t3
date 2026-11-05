@@ -79,9 +79,7 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                         meta: None,
                     },
                     meerkat::LlmEvent::Done {
-                        outcome: meerkat::LlmDoneOutcome::Success {
-                            stop_reason: meerkat_core::StopReason::ToolUse,
-                        },
+                        outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
                     },
                 ]
             } else {
@@ -91,9 +89,7 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                         meta: None,
                     },
                     meerkat::LlmEvent::Done {
-                        outcome: meerkat::LlmDoneOutcome::Success {
-                            stop_reason: meerkat_core::StopReason::EndTurn,
-                        },
+                        outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
                     },
                 ]
             };
@@ -326,14 +322,9 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 &meerkat_mobkit::member_comms_id::mob_member_id("ingress"),
             ).await.unwrap();
             assert_eq!(Some(session.to_string()), original.native_session_id);
-            let history = tokio::time::timeout(Duration::from_secs(10), async {
-                loop {
-                    let messages = crate::read_session_history_messages(runtime, &session.to_string()).await.unwrap();
-                    let encoded = serde_json::to_string(&messages).unwrap();
-                    if encoded.contains("tool_process_interrupted") { break encoded; }
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                }
-            }).await.expect("native interrupted-tool notice was not persisted");
+            let history = serde_json::to_string(&crate::read_session_history_messages(runtime, &session.to_string()).await.unwrap()).unwrap();
+            assert!(history.contains("InterruptedByRecovery"), "native recovery must close the interrupted run in its transcript");
+            assert!(history.contains("outcome_uncertain"), "native recovery must preserve uncertainty about the shell effect");
             assert!(history.contains("Execute the deterministic shell fixture once."));
             assert_eq!(client.calls.load(Ordering::SeqCst), 1, "recovery must not call a provider");
             assert_eq!(std::fs::read_to_string(root.join("effect.txt")).unwrap().lines().count(), 1);

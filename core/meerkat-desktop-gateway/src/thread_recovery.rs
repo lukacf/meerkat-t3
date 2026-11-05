@@ -458,9 +458,25 @@ impl MeerkatGateway {
         }
         runtime.mob_handle().ensure_member_live(&member).await.map_err(error)?;
         let machine = mob.session_runtime.as_ref().ok_or_else(|| error("native machine is unavailable"))?;
+        // Bootstrap stages HostPreparation before the first attachment. Stop
+        // that exact registration while held, then let native recovery commit
+        // the interrupted tail before allowing a new user turn.
+        if !machine.list_active_inputs(&session).await.map_err(error)?.is_empty() {
+            let registration = machine.current_session_registration_witness(&session).await
+                .ok_or_else(|| error("Recovery lost its native registration"))?;
+            if !machine.stop_runtime_executor_until_terminal_if_current(
+                &registration, "User requested recovery of interrupted thread work",
+            ).await.map_err(error)? {
+                return Err(error("The native registration changed during recovery"));
+            }
+            runtime.mob_handle().ensure_member_live(&member).await.map_err(error)?;
+        }
         if !machine.list_active_inputs(&session).await.map_err(error)?.is_empty() {
             return Err(error("Native work is still active. Refresh before recovering this operation."));
         }
+        machine.release_run_starts(
+            &session, meerkat_runtime::RunStartHoldReason::HostPreparation,
+        ).await.map_err(error)?;
         Ok(())
     }
 

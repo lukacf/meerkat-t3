@@ -170,6 +170,64 @@ fn workspace_generation(
     format!("{:x}", hash.finalize())
 }
 
+/// Read a dormant session without registering it. Idle remains an observation,
+/// not an ingress fence. Unresolved inputs and incomplete lifecycle records
+/// must not become an idle workspace merely because no executor is loaded.
+async fn cold_session_busy(
+    machine: &meerkat_runtime::MeerkatMachine,
+    session: &meerkat_core::SessionId,
+) -> Option<bool> {
+    use meerkat_runtime::{
+        store::MachineLifecycleObservation, terminal_status::InteractionSelector, RuntimeState,
+    };
+    if machine
+        .current_session_registration_witness(session)
+        .await
+        .is_some()
+    {
+        return None;
+    }
+    let before = machine.observe_cold_runtime_lifecycle(session).await.ok()?;
+    let MachineLifecycleObservation::Decoded { record, .. } = before.lifecycle() else {
+        return None;
+    };
+    if record.run().current_run_id().is_some() {
+        return Some(true);
+    }
+    if record.runtime_state() != Some(RuntimeState::Idle)
+        || record.run().pre_run_phase().is_some()
+        || record.unregister_progress().is_some()
+        || record.placement_witness().is_some()
+        || record.binding().agent_runtime_id().is_some()
+        || record.binding().fence_token().is_some()
+        || record.binding().runtime_generation().is_some()
+        || record.binding().runtime_epoch_id().is_some()
+    {
+        return None;
+    }
+    for input in machine.session_input_states(session).await.ok()?.report {
+        let receipt = machine
+            .input_terminal_receipt_observation(
+                session,
+                InteractionSelector::InputId(input.state.input_id),
+            )
+            .await
+            .ok()??;
+        if !receipt.report.is_resolved() {
+            return Some(true);
+        }
+    }
+    if machine.observe_cold_runtime_lifecycle(session).await.ok()? != before
+        || machine
+            .current_session_registration_witness(session)
+            .await
+            .is_some()
+    {
+        return None;
+    }
+    Some(false)
+}
+
 /// Observes every loaded native service sharing this execution root. The
 /// runtime's complete catalog includes dynamically created and retired sessions.
 /// Unknown states fail closed for file restore. No runtime is materialized.
@@ -217,6 +275,12 @@ async fn workspace_status(gateway: &crate::MeerkatGateway, workspace: &Path) -> 
                     (Ok(RuntimeState::Running), _) => busy = true,
                     (Ok(RuntimeState::Idle | RuntimeState::Attached), Ok(pending)) => {
                         busy |= !pending.is_empty();
+                    }
+                    (Err(meerkat_runtime::RuntimeDriverError::NotFound { .. }), _) => {
+                        match cold_session_busy(machine, session.session_id()).await {
+                            Some(value) => busy |= value,
+                            None => unknown = true,
+                        }
                     }
                     _ => unknown = true,
                 }

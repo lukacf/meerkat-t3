@@ -72,6 +72,7 @@ fn receipt_projection_rejects_foreign_sessions_and_non_work_boundaries() {
             tool_use_id: "callback".into(),
             tool_name: "decision".into(),
             args: json!({}),
+            dedupe_key: None,
         },
         CompletionOutcome::CallbackBatchPending {
             pending_tool_calls: vec![],

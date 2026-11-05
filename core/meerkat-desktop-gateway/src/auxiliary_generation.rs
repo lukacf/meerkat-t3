@@ -662,9 +662,7 @@ mod tests {
                         meta: None,
                     },
                     meerkat::LlmEvent::Done {
-                        outcome: meerkat::LlmDoneOutcome::Success {
-                            stop_reason: StopReason::ToolUse,
-                        },
+                        outcome: meerkat::LlmDoneOutcome::success(StopReason::ToolUse),
                     },
                 ]
             } else {
@@ -674,9 +672,7 @@ mod tests {
                         meta: None,
                     },
                     meerkat::LlmEvent::Done {
-                        outcome: meerkat::LlmDoneOutcome::Success {
-                            stop_reason: StopReason::EndTurn,
-                        },
+                        outcome: meerkat::LlmDoneOutcome::success(StopReason::EndTurn),
                     },
                 ]
             };

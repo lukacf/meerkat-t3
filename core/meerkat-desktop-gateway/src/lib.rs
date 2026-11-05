@@ -5976,9 +5976,7 @@ mod tests {
                 })
                 .chain(futures_util::stream::once(async {
                     Ok(meerkat::LlmEvent::Done {
-                        outcome: meerkat::LlmDoneOutcome::Success {
-                            stop_reason: meerkat_core::StopReason::EndTurn,
-                        },
+                        outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
                     })
                 })),
             )
@@ -7170,6 +7168,7 @@ mod tests {
             }))),
             ("callback", super::native_steering::completion_result(&session, Ok(CompletionOutcome::CallbackPending {
                 tool_use_id: "callback".into(), tool_name: "external_tool".into(), args: json!({}),
+                dedupe_key: None,
             }))),
             ("callback_batch", super::native_steering::completion_result(&session, Ok(CompletionOutcome::CallbackBatchPending { pending_tool_calls: vec![] }))),
             ("channel_closed", super::native_steering::completion_result(&session, Err(CompletionWaitError::ChannelClosed))),
@@ -8015,9 +8014,7 @@ mod tests {
                         meta: None,
                     },
                     meerkat::LlmEvent::Done {
-                        outcome: meerkat::LlmDoneOutcome::Success {
-                            stop_reason: meerkat_core::StopReason::ToolUse,
-                        },
+                        outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
                     },
                 ]
             } else if turn_phase < self.tool_calls_per_turn {
@@ -8040,9 +8037,7 @@ mod tests {
                         meta: None,
                     },
                     meerkat::LlmEvent::Done {
-                        outcome: meerkat::LlmDoneOutcome::Success {
-                            stop_reason: meerkat_core::StopReason::ToolUse,
-                        },
+                        outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
                     },
                 ]
             } else {
@@ -8069,9 +8064,7 @@ mod tests {
                         meta: None,
                     },
                     meerkat::LlmEvent::Done {
-                        outcome: meerkat::LlmDoneOutcome::Success {
-                            stop_reason: meerkat_core::StopReason::EndTurn,
-                        },
+                        outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
                     },
                 ]
             };
@@ -8271,9 +8264,20 @@ mod tests {
         let refreshed = root.console.as_ref().unwrap().list_identities().await.unwrap()
             .into_iter().find(|item| item.labels.get("source_mob_id").map(String::as_str) == Some(child_id.as_str())).unwrap();
         assert!(refreshed.addressable, "resume must refresh actual native capabilities");
-        // Released MobKit owns informational stop/resume turns for an
-        // orchestrator. These are allowed; replaying the old user input is not.
-        assert!(llm.streams.load(Ordering::SeqCst) > streams_before);
+        // Meta owns this informational turn as asynchronous lifecycle work.
+        // Await its observation; returning the resumed handle is not proof
+        // that the turn finished. The original user input must never replay.
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let service = runtime.mob_runtime().session_service().unwrap();
+                if llm.streams.load(Ordering::SeqCst) > streams_before
+                    && !service.read(&session).await.unwrap().state.is_active
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }).await.expect("native resume notification did not settle");
         let requests = llm.observed_requests.lock().unwrap().clone();
         let last: Vec<serde_json::Value> = serde_json::from_str(requests.last().unwrap()).unwrap();
         let user_inputs = last.iter().filter(|message| message["role"] == "user")

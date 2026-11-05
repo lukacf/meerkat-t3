@@ -153,16 +153,12 @@ impl meerkat::LlmClient for EditOncePerRun {
                     meta: None,
                 },
                 meerkat::LlmEvent::Done {
-                    outcome: meerkat::LlmDoneOutcome::Success {
-                        stop_reason: meerkat_core::StopReason::ToolUse,
-                    },
+                    outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
                 },
             ]
         } else {
             vec![meerkat::LlmEvent::Done {
-                outcome: meerkat::LlmDoneOutcome::Success {
-                    stop_reason: meerkat_core::StopReason::EndTurn,
-                },
+                outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
             }]
         };
         Box::pin(futures_util::stream::iter(events.into_iter().map(Ok)))
@@ -226,8 +222,7 @@ async fn idle_workspace(
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
-    .await
-    .expect("native workspace did not become idle")
+    .await.expect("native workspace did not become idle")
 }
 
 #[test]
@@ -341,7 +336,11 @@ fn native_checkpoint_hooks_precede_tools_for_warm_peers_and_restored_sessions() 
             assert_eq!(observer.runtime.as_ref().unwrap().mob_handle().resolve_bridge_session_id(&"observer".into()).await.unwrap(), observer_session);
             assert_ne!(mob.checkpoint_incarnation, first_incarnation);
             wire_sender(runtime).await;
+            let dormant_sender = runtime.mob_handle().resolve_bridge_session_id(&"sender".into()).await.unwrap();
+            let machine = mob.session_runtime.as_ref().unwrap();
+            assert!(machine.current_session_registration_witness(&dormant_sender).await.is_none());
             let after_restart = idle_workspace(&gateway, &input.project_path).await;
+            assert!(machine.current_session_registration_witness(&dormant_sender).await.is_none(), "checkpoint reads must not materialize dormant peers");
             assert_ne!(before_restart.generation, after_restart.generation, "runtime replacement must invalidate restore witnesses");
             for peer in [false,true] {
                 if peer { runtime.mob_handle().send_peer_message("sender".into(),"specialist".into(),"Restored warm peer episode",HandlingMode::Queue).await.unwrap(); }

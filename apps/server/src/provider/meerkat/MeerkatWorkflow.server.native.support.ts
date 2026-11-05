@@ -104,7 +104,9 @@ export async function bounded<A>(work: Promise<A>, stage: string, timeoutMs = 30
   }
 }
 
-const maximumNativeShutdownHorizonMs = 360_000;
+// Core/Meta 0.9.10 advertises 377s, plus the gateway's 15s outer margin.
+// Preflight refuses a later runtime exceeding this qualified fixture ceiling.
+const maximumNativeShutdownHorizonMs = 392_000;
 const gatewayShutdownFloorMs = 342_000;
 const gatewayShutdownMarginMs = 15_000;
 const serverShutdownMarginMs = 30_000;
@@ -117,7 +119,7 @@ export function ownedServerShutdownBudget(nativeShutdownHorizonMs: number): numb
   )
     throw new Error("The pinned native shutdown horizon is missing or exceeds the fixture budget");
   // Match the production gateway's native horizon plus margin, then leave the
-  // server time to finish its remaining finalizers. Current 0.9.2: 397 seconds.
+  // server time to finish its remaining finalizers. Current 0.9.10: 437 seconds.
   return (
     Math.max(gatewayShutdownFloorMs, nativeShutdownHorizonMs + gatewayShutdownMarginMs) +
     serverShutdownMarginMs
@@ -157,9 +159,9 @@ export async function closeOwnedServer(
   if (
     !Number.isSafeInteger(shutdownTimeoutMs) ||
     shutdownTimeoutMs < 1 ||
-    shutdownTimeoutMs > 420_000
+    shutdownTimeoutMs > ownedServerShutdownBudget(maximumNativeShutdownHorizonMs)
   )
-    throw new Error("Owned server shutdown budget must be bounded to at most seven minutes");
+    throw new Error("Owned server shutdown budget exceeds the qualified native cleanup horizon");
   let requestedTermination = false;
   if (child.pid !== undefined && child.exitCode === null && child.signalCode === null) {
     if (child.kill("SIGTERM")) {

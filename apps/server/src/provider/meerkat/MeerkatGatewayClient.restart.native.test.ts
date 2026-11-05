@@ -523,7 +523,7 @@ enabled = false
             env,
             requestTimeoutMs: 15_000,
             // Omit the override: the production client uses health's native
-            // horizon plus its 15s margin (currently 337s + 15s = 352s).
+            // horizon plus its 15s margin, including after a runtime upgrade.
           });
           const processEvidence: ProcessEvidence = {
             phase,

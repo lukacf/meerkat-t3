@@ -65,7 +65,7 @@ impl meerkat::LlmClient for InspectChildCatalog {
             meerkat_core::StopReason::EndTurn
         };
         events.push(meerkat::LlmEvent::Done {
-            outcome: meerkat::LlmDoneOutcome::Success { stop_reason },
+            outcome: meerkat::LlmDoneOutcome::success(stop_reason),
         });
         Box::pin(futures_util::stream::iter(events.into_iter().map(Ok)))
     }

@@ -1639,6 +1639,14 @@ async fn bootstrap_local_runtime_with_provider_persistence(
             &input.state_root, &input.mob_id, &input.coordinator_identity,
         )?
     } else { None };
+    // Explicit recovery must not auto-resume a retained run at attachment.
+    // The recovery owner releases this native hold only after native stop and
+    // tail settlement, preserving the original session without provider work.
+    if let Some(session) = recovery_session.as_ref() {
+        runtime_adapter.stage_registration_run_start_hold_only(
+            session, meerkat_runtime::RunStartHoldReason::HostPreparation,
+        );
+    }
     let coordinator_resume_session_id = durable_member_session_id(
         session_service.as_ref(),
         &input.mob_id,
@@ -2643,9 +2651,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                         meta: None,
                     },
                     meerkat::LlmEvent::Done {
-                        outcome: meerkat::LlmDoneOutcome::Success {
-                            stop_reason: meerkat_core::StopReason::ToolUse,
-                        },
+                        outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
                     },
                 ]
             } else {
@@ -2678,9 +2684,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                         meta: None,
                     },
                     meerkat::LlmEvent::Done {
-                        outcome: meerkat::LlmDoneOutcome::Success {
-                            stop_reason: meerkat_core::StopReason::EndTurn,
-                        },
+                        outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
                     },
                 ]
             };
@@ -2991,21 +2995,21 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                         assert!(!request.tools.iter().any(|tool| matches!(tool.name.as_str(), "shell" | "write_file" | "shared_workspace" | "browser")));
                     }
                     vec![meerkat::LlmEvent::ToolCallComplete { id: "read-proof".into(), name: "workspace_read_file".into(), args: json!({"path":"source.txt"}), meta: None },
-                         meerkat::LlmEvent::Done { outcome: meerkat::LlmDoneOutcome::Success { stop_reason: meerkat_core::StopReason::ToolUse } }]
+                         meerkat::LlmEvent::Done { outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse) }]
                 }
                 1 if self.collaborate => {
                     let result = latest.expect("read result");
                     assert!(!result.is_error, "{}", result.text_content());
                     assert!(result.text_content().contains("native reader composition works"));
                     vec![meerkat::LlmEvent::ToolCallComplete { id: "peer-proof".into(), name: "peers".into(), args: json!({}), meta: None },
-                         meerkat::LlmEvent::Done { outcome: meerkat::LlmDoneOutcome::Success { stop_reason: meerkat_core::StopReason::ToolUse } }]
+                         meerkat::LlmEvent::Done { outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse) }]
                 }
                 phase if phase == if self.collaborate { 2 } else { 1 } => {
                     let result = latest.expect("read result");
                     assert!(!result.is_error, "{}", result.text_content());
                     if !self.collaborate { assert!(result.text_content().contains("native reader composition works")); }
                     vec![meerkat::LlmEvent::ToolCallComplete { id: "denied-shell".into(), name: "shell".into(), args: json!({"command":format!("touch '{}'", self.marker.display())}), meta: None },
-                         meerkat::LlmEvent::Done { outcome: meerkat::LlmDoneOutcome::Success { stop_reason: meerkat_core::StopReason::ToolUse } }]
+                         meerkat::LlmEvent::Done { outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse) }]
                 }
                 _ => {
                     let result = latest.expect("shell denial");
@@ -3017,7 +3021,7 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                     assert_eq!(failure["error"], denied, "{}", result.text_content());
                     assert!(!self.marker.exists());
                     vec![meerkat::LlmEvent::TextDelta { delta: "Read-only enforcement verified.".into(), meta: None },
-                         meerkat::LlmEvent::Done { outcome: meerkat::LlmDoneOutcome::Success { stop_reason: meerkat_core::StopReason::EndTurn } }]
+                         meerkat::LlmEvent::Done { outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn) }]
                 }
             };
             Box::pin(futures_util::stream::iter(events.into_iter().map(Ok)))

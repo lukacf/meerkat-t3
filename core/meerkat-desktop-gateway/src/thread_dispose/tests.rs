@@ -238,6 +238,9 @@ fn late_child_input_is_interrupted_while_the_same_shutdown_future_is_pending() {
 #[test]
 fn held_child_root_is_retained_until_native_stand_down_retry_releases_it() {
     run(async {
+        let stand_down_wait =
+            meerkat_mobkit::unified_runtime::lifecycle::MOB_TERMINAL_SHUTDOWN_BUDGET
+                + Duration::from_secs(5);
         let fixture = Fixture(
             std::env::temp_dir().join(format!("disposal-child-retry-{}", uuid::Uuid::new_v4())),
         );
@@ -269,7 +272,7 @@ fn held_child_root_is_retained_until_native_stand_down_retry_releases_it() {
         ));
         entered_rx.await.unwrap();
 
-        let first = tokio::time::timeout(Duration::from_secs(30), registry.remove(&spec.mob_id))
+        let first = tokio::time::timeout(stand_down_wait, registry.remove(&spec.mob_id))
             .await
             .unwrap()
             .unwrap_err();
@@ -287,7 +290,7 @@ fn held_child_root_is_retained_until_native_stand_down_retry_releases_it() {
         // The root actor is already terminal. Repeating its Shutdown would
         // lose the successful phase receipt and skip child stand-down. The
         // exact child owner must instead report the work still held.
-        let retry = tokio::time::timeout(Duration::from_secs(30), registry.remove(&spec.mob_id))
+        let retry = tokio::time::timeout(stand_down_wait, registry.remove(&spec.mob_id))
             .await
             .unwrap()
             .unwrap_err();

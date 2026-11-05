@@ -41,9 +41,7 @@ impl meerkat::LlmClient for ScheduleLlm {
                     meta: None,
                 },
                 meerkat::LlmEvent::Done {
-                    outcome: meerkat::LlmDoneOutcome::Success {
-                        stop_reason: meerkat_core::StopReason::EndTurn,
-                    },
+                    outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
                 },
             ]
         } else {
@@ -66,9 +64,7 @@ impl meerkat::LlmClient for ScheduleLlm {
                     meta: None,
                 },
                 meerkat::LlmEvent::Done {
-                    outcome: meerkat::LlmDoneOutcome::Success {
-                        stop_reason: meerkat_core::StopReason::ToolUse,
-                    },
+                    outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
                 },
             ]
         };

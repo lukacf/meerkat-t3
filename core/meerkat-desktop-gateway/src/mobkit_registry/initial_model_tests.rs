@@ -42,9 +42,7 @@ impl meerkat::LlmClient for LlmRecorder {
                 meta: None,
             }),
             Ok(meerkat::LlmEvent::Done {
-                outcome: meerkat::LlmDoneOutcome::Success {
-                    stop_reason: meerkat_core::StopReason::EndTurn,
-                },
+                outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
             }),
         ]))
     }

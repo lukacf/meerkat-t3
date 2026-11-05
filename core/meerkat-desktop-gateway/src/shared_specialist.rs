@@ -765,9 +765,7 @@ provider_default = true
                         meta: None,
                     },
                     meerkat::LlmEvent::Done {
-                        outcome: meerkat::LlmDoneOutcome::Success {
-                            stop_reason: meerkat_core::StopReason::ToolUse,
-                        },
+                        outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::ToolUse),
                     },
                 ]
             } else {
@@ -777,9 +775,7 @@ provider_default = true
                         meta: None,
                     },
                     meerkat::LlmEvent::Done {
-                        outcome: meerkat::LlmDoneOutcome::Success {
-                            stop_reason: meerkat_core::StopReason::EndTurn,
-                        },
+                        outcome: meerkat::LlmDoneOutcome::success(meerkat_core::StopReason::EndTurn),
                     },
                 ]
             };
