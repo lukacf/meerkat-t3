@@ -55,6 +55,11 @@ const threadId = ThreadId.make("steering-boundary-thread");
 const modelSelection = { instanceId, model: workflowModel };
 const now = () => DateTime.formatIso(DateTime.nowUnsafe());
 const encodeEvidence = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeNativeRunIdentity = Schema.decodeUnknownOption(
+  Schema.Struct({
+    identity: Schema.Struct({ interaction_id: Schema.String, run_id: Schema.String }),
+  }),
+);
 const surfaces = ["thread", "project-agent", "owned-child"] as const;
 
 async function initializeRepository(path: string, env: NodeJS.ProcessEnv) {
@@ -501,15 +506,33 @@ describe.skipIf(!serverEntry || !runtimeDirectory)(
                         .find((entry) => entry.agentRef === targetRef);
                       expect(agent?.record.session_id).toBe(sessionId);
                       if (agent?.work?.status === "idle" && agent.work.outcome === finalText) {
+                        evidence.publicCompletion = agent.work.latestCompletion;
                         expect(agent.work.latestCompletion?.status).toBe("completed");
                         if (surface === "owned-child") {
-                          expect(agent.work.latestCompletion).toMatchObject({
-                            kind: "runtime_input",
-                            sessionId,
-                            runId: originalRun,
-                          });
+                          // Current native releases attribute an initial child
+                          // turn to an interaction. Older unkeyed starts use
+                          // the exact session/input/run receipt instead.
+                          const originalMessage = saved.find(
+                            (message) => transcriptUserCount([message], startText) === 1,
+                          );
+                          const nativeIdentity = Option.getOrUndefined(
+                            decodeNativeRunIdentity(originalMessage),
+                          )?.identity;
+                          evidence.originalIdentity = nativeIdentity;
+                          if (nativeIdentity) {
+                            expect(nativeIdentity.run_id).toBe(originalRun);
+                            expect(agent.work.latestCompletion).toMatchObject({
+                              interactionId: nativeIdentity.interaction_id,
+                            });
+                          } else {
+                            expect(agent.work.latestCompletion).toMatchObject({
+                              kind: "runtime_input",
+                              sessionId,
+                              inputId: original.input_id,
+                              runId: originalRun,
+                            });
+                          }
                         }
-                        evidence.publicCompletion = agent.work.latestCompletion;
                         return;
                       }
                     }
