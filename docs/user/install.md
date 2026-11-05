@@ -2,7 +2,7 @@
 
 ## Preview availability
 
-[MeerkaT3 v0.1.0-preview.1](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.1) is available as an Apple Silicon desktop prerelease. The source is available in [lukacf/meerkat-t3](https://github.com/lukacf/meerkat-t3), and contributors can [build from source](https://github.com/lukacf/meerkat-t3/blob/main/docs/operations/development.md).
+[MeerkaT3 v0.1.0-preview.2](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.2) is available as an Apple Silicon desktop prerelease. The source is available in [lukacf/meerkat-t3](https://github.com/lukacf/meerkat-t3), and contributors can [build from source](https://github.com/lukacf/meerkat-t3/blob/main/docs/operations/development.md).
 
 The current desktop preview targets Apple Silicon Macs (arm64) running macOS 13 or later. Check **Apple menu > About This Mac** for an Apple M-series chip. Intel Mac, Windows, Linux, mobile, and remote-host workflows are outside this preview. Clean-Mac or isolated-VM installation verification remains deferred for this preview.
 
@@ -10,7 +10,7 @@ You need a supported provider account with access to the model you select, an in
 
 ## Get and open the app
 
-Get the DMG or ZIP, matching checksums and standalone installation guide from the [v0.1.0-preview.1 release](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.1). Updates are [manual](updating.md); the app does not install them automatically.
+Get the DMG or ZIP, matching checksums and standalone installation guide from the [v0.1.0-preview.2 release](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.2). Updates are [manual](updating.md); the app does not install them automatically.
 
 1. Obtain the Apple Silicon DMG or ZIP and its SHA-256 checksum for the exact file and version. Use a package and checksum supplied together by the maintainers; do not substitute a T3 Code download.
 2. Compare the downloaded file's checksum with the value published for that release. In Terminal, type `shasum -a 256 `, drag the DMG or ZIP into the window, and press Return. If the values differ, request a fresh download.

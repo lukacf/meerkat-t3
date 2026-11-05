@@ -289,6 +289,11 @@ pub(super) fn completion_result(
             None => Ok(()),
         },
         CompletionOutcome::CompletedWithoutResult => Ok(()),
+        // Core only returns this from a receipt read, never a live waiter.
+        // Fail the wait explicitly if that contract changes; do not resubmit.
+        CompletionOutcome::OutcomeUnknown { run_id } => Err(crate::RunFailure::Failed(
+            format!("The outcome of steering run {run_id} is unknown. Inspect its saved work before sending again."),
+        )),
         CompletionOutcome::Cancelled => Err(crate::RunFailure::Cancelled),
         CompletionOutcome::Abandoned { reason, .. }
         | CompletionOutcome::AbandonedWithError { reason, .. }

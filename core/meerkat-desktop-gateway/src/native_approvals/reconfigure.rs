@@ -50,6 +50,17 @@ impl SessionRuntimeLlmReconfigureService for ApprovalReconfigureService {
             .session_metadata()
             .and_then(|metadata| metadata.realm_id))
     }
+
+    async fn live_session_own_operator_instruction_entry_placement(
+        &self,
+        id: &SessionId,
+    ) -> Result<meerkat_core::InstructionEntryPlacement, SessionError> {
+        self.0
+            .export_live_session(id)
+            .await?
+            .own_operator_instruction_entry_placement()
+            .map_err(|error| SessionError::Agent(error.into()))
+    }
     async fn live_tool_visibility_state(
         &self,
         id: &SessionId,

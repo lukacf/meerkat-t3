@@ -68,6 +68,7 @@ fn all_explicit_openai_levels_include_none_without_becoming_default() {
 #[test]
 fn anthropic_keeps_independent_effort_and_thinking_including_nonpreset_values() {
     for (thinking, expected) in [
+        (AnthropicThinkingConfig::Disabled, "disabled"),
         (AnthropicThinkingConfig::Adaptive, "adaptive"),
         (
             AnthropicThinkingConfig::Enabled {

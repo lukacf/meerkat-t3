@@ -92,10 +92,14 @@ fn terminal(
             ));
         }
     }
-    // A context-only append is not completed user work. Callback boundaries
-    // remain pending. All success/failure classification, including extraction
-    // errors, otherwise stays with Meerkat's public canonical mapping.
-    if matches!(outcome, CompletionOutcome::CompletedWithoutResult) {
+    // Neither a context-only append nor an unknown recovered outcome proves
+    // completed user work. Never publish a failure notification that might
+    // invite redelivery of an input whose original run may have acted on it.
+    // Other classifications stay with Meerkat's public canonical mapping.
+    if matches!(
+        outcome,
+        CompletionOutcome::CompletedWithoutResult | CompletionOutcome::OutcomeUnknown { .. }
+    ) {
         return Ok(None);
     }
     Ok(match interaction_terminal_event(interaction, outcome) {
@@ -244,6 +248,9 @@ fn native_terminal(
             }
         }
         CompletionOutcome::CompletedWithoutResult
+        // Recovery can know an input was consumed without knowing its result.
+        // Do not publish a terminal notification or trigger redelivery from it.
+        | CompletionOutcome::OutcomeUnknown { .. }
         | CompletionOutcome::CallbackPending { .. }
         | CompletionOutcome::CallbackBatchPending { .. } => return Ok(None),
         CompletionOutcome::Cancelled => InteractionFailureReason::Cancelled,

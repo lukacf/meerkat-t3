@@ -344,9 +344,41 @@ pub(crate) struct ApprovalAgentBuilder {
     pub(crate) browser_children: Option<crate::browser_bridge::BrowserChildTools>,
 }
 
+impl ApprovalAgentBuilder {
+    fn compose_build(&self, build: &mut meerkat_core::service::SessionBuildOptions) {
+        if let Some(browser_children) = &self.browser_children {
+            browser_children.compose(build);
+        }
+        if let Some(approvals) = &self.approvals {
+            build.tool_dispatch_admission = Some(Arc::new(ApprovalAdmission {
+                approvals: approvals.clone(),
+                preceding: build.tool_dispatch_admission.take(),
+            }));
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl SessionAgentBuilder for ApprovalAgentBuilder {
     type Agent = FactoryAgent;
+
+    fn session_comms_identity_root(&self) -> meerkat_core::SessionCommsIdentityRoot {
+        self.inner.session_comms_identity_root()
+    }
+
+    async fn instruction_lowering_for_identity(
+        &self,
+        identity: &meerkat_core::SessionLlmIdentity,
+    ) -> Option<meerkat_core::InstructionLowering> {
+        self.inner.instruction_lowering_for_identity(identity).await
+    }
+
+    async fn recorded_auth_binding(
+        &self,
+        binding: &meerkat_core::AuthBindingRef,
+    ) -> Result<Option<meerkat_core::AuthBindingRef>, SessionError> {
+        self.inner.recorded_auth_binding(binding).await
+    }
 
     async fn model_supports_inline_video(
         &self,
@@ -373,15 +405,7 @@ impl SessionAgentBuilder for ApprovalAgentBuilder {
             return self.inner.build_agent(req, event_tx).await;
         }
         let mut build = req.build.clone().unwrap_or_default();
-        if let Some(browser_children) = &self.browser_children {
-            browser_children.compose(&mut build);
-        }
-        if let Some(approvals) = &self.approvals {
-            build.tool_dispatch_admission = Some(Arc::new(ApprovalAdmission {
-                approvals: approvals.clone(),
-                preceding: build.tool_dispatch_admission.take(),
-            }));
-        }
+        self.compose_build(&mut build);
         let gated = CreateSessionRequest {
             model: req.model.clone(),
             prompt: req.prompt.clone(),
@@ -395,6 +419,17 @@ impl SessionAgentBuilder for ApprovalAgentBuilder {
             labels: req.labels.clone(),
         };
         self.inner.build_agent(&gated, event_tx).await
+    }
+
+    async fn build_agent_taking_tools(
+        &self,
+        req: &mut CreateSessionRequest,
+        event_tx: mpsc::Sender<meerkat_core::AgentEvent>,
+    ) -> Result<FactoryAgent, SessionError> {
+        if self.approvals.is_some() || self.browser_children.is_some() {
+            self.compose_build(req.build.get_or_insert_with(Default::default));
+        }
+        self.inner.build_agent_taking_tools(req, event_tx).await
     }
 }
 

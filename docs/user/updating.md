@@ -4,7 +4,7 @@
 
 The current build uses ad-hoc signing and **manual updates**. It does not download or install updates automatically, and **Check for Updates** may say that updates are unavailable. That does not mean a newer Meerkat build does not exist.
 
-The current prerelease is [v0.1.0-preview.1](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.1). Its release page provides the DMG, ZIP, installation guide and checksums. Check [MeerkaT3 Releases](https://github.com/lukacf/meerkat-t3/releases) for later versions and use the package and SHA-256 checksum from the same release. Source users should follow the [development runbook](https://github.com/lukacf/meerkat-t3/blob/main/docs/operations/development.md) to rebuild.
+The current prerelease is [v0.1.0-preview.2](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.2). Its release page provides the DMG, ZIP, installation guide and checksums. Check [MeerkaT3 Releases](https://github.com/lukacf/meerkat-t3/releases) for later versions and use the package and SHA-256 checksum from the same release. Source users should follow the [development runbook](https://github.com/lukacf/meerkat-t3/blob/main/docs/operations/development.md) to rebuild.
 
 Original T3 downloads, Homebrew packages, `t3 update`, and `npx t3` update a different product. They are not an update path for MeerkaT3.
 
@@ -17,6 +17,18 @@ Original T3 downloads, Homebrew packages, `t3 update`, and `npx t3` update a dif
 5. Open the replacement from Applications, approve it in macOS if prompted as described in [installation](install.md#if-macos-asks-you-to-approve-the-app), and check its version. Check the provider connection, then reopen a saved task. Connect a saved specialist if needed; its current model and reasoning level become visible after connecting. Inspect recovery notices before retrying interrupted work.
 
 Restarting can interrupt active agents and terminal commands. Saved history is not proof that an interrupted external action did or did not finish. Do not delete the profile as part of an update.
+
+## Upgrading from preview.1
+
+Preview.2 upgrades the embedded runtime from Core and Meta 0.9.2 to 0.9.10.
+Quit all MeerkaT3 clients and servers using the profile and make the offline backup
+before the first launch. Reopen saved specialists and conversations in the new app.
+Update both sides of any shared workspace or peer connection together.
+
+New runtime inputs and operator-instruction records are not readable by the old
+runtime. To return to preview.1, restore the pre-upgrade backup into a separate
+profile and use its matching old app. Do not open the upgraded profile with the old
+binary or copy individual databases between the profiles.
 
 ## When an update fails
 

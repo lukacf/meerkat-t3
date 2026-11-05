@@ -1,8 +1,8 @@
 # Releasing MeerkaT3
 
-[v0.1.0-preview.1](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.1)
-is the Apple Silicon (arm64) Mac prerelease using the pinned Meerkat Core 0.9.2
-backport and registry Meta 0.9.2. Its release page provides the DMG, ZIP,
+[v0.1.0-preview.2](https://github.com/lukacf/meerkat-t3/releases/tag/v0.1.0-preview.2)
+is the Apple Silicon (arm64) Mac prerelease using registry Meerkat Core and
+Meta 0.9.10 from the monorepo release. Its release page provides the DMG, ZIP,
 installation guide and checksums. It uses ad-hoc signing and manual updates.
 Clean-Mac or isolated-VM verification remains deferred, as recorded below.
 Source publication and binary release qualification remain separate; use the
@@ -55,7 +55,7 @@ limitation notes. Keep a previous compatible installer and the offline recovery
 instructions available. If bytes or dependencies change after acceptance, build and
 verify a new candidate; do not silently replace a published artifact.
 
-Clean-Mac or isolated-VM verification is deferred for `0.1.0-preview.1`. Keep that
+Clean-Mac or isolated-VM verification is deferred for `0.1.0-preview.2`. Keep that
 gap in the candidate's qualification record and preview limitations until it is
 completed. Testing on an existing Mac does not satisfy the clean-install check.
 
@@ -108,5 +108,5 @@ Use the [native notice capture procedure](native-notices.md) after the final nat
 changes. Reuse the captured binaries during packaging; do not rebuild a monitor
 or provision another gateway against an older notice bundle. A successful
 `--plan` or `--check` validates configuration only. Earlier 0.9.1 integration
-results and screenshots remain historical evidence until the candidate's 0.9.2
+results and screenshots remain historical evidence until the candidate's own
 artifacts complete the relevant checks.

@@ -35,6 +35,19 @@ fn target(session: &SessionId) -> ConsoleExpectedTarget {
 }
 
 #[test]
+fn recovered_unknown_outcome_is_not_a_terminal_notification() {
+    let session = SessionId::new();
+    let outcome = CompletionOutcome::OutcomeUnknown {
+        run_id: RunId::new(),
+    };
+    assert_eq!(native_terminal(&session, &outcome).unwrap(), None);
+    assert_eq!(
+        terminal(&session, InteractionId::new(), outcome).unwrap(),
+        None
+    );
+}
+
+#[test]
 fn receipt_projection_rejects_foreign_sessions_and_non_work_boundaries() {
     let session = SessionId::new();
     let interaction = InteractionId::new();

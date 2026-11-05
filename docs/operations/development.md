@@ -3,16 +3,15 @@
 The supported contributor path is an Apple Silicon Mac with the local Electron,
 web, and server stack. This repository includes the Rust gateway source; a separate
 Meerkat App checkout is not required. The native dependency set is locked to Meerkat
-Core 0.9.2 plus the pinned upstream SQLite lifecycle fixes, and registry Meta 0.9.2,
-in `core/Cargo.lock`.
+Core and Meta 0.9.10, published together from the
+[Meerkat monorepo](https://github.com/lukacf/meerkat/releases/tag/v0.9.10),
+in `core/Cargo.lock`. Every native Meerkat dependency uses an exact `=0.9.10`
+registry requirement. The previous Core Git backport is no longer needed.
 
-Core is pinned to upstream commit
-[`55fb03e3a5b9bf6d163335a894274b8f782f62cd`](https://github.com/lukacf/meerkat/commit/55fb03e3a5b9bf6d163335a894274b8f782f62cd)
-while the macOS SQLite watcher startup and shutdown fixes await a compatible
-published release. Every Core crate is patched to that same commit in
-`core/Cargo.toml`; Meta remains the published `=0.9.2` package. Do not remove an
-individual patch or follow a moving branch. Replace the complete patch set only
-when the replacement runtime passes native and packaged-app qualification.
+Upgrade Core and Meta together. Retain the lockfile and qualify both native and
+packaged-app behavior before shipping a new dependency set. Older binaries cannot
+read all state written by 0.9.10; keep an offline profile backup and its matching
+app for recovery, as described in [updating](../user/updating.md).
 
 ## First checkout
 
@@ -255,7 +254,7 @@ loopback TLS transport, not a physical remote deployment or production reverse
 proxy. It does not disable certificate verification globally.
 
 The dated results below used Meerkat and Meta 0.9.1. They retain the identity of
-those historical artifacts; rerun the fixtures for a 0.9.2 candidate.
+those historical artifacts; rerun the fixtures for each new candidate.
 
 The strengthened expansion fixture passed on 2026-10-17 in 94.79 seconds with
 three real servers, no provider errors, and owned cleanup complete. It qualified

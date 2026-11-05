@@ -4239,27 +4239,9 @@ fn process_agent_event_envelope(
                 state,
             ));
         }
-        AgentEvent::ToolExecutionCompleted {
-            id,
-            name,
-            content,
-            is_error,
-            ..
-        } => {
-            state.assistant_delta_text.clear();
-            events.extend(normalize_tool_execution_completed(
-                thread_id,
-                run_id,
-                created_at,
-                &json!({
-                    "id": id,
-                    "name": name,
-                    "content": content,
-                    "is_error": is_error,
-                }),
-                state,
-            ));
-        }
+        // Core 0.9.5+ emits the body only on ToolResultReceived. Finalizing
+        // from the execution receipt could publish an empty result first.
+        AgentEvent::ToolExecutionCompleted { .. } => {}
         AgentEvent::TextComplete { content, .. } => {
             // TextComplete is a per-model-turn boundary, not a run terminal.
             // It is emitted before tool calls are dispatched and may occur
@@ -5859,7 +5841,7 @@ mod tests {
     use meerkat_core::lifecycle::run_primitive::{
         ProviderTag, ReasoningEffort, TurnMetadataOverride,
     };
-    use meerkat_core::types::{SessionId, Usage};
+    use meerkat_core::types::{ContentBlock, SessionId, Usage};
     use meerkat_core::Provider;
     use meerkat_desktop_contracts::{RequestContext, RpcId, RpcRequest};
     use meerkat_mob::MobMemberKickoffPhase;
@@ -6649,6 +6631,47 @@ mod tests {
             native_state.mob_destroy(&child_id).await.unwrap();
             destroy_real_mobkit_host_tool_fixture(gateway, &fixture, &project_path, &state_root)
                 .await;
+        }
+    }
+
+    #[test]
+    fn native_tool_result_survives_execution_receipt_in_either_order() {
+        for completion_first in [true, false] {
+            let (tx, mut rx) = tokio::sync::broadcast::channel(8);
+            let mut state = LiveEventAssembler::default();
+            let mut emitted = false;
+            let session = SessionId::new();
+            let completion = AgentEvent::ToolExecutionCompleted {
+                id: "command-1".into(),
+                name: "shell".into(),
+                is_error: true,
+                duration_ms: 5,
+            };
+            let result = AgentEvent::ToolResultReceived {
+                id: "command-1".into(),
+                name: "shell".into(),
+                content: vec![ContentBlock::Text {
+                    text: "exit status 7".into(),
+                }],
+                is_error: true,
+            };
+            let pair = if completion_first {
+                [completion, result]
+            } else {
+                [result, completion]
+            };
+            for (seq, event) in pair.into_iter().enumerate() {
+                let envelope = EventEnvelope::new_session(session.clone(), seq as u64, None, event);
+                process_agent_event_envelope(
+                    &envelope, "thread", "run", &mut state, &tx, &mut emitted,
+                )
+                .unwrap();
+            }
+            let event = rx.try_recv().expect("tool result emitted");
+            assert_eq!(event.payload["output"], "exit status 7");
+            assert_eq!(event.payload["isError"], true);
+            assert_eq!(event.payload["toolId"], "command-1");
+            assert!(rx.try_recv().is_err(), "one result per tool call");
         }
     }
 
@@ -8426,6 +8449,7 @@ mod tests {
             .send(meerkat_core::comms::CommsCommand::PeerMessage {
                 to: meerkat_core::comms::PeerRoute::new(initial_child_peer),
                 body: "autonomous-peer-before-resume-900".into(),
+                in_reply_to: None,
                 blocks: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 content_taint: None,
@@ -8820,6 +8844,7 @@ mod tests {
             .send(meerkat_core::comms::CommsCommand::PeerMessage {
                 to: meerkat_core::comms::PeerRoute::new(initial_child_peer),
                 body: "autonomous-peer-after-resume-903".into(),
+                in_reply_to: None,
                 blocks: None,
                 handling_mode: meerkat_core::types::HandlingMode::Queue,
                 content_taint: None,

@@ -70,6 +70,7 @@ fn reasoning(provider: Provider, params: Option<&ProviderParamsOverride>) -> Rea
                 values.push(Setting::new(Parameter::Effort, effort.as_legacy_str()));
             }
             let thinking = match tag.thinking.as_ref() {
+                Some(AnthropicThinkingConfig::Disabled) => Some("disabled".to_string()),
                 Some(AnthropicThinkingConfig::Adaptive) => Some("adaptive".to_string()),
                 Some(AnthropicThinkingConfig::BetweenTools) => Some("between_tools".to_string()),
                 Some(AnthropicThinkingConfig::Enabled { budget_tokens }) => {

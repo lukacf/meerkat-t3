@@ -744,6 +744,7 @@ pub async fn send_peer_message(
         .send(CommsCommand::PeerMessage {
             to: route,
             body: content.to_string(),
+            in_reply_to: None,
             blocks: None,
             handling_mode,
             // Inherit the runtime-level outbound taint declaration (0.7.15
@@ -1597,11 +1598,11 @@ async fn bootstrap_local_runtime_with_provider_persistence(
                 }),
             },
             64, session_store, Arc::clone(&runtime_store), blob_store,
-        ))))
+        ).with_canonical_runtime_adapter(runtime_adapter.clone()))))
     } else {
         (Some(Arc::new(PersistentSessionService::new(
             builder, 64, session_store, Arc::clone(&runtime_store), blob_store,
-        ))), None)
+        ).with_canonical_runtime_adapter(runtime_adapter.clone()))), None)
     };
     let reconfigure_service: Arc<
         dyn meerkat::session_runtime::llm_reconfigure::SessionRuntimeLlmReconfigureService,
@@ -1682,6 +1683,7 @@ async fn bootstrap_local_runtime_with_provider_persistence(
     } else { desktop_access_mode };
     let mut spec = MobBootstrapSpec::new(definition, storage, session_service)
         .with_mob_storage_provenance(storage_provenance)
+        .with_durable_runtime_store(&runtime_store)
         .with_child_mob_storage(meerkat_mobkit::ChildMobStorage::Durable(storage_layout.clone()))
         .with_meta_storage_layout(storage_layout)
         .with_session_runtime_adapter(runtime_adapter.clone())
@@ -2097,6 +2099,11 @@ fn migrate_stored_mob_events_v8_to_v9(mob_db_path: &std::path::Path) -> Result<u
                 })?;
             match version {
                 CURRENT_STORED_MOB_EVENT_SCHEMA_VERSION => {}
+                version if version == u64::from(meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION) => {
+                    // This adapter only upgrades historical v8 envelopes.
+                    // Current instruction events remain byte-for-byte; Core
+                    // validates their stored payload when opening the mob.
+                }
                 LEGACY_STORED_MOB_EVENT_SCHEMA_VERSION => {
                     let event = object.get("event").cloned().ok_or_else(|| {
                         format!("stored MobKit event {cursor} has no event payload")
@@ -2115,7 +2122,7 @@ fn migrate_stored_mob_events_v8_to_v9(mob_db_path: &std::path::Path) -> Result<u
                 }
                 unsupported => {
                     return Err(format!(
-                        "stored MobKit event {cursor} uses unsupported schema_version={unsupported}; expected 8 or 9"
+                        "stored MobKit event {cursor} uses unsupported schema_version={unsupported}"
                     ));
                 }
             }
@@ -3254,6 +3261,15 @@ for await (const line of readline.createInterface({input: process.stdin})) {
             },
         }))
         .expect("encode v9 event");
+        let instructions = serde_json::to_vec(&serde_json::json!({
+            "schema_version": meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION,
+            "event": {
+                "cursor": 3,
+                "timestamp": "2026-07-26T10:00:02Z",
+                "mob_id": "migration-fixture",
+                "kind": {"type": "member_instruction_targets_recorded", "members": []}
+            }
+        })).expect("encode current instruction event");
         connection
             .execute(
                 "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
@@ -3266,6 +3282,10 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                 rusqlite::params![2_i64, "migration-fixture", v9.clone()],
             )
             .expect("insert v9 event");
+        connection.execute(
+            "INSERT INTO mob_events (cursor, mob_id, event_json) VALUES (?1, ?2, ?3)",
+            rusqlite::params![3_i64, "migration-fixture", instructions.clone()],
+        ).expect("insert instruction event");
         drop(connection);
 
         assert_eq!(
@@ -3292,7 +3312,11 @@ for await (const line of readline.createInterface({input: process.stdin})) {
                     .expect("numeric migrated version")
             })
             .collect();
-        assert_eq!(versions, vec![9, 9]);
+        assert_eq!(versions, vec![9, 9, u64::from(meerkat_core::OPERATOR_INSTRUCTION_MOB_EVENT_SCHEMA_VERSION)]);
+        let untouched_instructions: Vec<u8> = migrated.query_row(
+            "SELECT event_json FROM mob_events WHERE cursor = 3", [], |row| row.get(0),
+        ).expect("read instruction event");
+        assert_eq!(untouched_instructions, instructions, "native instruction records must not be rewritten");
         let untouched_v9: Vec<u8> = migrated
             .query_row(
                 "SELECT event_json FROM mob_events WHERE cursor = 2",
