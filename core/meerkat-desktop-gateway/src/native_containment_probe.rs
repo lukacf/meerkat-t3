@@ -322,6 +322,14 @@ with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
                 &meerkat_mobkit::member_comms_id::mob_member_id("ingress"),
             ).await.unwrap();
             assert_eq!(Some(session.to_string()), original.native_session_id);
+            let machine = restored.session_runtime.as_ref().unwrap();
+            assert!(machine.resumable_run_id(&session).await.is_none());
+            assert!(!machine.registration_run_start_hold_staged(
+                &session, meerkat_runtime::RunStartHoldReason::ToolsNotPublished,
+            ), "successful recovery must release its host hold");
+            assert!(!machine.registration_run_start_hold_staged(
+                &session, meerkat_runtime::RunStartHoldReason::HostPreparation,
+            ), "recovery must not acquire the mob's role-move hold");
             let history = serde_json::to_string(&crate::read_session_history_messages(runtime, &session.to_string()).await.unwrap()).unwrap();
             assert!(history.contains("InterruptedByRecovery"), "native recovery must close the interrupted run in its transcript");
             assert!(history.contains("outcome_uncertain"), "native recovery must preserve uncertainty about the shell effect");

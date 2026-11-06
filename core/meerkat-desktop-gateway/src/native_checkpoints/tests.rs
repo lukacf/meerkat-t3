@@ -226,6 +226,95 @@ async fn idle_workspace(
 }
 
 #[test]
+fn cold_checkpoint_observation_detects_delivery_without_materializing_session() {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .thread_stack_size(16 * 1024 * 1024)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let fixture = Fixture(
+                        std::env::temp_dir()
+                            .join(format!("checkpoint-cold-delivery-{}", uuid::Uuid::new_v4(),)),
+                    );
+                    let mut input = input(&fixture.0);
+                    input.mob_id = format!("checkpoint-cold-delivery-{}", uuid::Uuid::new_v4());
+                    std::fs::create_dir_all(&input.project_path).unwrap();
+                    let llm = Arc::new(EditOncePerRun {
+                        calls: AtomicUsize::new(0),
+                        marker: input.project_path.join("unexpected-effect"),
+                    });
+                    let registry = ProjectMobkitRegistry::new_with_test_llm(
+                        HostToolTransport::new(),
+                        llm.clone(),
+                    );
+                    let mob = registry.create_local(input.clone()).await.unwrap();
+                    let session = mob
+                        .runtime
+                        .as_ref()
+                        .unwrap()
+                        .mob_handle()
+                        .resolve_bridge_session_id(&"specialist".into())
+                        .await
+                        .unwrap();
+                    assert!(registry.shutdown().await.is_empty());
+                    drop(mob);
+                    drop(registry);
+
+                    let path = input
+                        .state_root
+                        .join("mobkit")
+                        .join(crate::stable_slug(&input.mob_id))
+                        .join("runtime.sqlite");
+                    let store: Arc<dyn meerkat_runtime::RuntimeStore> =
+                        Arc::new(meerkat_runtime::store::SqliteRuntimeStore::new(path).unwrap());
+                    let machine = meerkat_runtime::MeerkatMachine::persistent_without_blobs(
+                        Arc::clone(&store),
+                    )
+                    .unwrap();
+                    assert_eq!(cold_session_busy(&machine, &session).await, Some(false));
+                    let runtime_id = machine
+                        .observe_cold_runtime_lifecycle(&session)
+                        .await
+                        .unwrap()
+                        .runtime_id()
+                        .clone();
+                    meerkat_runtime::RuntimeDeliveryInbox::new(store)
+                        .submit(
+                            &runtime_id,
+                            meerkat_runtime::RuntimeDeliverySubmission::new(
+                                meerkat_runtime::RuntimeDeliveryId::new(
+                                    "checkpoint-pending-delivery",
+                                )
+                                .unwrap(),
+                                meerkat_runtime::RuntimeDeliveryKind::JobTerminal,
+                                "checkpoint-job",
+                                1,
+                                "checkpoint-interaction",
+                                b"fixture".to_vec(),
+                            )
+                            .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(cold_session_busy(&machine, &session).await, Some(true));
+                    assert!(machine
+                        .current_session_registration_witness(&session)
+                        .await
+                        .is_none());
+                    assert_eq!(llm.calls.load(Ordering::SeqCst), 0);
+                });
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn native_checkpoint_hooks_precede_tools_for_warm_peers_and_restored_sessions() {
     std::thread::Builder::new().stack_size(32 * 1024 * 1024).spawn(|| {
         tokio::runtime::Builder::new_multi_thread().worker_threads(2).thread_stack_size(16 * 1024 * 1024).enable_all().build().unwrap().block_on(async {

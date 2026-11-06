@@ -178,7 +178,7 @@ async fn cold_session_busy(
     session: &meerkat_core::SessionId,
 ) -> Option<bool> {
     use meerkat_runtime::{
-        store::MachineLifecycleObservation, terminal_status::InteractionSelector, RuntimeState,
+        store::MachineLifecycleObservation, RuntimeRecoveryWork, RuntimeState,
     };
     if machine
         .current_session_registration_witness(session)
@@ -205,17 +205,16 @@ async fn cold_session_busy(
     {
         return None;
     }
-    for input in machine.session_input_states(session).await.ok()?.report {
-        let receipt = machine
-            .input_terminal_receipt_observation(
-                session,
-                InteractionSelector::InputId(input.state.input_id),
-            )
-            .await
-            .ok()??;
-        if !receipt.report.is_resolved() {
-            return Some(true);
-        }
+    // The native boot query also covers provisional tails, pending terminal
+    // owners and background work that a scan of input rows cannot see.
+    let obligations = machine.boot_recovery_obligations().await.ok()?;
+    let RuntimeRecoveryWork::Observed(recovery_work) = obligations.recovery_work else {
+        return None;
+    };
+    if recovery_work.contains(before.runtime_id()) || !obligations.pending_deliveries.is_empty() {
+        // Deliveries can address a member rather than its current session.
+        // Conservatively keep this mob's workspace busy for any such backlog.
+        return Some(true);
     }
     if machine.observe_cold_runtime_lifecycle(session).await.ok()? != before
         || machine

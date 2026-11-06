@@ -84,7 +84,9 @@ jobs:
       - name: Test native contracts and lifecycle
         run: scripts/repo-cargo test --locked -p meerkat-desktop-contracts -p meerkat-desktop-gateway -p meerkat-desktop-stdio -- --test-threads=2
       - name: Build native test executable
-        run: scripts/repo-cargo build --locked -p meerkat-desktop-stdio
+        # Reuse the test profile's dependency artifacts. Switching to dev here
+        # recompiles the entire runtime with different codegen settings.
+        run: scripts/repo-cargo build --locked --profile test -p meerkat-desktop-stdio
       - name: Resolve the exact built executable
         shell: bash
         run: |

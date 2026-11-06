@@ -456,26 +456,39 @@ impl MeerkatGateway {
         if restored.as_ref() != Some(&session) {
             return Err(error("Recovery did not preserve the original native session"));
         }
-        runtime.mob_handle().ensure_member_live(&member).await.map_err(error)?;
         let machine = mob.session_runtime.as_ref().ok_or_else(|| error("native machine is unavailable"))?;
-        // Bootstrap stages HostPreparation before the first attachment. Stop
+        if !machine.registration_run_start_hold_staged(
+            &session, meerkat_runtime::RunStartHoldReason::ToolsNotPublished,
+        ) {
+            return Err(error("Recovery does not own the native run-start hold"));
+        }
+        runtime.mob_handle().ensure_member_live(&member).await.map_err(error)?;
+        // Bootstrap stages ToolsNotPublished before the first attachment. Stop
         // that exact registration while held, then let native recovery commit
         // the interrupted tail before allowing a new user turn.
-        if !machine.list_active_inputs(&session).await.map_err(error)?.is_empty() {
+        for _ in 0..3 {
+            if machine.list_active_inputs(&session).await.map_err(error)?.is_empty()
+                && machine.resumable_run_id(&session).await.is_none() {
+                break;
+            }
             let registration = machine.current_session_registration_witness(&session).await
                 .ok_or_else(|| error("Recovery lost its native registration"))?;
             if !machine.stop_runtime_executor_until_terminal_if_current(
                 &registration, "User requested recovery of interrupted thread work",
             ).await.map_err(error)? {
-                return Err(error("The native registration changed during recovery"));
+                // A stale witness never stops its replacement. That replacement
+                // is still held; capture its exact authority on the next attempt.
+                tokio::task::yield_now().await;
+                continue;
             }
             runtime.mob_handle().ensure_member_live(&member).await.map_err(error)?;
         }
-        if !machine.list_active_inputs(&session).await.map_err(error)?.is_empty() {
+        if !machine.list_active_inputs(&session).await.map_err(error)?.is_empty()
+            || machine.resumable_run_id(&session).await.is_some() {
             return Err(error("Native work is still active. Refresh before recovering this operation."));
         }
         machine.release_run_starts(
-            &session, meerkat_runtime::RunStartHoldReason::HostPreparation,
+            &session, meerkat_runtime::RunStartHoldReason::ToolsNotPublished,
         ).await.map_err(error)?;
         Ok(())
     }

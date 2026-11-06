@@ -1642,9 +1642,17 @@ async fn bootstrap_local_runtime_with_provider_persistence(
     // Explicit recovery must not auto-resume a retained run at attachment.
     // The recovery owner releases this native hold only after native stop and
     // tail settlement, preserving the original session without provider work.
+    // This composition publishes tools in its default provider and does not
+    // install Meta's identity customizer. Its pending-tools hold must never be
+    // shared with recovery; holds have no per-owner reference count.
     if let Some(session) = recovery_session.as_ref() {
+        if runtime_adapter.registration_run_start_hold_staged(
+            session, meerkat_runtime::RunStartHoldReason::ToolsNotPublished,
+        ) {
+            return Err("Cannot recover while another host owns pending tool publication".into());
+        }
         runtime_adapter.stage_registration_run_start_hold_only(
-            session, meerkat_runtime::RunStartHoldReason::HostPreparation,
+            session, meerkat_runtime::RunStartHoldReason::ToolsNotPublished,
         );
     }
     let coordinator_resume_session_id = durable_member_session_id(

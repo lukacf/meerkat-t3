@@ -113,10 +113,12 @@ scripts/repo-cargo test --locked \
 ```
 
 The wrapper prints its cache and target paths with `scripts/repo-cargo --print-env`.
-Build a debug executable for the actual Node-to-native boundary tests:
+Build a debug executable with the same test profile for the actual Node-to-native
+boundary tests. This reuses the native test dependencies instead of compiling the
+runtime again with the default development profile:
 
 ```sh
-scripts/repo-cargo build --locked -p meerkat-desktop-stdio
+scripts/repo-cargo build --locked --profile test -p meerkat-desktop-stdio
 native_target_dir="$(scripts/repo-cargo --print-env | sed -n 's/^CARGO_TARGET_DIR=//p')"
 T3CODE_TEST_MEERKAT_BINARY="$native_target_dir/debug/meerkat-desktop-stdio" \
   pnpm --dir apps/server exec vp test run \
